@@ -1,0 +1,3196 @@
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+
+package org.siloserver.silo.tv.ui.screens.detail
+
+import org.siloserver.silo.common.i18n.UiText
+import org.siloserver.silo.common.i18n.errorText
+import org.siloserver.silo.model.playback.withPendingSeriesSubtitleChoice
+import org.siloserver.silo.model.playback.withPendingSeriesAudioChoice
+import org.siloserver.silo.model.playback.matchesSignature
+import kotlinx.coroutines.flow.stateIn
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import org.siloserver.silo.common.player.PlaybackCapabilityDetector
+import org.siloserver.silo.common.player.TrackSelectionPresets
+import org.siloserver.silo.common.player.video.EpisodeSelectionHandoff
+import org.siloserver.silo.common.player.video.EpisodeSubtitleIntent
+import org.siloserver.silo.common.player.video.EpisodeSubtitleMode
+import org.siloserver.silo.common.player.video.captureEpisodeSourceIntent
+import org.siloserver.silo.common.player.video.captureEpisodeSubtitleIntent
+import org.siloserver.silo.common.player.video.resolveEpisodeSubtitleIntent
+import org.siloserver.silo.common.player.video.resolveEpisodeSourceIntent
+import org.siloserver.silo.common.settings.PlayerSettingsStore
+import org.siloserver.silo.common.settings.dolbyVisionPolicySnapshot
+import org.siloserver.silo.domain.settings.ProfileSettingsController
+import org.siloserver.silo.model.catalog.BrowseItem
+import org.siloserver.silo.model.catalog.CastMember
+import org.siloserver.silo.model.catalog.withTranslatedDescription
+import org.siloserver.silo.model.catalog.withEpisodeDescription
+import org.siloserver.silo.model.catalog.EpisodeListItem
+import org.siloserver.silo.model.catalog.FileVersion
+import org.siloserver.silo.model.catalog.ItemDetail
+import org.siloserver.silo.model.catalog.LeafItemUserData
+import org.siloserver.silo.model.catalog.Season
+import org.siloserver.silo.model.catalog.SeasonUserData
+import org.siloserver.silo.model.catalog.isAudiobookItemType
+import org.siloserver.silo.model.catalog.initialSeasonDisplayPlan
+import org.siloserver.silo.model.catalog.sortedForDisplay
+import org.siloserver.silo.model.catalog.pendingEpisodeTranslationLanguage
+import org.siloserver.silo.model.playback.combinedSubtitleSelectionIndexes
+import org.siloserver.silo.model.playback.ClientCodecCapabilities
+import org.siloserver.silo.model.playback.buildPlaybackSubtitleChoices
+import org.siloserver.silo.playback.SUBTITLE_OFF_FINGERPRINT
+import org.siloserver.silo.playback.audioTrackFingerprint
+import org.siloserver.silo.playback.resolveAudioTrackOrdinal
+import org.siloserver.silo.playback.resolveSubtitleTrackOrdinal
+import org.siloserver.silo.playback.subtitleTrackFingerprint
+import org.siloserver.silo.model.section.SectionItem
+import org.siloserver.silo.network.ApiResult
+import org.siloserver.silo.network.isAccessRefusal
+import org.siloserver.silo.network.IdentityTransitionBarrier
+import org.siloserver.silo.network.IdentityTransitionPhase
+import org.siloserver.silo.network.TokenManager
+import org.siloserver.silo.repository.ArtworkSurface
+import org.siloserver.silo.repository.CatalogRepository
+import org.siloserver.silo.repository.PersonalDataRepository
+import org.siloserver.silo.repository.ProfileRepository
+import org.siloserver.silo.repository.port.LocalTrackSelection
+import org.siloserver.silo.repository.port.NoOpUserItemStatePort
+import org.siloserver.silo.repository.port.UserItemStatePort
+import org.siloserver.silo.tv.ui.util.isTvHiddenMediaType
+import org.siloserver.silo.tv.ui.util.visibleOnTv
+import org.siloserver.silo.viewmodel.applyLocalPlaybackProgress
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import org.siloserver.silo.common.R as CommonR
+
+data class TvItemDetailUiState(
+    val isLoading: Boolean = true,
+    val detail: ItemDetail? = null,
+    val error: UiText? = null,
+    // User state toggles.
+    val isFavorite: Boolean = false,
+    val inWatchlist: Boolean = false,
+    val isWatched: Boolean = false,
+    val isTogglingFavorite: Boolean = false,
+    val isTogglingWatchlist: Boolean = false,
+    val isTogglingWatched: Boolean = false,
+    val userRating: Int? = null,
+    val isTogglingRating: Boolean = false,
+    // Series navigation (only relevant when detail.type == "series").
+    val seasons: List<Season> = emptyList(),
+    val selectedSeason: Int? = null,
+    val episodes: List<EpisodeListItem> = emptyList(),
+    val carouselEpisodes: List<EpisodeListItem> = emptyList(),
+    val carouselPreviousSeason: Int? = null,
+    val carouselNextSeason: Int? = null,
+    val carouselJump: TvEpisodeCarouselJump? = null,
+    val carouselLoadError: Boolean = false,
+    val episodeFavoriteStates: Map<String, Boolean> = emptyMap(),
+    /** The route's one-shot episode target has been applied (or safely rejected). */
+    val entryEpisodeSelectionApplied: Boolean = false,
+    val seasonsLoading: Boolean = false,
+    val episodesLoading: Boolean = false,
+    // Version selection for multi-file items.
+    val selectedFileId: Int? = null,
+    // Pre-playback track selection (null = use server/auto default). Subtitle
+    // index -1 means "Off". Reset whenever the version changes since each file
+    // has its own track lists.
+    val selectedAudioIndex: Int? = null,
+    /**
+     * True only when the viewer picked the audio here, this session.
+     *
+     * A restored durable value and a fresh pick both land in
+     * [selectedAudioIndex], and the player cannot tell them apart from the
+     * ordinal alone — so a restore would masquerade as a new decision and pin
+     * itself onto every later episode.
+     */
+    val audioPickedThisSession: Boolean = false,
+    val selectedSubtitleIndex: Int? = null,
+    // Catalog-backed related shelf. This is a same-type / same-primary-genre
+    // browse query until the server exposes an item-specific related endpoint.
+    val moreLikeThis: List<SectionItem> = emptyList(),
+    val moreLikeThisLoading: Boolean = false,
+    /** The box set this movie belongs to, for the box set row after the extras; null for none. */
+    val boxSet: org.siloserver.silo.model.catalog.CatalogBoxSet? = null,
+    /** [boxSet]'s movies in release order, as row cards. */
+    val boxSetItems: List<SectionItem> = emptyList(),
+    // --- Next-up episode (series / season detail only) ---
+    // The episode the hero Play button targets: an in-progress episode if one
+    // exists, else the first unwatched, else the first. Mirrors silo-apple's
+    // `nextUpEpisode`.
+    val nextUpEpisode: EpisodeListItem? = null,
+    /**
+     * Whether [nextUpEpisode] belongs to the currently selected season and is
+     * safe to launch. During a season swap the old episode remains only as a
+     * geometry placeholder so the stable action row does not jump.
+     */
+    val nextUpTargetReady: Boolean = false,
+    // The next-up episode's loaded playback detail (versions / tracks). Loaded
+    // asynchronously whenever the next-up episode changes — analogue of Apple's
+    // `nextUpPlaybackDetail`.
+    val nextUpPlaybackDetail: ItemDetail? = null,
+    val isLoadingNextUpPlaybackDetail: Boolean = false,
+    val didLoadNextUpPlaybackDetail: Boolean = false,
+    // Per-next-up version / track overrides (separate from the container's
+    // selectedFileId/audio/subtitle, which series/season detail does not use).
+    val selectedNextUpFileId: Int? = null,
+    val selectedNextUpAudioIndex: Int? = null,
+    /** As [audioPickedThisSession], for the series/season next-up selector. */
+    val nextUpAudioPickedThisSession: Boolean = false,
+    val selectedNextUpSubtitleIndex: Int? = null,
+    val preferredQuality: String = "auto",
+    val preferredAudioLanguage: String? = null,
+    val audioSelectionCapabilities: ClientCodecCapabilities? = null,
+    // Cascaded subtitle preferences that annotate the selector row's Auto
+    // preview ("Auto - <track>" / "Auto - None") so it previews the SAME track
+    // the player would auto-select. Resolved canonically — see
+    // [loadSubtitlePreferences]; the profile columns are only the fallback for
+    // a server that cannot resolve. `preferredSubtitleLanguage` null is "no
+    // preference" and "" is "no subtitles"; showForced defaults to true when
+    // unset, as the player state does.
+    val preferredSubtitleLanguage: String? = null,
+    val subtitleMode: String? = null,
+    val showForcedSubtitles: Boolean = true,
+    /**
+     * Series subtitle choices this profile made that have not reached the
+     * server yet, by series key. They outrank the details' effective fields,
+     * which still describe the older choice.
+     */
+    val pendingSeriesSubtitleChoices: Map<String, org.siloserver.silo.model.playback.PendingSeriesSubtitleChoice> = emptyMap(),
+    /** [pendingSeriesSubtitleChoices] for audio. */
+    val pendingSeriesAudioChoices: Map<String, org.siloserver.silo.model.playback.PendingSeriesAudioChoice> = emptyMap(),
+    /**
+     * Series choices picked on this page, by series key. Kept after their
+     * write lands: the loaded details still describe the older choice until
+     * they are read again, and the previews must not fall back to it.
+     */
+    val pickedSeriesSubtitleChoices: Map<String, org.siloserver.silo.model.playback.PendingSeriesSubtitleChoice> = emptyMap(),
+    val pickedSeriesAudioChoices: Map<String, org.siloserver.silo.model.playback.PendingSeriesAudioChoice> = emptyMap(),
+    /**
+     * The effective fields each pick was laid over. A pick stops applying once
+     * a refreshed detail answers differently: the server then holds it, or a
+     * newer choice made elsewhere (in the player, on another device).
+     */
+    val pickedSubtitleBaselines: Map<String, org.siloserver.silo.model.playback.PickedSubtitleBaseline> = emptyMap(),
+    val pickedAudioBaselines: Map<String, org.siloserver.silo.model.playback.PickedAudioBaseline> = emptyMap(),
+) {
+    /** What this page knows newer than [detail]: its own picks, and any choice still unsent. */
+    fun subtitleOverlayFor(detail: ItemDetail?): Map<String, org.siloserver.silo.model.playback.PendingSeriesSubtitleChoice> {
+        val picked = pickedSeriesSubtitleChoices.filterKeys { key ->
+            val baseline = pickedSubtitleBaselines[key]
+            baseline == null || detail == null || !baseline.supersededBy(detail)
+        }
+        return picked + pendingSeriesSubtitleChoices
+    }
+
+    /** [subtitleOverlayFor] for audio. */
+    fun audioOverlayFor(detail: ItemDetail?): Map<String, org.siloserver.silo.model.playback.PendingSeriesAudioChoice> {
+        val picked = pickedSeriesAudioChoices.filterKeys { key ->
+            val baseline = pickedAudioBaselines[key]
+            baseline == null || detail == null || !baseline.supersededBy(detail)
+        }
+        return picked + pendingSeriesAudioChoices
+    }
+}
+
+
+
+/**
+ * This device's per-file memory for [version] filtered by the server's series
+ * choices: the Auto preview already shows them, and a stale local pick that
+ * conflicts with them would otherwise override them. See
+ * [org.siloserver.silo.model.playback.localSubtitleMemoryForSeriesChoice] for
+ * subtitles; audio only restores the track the server's effective answer names.
+ */
+internal fun org.siloserver.silo.repository.port.LocalTrackSelection.withSeriesTrackChoices(
+    detail: ItemDetail,
+    version: FileVersion,
+    pendingSubtitles: Map<String, org.siloserver.silo.model.playback.PendingSeriesSubtitleChoice> = emptyMap(),
+    pendingAudio: Map<String, org.siloserver.silo.model.playback.PendingSeriesAudioChoice> = emptyMap(),
+    subtitleResetToAuto: Boolean = false,
+): org.siloserver.silo.repository.port.LocalTrackSelection {
+    val key = org.siloserver.silo.model.playback.seriesTrackChoiceKey(detail.seriesId, detail.contentId)
+    val audioTracks = version.audioTracks.orEmpty()
+    val served = detail.withPendingSeriesSubtitleChoice(key?.let(pendingSubtitles::get))
+    return copy(
+        subtitleFingerprint = org.siloserver.silo.model.playback.localSubtitleMemoryForSeriesChoice(
+            localPreference = subtitleFingerprint,
+            serverChoiceKnown = true,
+            signature = served.effectiveSubtitleTrackSignature,
+            candidates = org.siloserver.silo.model.playback.catalogAutoSubtitleCandidates(
+                version.subtitleTracks.orEmpty(),
+            ),
+            effectiveMode = served.effectiveSubtitleMode,
+            resetToAuto = subtitleResetToAuto,
+        ),
+        audioFingerprint = org.siloserver.silo.model.playback.localAudioMemoryForSeriesChoice(
+            localFingerprint = audioFingerprint,
+            tracks = audioTracks,
+            serverOrdinal = version.withPendingSeriesAudioChoice(key?.let(pendingAudio::get)).effectiveAudioTrackIndex,
+            resetToAuto = key?.let(pendingAudio::get)?.let { it.choice == null } == true,
+        ),
+    )
+}
+
+/**
+ * The Auto preview's subtitle context for [playbackDetail] (the item Play
+ * starts): the server-resolved choice the player will also start from —
+ * including a choice remembered for the series and its track signature — over
+ * the profile's own preferences, which remain the fallback.
+ */
+internal fun TvItemDetailUiState.subtitleAutoContext(
+    playbackDetail: ItemDetail?,
+    audioLanguage: String?,
+): TvPlaybackFormatting.SubtitleAutoContext {
+    val detail = playbackDetail?.withPendingSeriesSubtitleChoice(
+        org.siloserver.silo.model.playback.seriesTrackChoiceKey(playbackDetail.seriesId, playbackDetail.contentId)
+            ?.let(subtitleOverlayFor(playbackDetail)::get),
+    )
+    return TvPlaybackFormatting.SubtitleAutoContext(
+        preferredLanguage = detail?.effectiveSubtitleLanguage?.takeIf { it.isNotBlank() }
+            ?: preferredSubtitleLanguage,
+        mode = detail?.effectiveSubtitleMode?.takeIf { it.isNotBlank() } ?: subtitleMode,
+        showForced = detail?.effectiveShowForcedSubtitles ?: showForcedSubtitles,
+        audioLanguage = audioLanguage,
+        trackSignature = detail?.effectiveSubtitleTrackSignature,
+    )
+}
+
+/**
+ * The audio and subtitle this process remembered for an item (a pick on its
+ * detail page, or what the last playback of it ended on), kept only where the
+ * series choice does not contradict it. Online the series choice — the
+ * server's effective fields, with an unsent pick laid over them — is newer:
+ * it may come from another device or a later pick, and a stale session value
+ * shown as a selection would also be sent as the start's explicit track.
+ */
+internal fun sessionTracksConsistentWithSeriesChoice(
+    detail: ItemDetail,
+    version: FileVersion?,
+    audio: Int?,
+    subtitle: Int?,
+    pendingSubtitles: Map<String, org.siloserver.silo.model.playback.PendingSeriesSubtitleChoice> = emptyMap(),
+    pendingAudio: Map<String, org.siloserver.silo.model.playback.PendingSeriesAudioChoice> = emptyMap(),
+): Pair<Int?, Int?> {
+    version ?: return audio to subtitle
+    val key = org.siloserver.silo.model.playback.seriesTrackChoiceKey(detail.seriesId, detail.contentId)
+    val expectedAudio = version.withPendingSeriesAudioChoice(key?.let(pendingAudio::get)).effectiveAudioTrackIndex
+    val keptAudio = audio?.takeIf { expectedAudio == null || it == expectedAudio }
+    val served = detail.withPendingSeriesSubtitleChoice(key?.let(pendingSubtitles::get))
+    val seriesOff = served.effectiveSubtitleMode?.trim().equals("off", ignoreCase = true)
+    val signature = served.effectiveSubtitleTrackSignature
+    val keptSubtitle = subtitle?.takeIf { index ->
+        when {
+            seriesOff -> index == -1
+            signature != null -> {
+                val expected = org.siloserver.silo.model.playback.catalogAutoSubtitleCandidates(
+                    version.subtitleTracks.orEmpty(),
+                ).firstOrNull { it.matchesSignature(signature) }?.selectionIndex
+                expected == null || index == expected
+            }
+            else -> true
+        }
+    }
+    return keptAudio to keptSubtitle
+}
+
+/**
+ * The audio Auto plays for [version] of [playbackDetail], as the preview
+ * shows it and Play sends it: the server's effective track (it holds the
+ * profile's series choice; an unsent pick is laid over it), else the
+ * device's language with the best track this TV can play. Ranking the
+ * device language first ignored a series choice made here or elsewhere.
+ */
+internal fun TvItemDetailUiState.automaticAudioOrdinal(playbackDetail: ItemDetail?, version: FileVersion?): Int? {
+    version ?: return null
+    val key = playbackDetail?.let { org.siloserver.silo.model.playback.seriesTrackChoiceKey(it.seriesId, it.contentId) }
+    val served = version.withPendingSeriesAudioChoice(key?.let(audioOverlayFor(playbackDetail)::get))
+    served.effectiveAudioTrackIndex?.takeIf { it in served.audioTracks.orEmpty().indices }?.let { return it }
+    return resolveTvAutomaticAudioTrackOrdinal(
+        version = version,
+        preferredAudioLanguage = preferredAudioLanguage,
+        capabilities = audioSelectionCapabilities,
+    )
+}
+
+internal data class TvTrackSelectionPersistence(
+    val contentId: String,
+    val fileId: Int,
+    val audioFingerprint: String?,
+    val subtitleFingerprint: String?,
+)
+
+internal fun resolveTvTrackSelectionVersion(
+    detail: ItemDetail,
+    selectedFileId: Int?,
+    preferredQuality: String?,
+): FileVersion? = selectTvDetailDisplayVersion(
+    versions = detail.versions,
+    selectedFileId = selectedFileId,
+    lastFileId = detail.userData?.lastFileId,
+    preferredQuality = preferredQuality,
+)
+
+internal fun buildTrackSelectionPersistence(
+    targetContentId: String,
+    version: FileVersion,
+    selectedAudioIndex: Int?,
+    selectedSubtitleIndex: Int?,
+): TvTrackSelectionPersistence {
+    val tracks = version.subtitleTracks.orEmpty()
+    val subtitleFingerprint = when (selectedSubtitleIndex) {
+        null -> null
+        -1 -> SUBTITLE_OFF_FINGERPRINT
+        else -> tracks
+            .getOrNull(combinedSubtitleSelectionIndexes(tracks).indexOf(selectedSubtitleIndex))
+            ?.let(::subtitleTrackFingerprint)
+    }
+    val audioFingerprint = selectedAudioIndex
+        ?.let(version.audioTracks.orEmpty()::getOrNull)
+        ?.let(::audioTrackFingerprint)
+    return TvTrackSelectionPersistence(
+        contentId = targetContentId,
+        fileId = version.fileId,
+        audioFingerprint = audioFingerprint,
+        subtitleFingerprint = subtitleFingerprint,
+    )
+}
+
+internal suspend fun recordTrackSelection(
+    port: UserItemStatePort,
+    selection: TvTrackSelectionPersistence,
+) {
+    port.recordSubtitleTrackSelection(
+        selection.contentId,
+        selection.fileId,
+        selection.subtitleFingerprint,
+    )
+    port.recordAudioTrackSelection(
+        selection.contentId,
+        selection.fileId,
+        selection.audioFingerprint,
+    )
+}
+
+internal data class TvRestoredTrackSelection(
+    val audioIndex: Int?,
+    val subtitleIndex: Int?,
+)
+
+internal fun restoreTrackSelection(
+    version: FileVersion,
+    saved: LocalTrackSelection,
+): TvRestoredTrackSelection {
+    val tracks = version.subtitleTracks.orEmpty()
+    val subtitleIndex = resolveSubtitleTrackOrdinal(tracks, saved.subtitleFingerprint)
+        ?.let { catalogOrdinal ->
+            if (catalogOrdinal == -1) -1
+            else combinedSubtitleSelectionIndexes(tracks).getOrNull(catalogOrdinal)
+        }
+    return TvRestoredTrackSelection(
+        audioIndex = resolveAudioTrackOrdinal(version.audioTracks.orEmpty(), saved.audioFingerprint),
+        subtitleIndex = subtitleIndex,
+    )
+}
+
+internal fun mergeTrackSelection(
+    currentAudioIndex: Int?,
+    currentSubtitleIndex: Int?,
+    durable: TvRestoredTrackSelection,
+): TvRestoredTrackSelection = TvRestoredTrackSelection(
+    audioIndex = currentAudioIndex ?: durable.audioIndex,
+    subtitleIndex = currentSubtitleIndex ?: durable.subtitleIndex,
+)
+
+internal fun shouldApplyNextUpTrackRestore(
+    currentContentId: String?,
+    requestedContentId: String,
+    currentSelectedFileId: Int?,
+    requestedSelectedFileId: Int?,
+): Boolean = currentContentId == requestedContentId &&
+    currentSelectedFileId == requestedSelectedFileId
+
+/**
+ * How many `GET /favorites/{id}` probes may be in flight at once.
+ *
+ * A season is commonly 10-25 episodes and every one needs its own probe, so
+ * unbounded parallelism put a whole season on the wire in one burst — measured
+ * at 150-520 ms each, with the slowest arriving well after the rail had been
+ * drawn. A small window keeps the first rows filling promptly without the
+ * burst.
+ */
+internal const val EPISODE_FAVORITE_PROBE_CONCURRENCY = 6
+
+/** How long a return from the player waits for its stop before reading the server. */
+private const val PLAYBACK_SETTLE_WAIT_MS = 3_000L
+
+/**
+ * Whether a revalidation pass answered everything it was asked to.
+ *
+ * Only ids this season actually shows count: the signal is process-wide, so it
+ * routinely names episodes from a season that is not on screen, and waiting for
+ * those would mean never catching up.
+ *
+ * [requested] of null means the signal could not produce a delta, so every
+ * visible episode had to answer. A caller that records itself caught up while
+ * one of its probes failed leaves that row stale with nothing left to retry it,
+ * which is why this is separate from "the reload succeeded".
+ */
+/**
+ * Cached favourite answers that must be forgotten because they changed
+ * elsewhere and are not on screen to be re-probed.
+ *
+ * The cache spans seasons but a refresh only probes the visible one, so a
+ * changed episode belonging to another season would otherwise keep its stale
+ * answer for the life of this screen — the visible season's refresh would
+ * record the change as handled and move on. Dropping the entry instead means
+ * the season that does show it probes it when it next loads.
+ *
+ * Only OFF-SCREEN entries are dropped. A visible one is revalidated in place,
+ * because removing it would render that row as "not a favourite" until its
+ * probe answered.
+ *
+ * [requested] of null means the change list could not be produced, so every
+ * cached answer that is not on screen is suspect.
+ */
+internal fun staleOffScreenFavorites(
+    requested: Set<String>?,
+    cachedIds: Set<String>,
+    visibleIds: Set<String>,
+): Set<String> = when (requested) {
+    null -> cachedIds - visibleIds
+    else -> requested.intersect(cachedIds) - visibleIds
+}
+
+internal fun revalidationSatisfied(
+    requested: Set<String>?,
+    visibleIds: List<String>,
+    answered: Set<String>,
+): Boolean {
+    val visible = visibleIds.toSet()
+    val required = requested?.intersect(visible) ?: visible
+    return required.all { it in answered }
+}
+
+/**
+ * Resolves the favourite flag for the episodes whose state is not already
+ * known, at most [concurrency] probes in flight at once.
+ *
+ * [onResolved] fires for each episode the moment its own probe answers, so the
+ * rail fills as results arrive. Waiting for the whole set would mean one slow
+ * probe holding back every answer that already landed — and bounding the
+ * requests makes that wait longer, not shorter, because the work is now spread
+ * over several waves instead of one burst.
+ *
+ * Reports only episodes that answered successfully: a failed probe is left out
+ * entirely rather than reported as `false`, so a transient error does not stick
+ * as a cached "not a favourite" for the rest of the visit. The returned list is
+ * every pair that resolved, for callers that want the whole outcome.
+ */
+internal suspend fun probeEpisodeFavorites(
+    episodeIds: List<String>,
+    knownIds: Set<String>,
+    concurrency: Int = EPISODE_FAVORITE_PROBE_CONCURRENCY,
+    onResolved: (String, Boolean) -> Unit = { _, _ -> },
+    probe: suspend (String) -> ApiResult<Boolean>,
+): List<Pair<String, Boolean>> {
+    val unknown = episodeIds.filterNot { it in knownIds }
+    if (unknown.isEmpty()) return emptyList()
+    val gate = Semaphore(concurrency)
+    return coroutineScope {
+        unknown.map { id ->
+            async {
+                val favorite = gate.withPermit { probe(id) }
+                (favorite as? ApiResult.Success)?.let { success ->
+                    onResolved(id, success.data)
+                    id to success.data
+                }
+            }
+        }.awaitAll()
+    }.filterNotNull()
+}
+
+/**
+ * Drives the enhanced TV item detail screen. Loads the full [ItemDetail] plus
+ * the current user's favorite/watchlist state in parallel. For series, pulls
+ * seasons once the main detail lands and lazily loads episodes whenever the
+ * user switches seasons.
+ *
+ * Receives `contentId` via Koin `parametersOf()` (see
+ * [org.siloserver.silo.tv.di.androidTvModule]).
+ */
+class TvItemDetailViewModel(
+    private val catalogRepository: CatalogRepository,
+    private val personalDataRepository: PersonalDataRepository,
+    private val playerSettingsStore: PlayerSettingsStore,
+    private val profileRepository: ProfileRepository,
+    private val profileSettings: ProfileSettingsController,
+    private val metadataAiRepository: org.siloserver.silo.repository.MetadataAiRepository,
+    private val contentId: String,
+    private val libraryId: Int? = null,
+    private val userItemState: UserItemStatePort = NoOpUserItemStatePort,
+    private val recommendationRepository: org.siloserver.silo.repository.RecommendationRepository? = null,
+    private val tokenManager: TokenManager,
+    private val identityTransitions: IdentityTransitionBarrier,
+    private val capabilityDetector: PlaybackCapabilityDetector? = null,
+    /** Remembers a manual subtitle choice for the whole series on the server. */
+    private val seriesTrackChoiceWriter: org.siloserver.silo.common.settings.SeriesTrackChoiceWriter? = null,
+    /** Waits for the closed player's stop, which sends its final progress, to finish. */
+    private val awaitPlaybackSettled: suspend () -> Unit = {},
+) : ViewModel() {
+    /** Access changes this ViewModel has applied, kept while its screen is away. */
+    val accessChanges = org.siloserver.silo.network.AccessChangeCursor()
+
+    private var similarGeneration = 0L
+    private var boxSetGeneration = 0L
+    private var boxSetJob: Job? = null
+
+    /**
+     * The series page draws episode stills narrower than a season's or an
+     * episode's own page. A season or episode whose hierarchy is complete moves
+     * to its series page, so it reads them at the series page's size.
+     */
+    private val episodeArtwork: ArtworkSurface
+        get() {
+            val detail = _uiState.value.detail
+            val onSeriesPage = detail == null || detail.type.lowercase() == "series" || tvSeriesDetailRedirect(detail) != null
+            return if (onSeriesPage) ArtworkSurface.EPISODES else ArtworkSurface.SEASON_EPISODES
+        }
+
+    private val _uiState = MutableStateFlow(TvItemDetailUiState())
+    val uiState: StateFlow<TvItemDetailUiState> = kotlinx.coroutines.flow.combine(_uiState, personalDataRepository.memberships.actions) { state, actions ->
+        var projected = state
+        actions.values.filter { personalDataRepository.memberships.current(it.intent) }.forEach { action ->
+            val itemId = action.intent.key.itemId
+            val favorite = action.intent.key.kind == org.siloserver.silo.repository.port.MembershipPort.Kind.FAVORITE
+            if (itemId == contentId) {
+                projected = if (favorite) projected.copy(isTogglingFavorite = action.busy,
+                    isFavorite = if (action.baseline != null) action.baseline!!.present else projected.isFavorite)
+                else projected.copy(isTogglingWatchlist = action.busy,
+                    inWatchlist = if (action.baseline != null) action.baseline!!.present else projected.inWatchlist)
+            }
+            if (favorite && action.baseline != null) projected = projected.copy(
+                episodeFavoriteStates = projected.episodeFavoriteStates + (itemId to action.baseline!!.present))
+        }
+        projected
+    }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, TvItemDetailUiState())
+
+    private val descriptionTranslation =
+        org.siloserver.silo.metadata.DescriptionTranslationController(
+            repository = metadataAiRepository,
+            delayMs = { kotlinx.coroutines.delay(it) },
+        )
+    val translationPhase: StateFlow<org.siloserver.silo.metadata.DescriptionTranslationPhase> =
+        descriptionTranslation.phase
+
+    // A season's translation job also fills its episodes' descriptions. The
+    // series page lists the selected season's episodes in its rail, so it
+    // starts that job when an episode row reports a missing description. Its
+    // own controller keeps the series overview's single-flight latch apart.
+    private val episodeTranslation =
+        org.siloserver.silo.metadata.DescriptionTranslationController(
+            repository = metadataAiRepository,
+            delayMs = { kotlinx.coroutines.delay(it) },
+        )
+    val translatingSeasonContentId: StateFlow<String?> = episodeTranslation.translatingContentId
+
+
+    /**
+     * Loads the cascaded subtitle preferences that annotate the selector row's
+     * Auto preview.
+     *
+     * These resolve canonically, through the same [ProfileSettingsController]
+     * the settings screen writes with. The `user_profiles` columns
+     * `GET /profiles` serves are NOT equivalent: the settings screen writes
+     * `playback.subtitle_language` / `subtitle_mode` / `show_forced_subtitles`
+     * at `scope=profile` and the server does not mirror a canonical write back
+     * into those columns, so reading them here previewed the preference the
+     * user had *before* their last edit while
+     * [org.siloserver.silo.tv.ui.screens.player.TvVideoPlaybackStarter] — which
+     * reads WatchDetail's server-resolved `effective_*` fields — played the new
+     * one. The columns stay as the fallback for a server that cannot resolve
+     * canonically. showForced defaults to true when unset, matching the player
+     * state and the starter's `?: true`.
+     */
+    private fun loadSubtitlePreferences() {
+        viewModelScope.launch {
+            val resolved = runCatching { profileSettings.load() }.getOrNull()?.snapshot
+            if (resolved != null) {
+                _uiState.update {
+                    it.copy(
+                        // The snapshot spells "no preference" as "", the Auto
+                        // preview spells it as null (it reads "" as "no subs",
+                        // matching the profile column, which the server omits
+                        // when empty). Translate rather than leak the wrong one.
+                        preferredSubtitleLanguage = resolved.subtitleLanguage.ifBlank { null },
+                        subtitleMode = resolved.subtitleMode,
+                        showForcedSubtitles = resolved.showForcedSubtitles,
+                    )
+                }
+                return@launch
+            }
+            val profile = runCatching { profileRepository.getActiveProfile() }.getOrNull()
+            _uiState.update {
+                it.copy(
+                    preferredSubtitleLanguage = profile?.subtitleLanguage,
+                    subtitleMode = profile?.subtitleMode,
+                    showForcedSubtitles = profile?.showForcedSubtitles ?: true,
+                )
+            }
+        }
+    }
+
+    private fun observePreferredQuality() {
+        viewModelScope.launch {
+            playerSettingsStore.preferredQualityFlow.collect { quality ->
+                _uiState.update {
+                    it.copy(preferredQuality = quality.trim().ifBlank { "auto" })
+                }
+            }
+        }
+    }
+
+    private fun observeAutomaticAudioPolicy(detector: PlaybackCapabilityDetector) {
+        viewModelScope.launch {
+            combine(playerSettingsStore.audioLanguageFlow, detector.outputRouteGeneration) { language, _ -> language }
+                .collectLatest { settingsLanguage ->
+                    val profileLanguage = runCatching {
+                        profileRepository.getActiveProfile()?.language
+                    }.getOrNull()
+                    val preferredLanguage = TrackSelectionPresets.effectivePreferredAudioLanguage(
+                        settingsLanguage = settingsLanguage,
+                        profileLanguage = profileLanguage,
+                    )
+                    val capabilities = runCatching {
+                        withContext(Dispatchers.Default) {
+                            detector.detect(
+                                dolbyVision = playerSettingsStore.dolbyVisionPolicySnapshot(),
+                                forceHdrPassthrough = playerSettingsStore.forceHdrPassthroughFlow.first(),
+                            )
+                        }
+                    }.getOrNull()
+                    _uiState.update {
+                        it.copy(
+                            preferredAudioLanguage = preferredLanguage,
+                            audioSelectionCapabilities = capabilities,
+                        )
+                    }
+                }
+        }
+    }
+
+    fun openPerson(member: CastMember, onOpenPerson: (Long) -> Unit) {
+        member.personId?.trim()?.toLongOrNull()?.let(onOpenPerson) ?: viewModelScope.launch {
+            when (val result = catalogRepository.searchPeople(member.name)) {
+                is ApiResult.Success -> {
+                    val resolved = result.data.firstOrNull { it.name.equals(member.name, ignoreCase = true) }
+                        ?: result.data.firstOrNull()
+                    resolved?.id?.takeIf { it > 0L }?.let(onOpenPerson)
+                }
+                is ApiResult.Error,
+                is ApiResult.NetworkError -> Unit
+            }
+        }
+    }
+
+    /**
+     * Resolves the parent before replacing a standalone season/episode route.
+     * A failed or malformed parent leaves the current detail on screen instead
+     * of turning incomplete hierarchy metadata into a dead-end Series page.
+     */
+    suspend fun hasSeriesDetailForRedirect(seriesContentId: String): Boolean {
+        val cached = catalogRepository.getCachedItemDetail(seriesContentId, libraryId = libraryId)
+        if (cached.isMatchingSeriesDetail(seriesContentId)) return true
+
+        return when (val resolved = catalogRepository.getItemDetail(seriesContentId, libraryId = libraryId)) {
+            is ApiResult.Success -> resolved.data.isMatchingSeriesDetail(seriesContentId)
+            is ApiResult.Error,
+            is ApiResult.NetworkError,
+            -> false
+        }
+    }
+
+    /** [afterAccessChange] is passed to [loadDetail]. */
+    fun loadAll(afterAccessChange: Boolean = false) {
+        viewModelScope.launch {
+            runCatching { playerSettingsStore.refreshFromServer() }
+        }
+        loadSubtitlePreferences()
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, error = null) }
+            seedCachedDetail()
+            // Kick off user-state fetches in parallel — they aren't load-blocking;
+            // the detail must succeed before we render, but favorite/watchlist
+            // state can trickle in afterward.
+            loadUserState()
+            loadDetail(afterAccessChange)
+        }
+    }
+
+    private suspend fun seedCachedDetail() {
+        val cached = catalogRepository.getCachedItemDetail(contentId, libraryId = libraryId)?.let { withLocalProgress(it) } ?: return
+        if (isTvHiddenMediaType(cached.type)) return
+        _uiState.update {
+            it.copy(
+                isLoading = true,
+                detail = cached,
+                userRating = cached.userRating,
+                isWatched = cached.userData?.played == true,
+                error = null,
+            )
+        }
+        seedCachedSeriesNavigation(cached)
+    }
+
+    /**
+     * Joins the focused-card prefetch to the first Series frame. Continue
+     * Watching warms Series + season + episode data before navigation; reading
+     * those durable rows here lets the existing detail design appear without
+     * waiting for the freshness requests that still follow in [loadDetail].
+     */
+    private suspend fun seedCachedSeriesNavigation(detail: ItemDetail) {
+        val seriesId = when (detail.type.lowercase()) {
+            "series" -> detail.contentId
+            "season", "episode" -> detail.seriesId?.takeIf { it.isNotBlank() }
+            else -> null
+        } ?: return
+        val cachedSeasons = catalogRepository.getCachedSeasons(seriesId, libraryId = libraryId) ?: return
+        val plan = cachedSeasons.seasons.initialSeasonDisplayPlan(detail.seasonNumber)
+        if (_uiState.value.detail?.contentId != detail.contentId) return
+        _uiState.update {
+            if (it.detail?.contentId != detail.contentId) {
+                it
+            } else {
+                it.copy(
+                    seasons = plan.seasons,
+                    selectedSeason = plan.selectedSeasonNumber,
+                    seasonsLoading = false,
+                )
+            }
+        }
+        plan.episodeRequestSeasonNumber?.let { seasonNumber ->
+            seedCachedEpisodes(seriesId, seasonNumber)
+        }
+    }
+
+    /** Publishes a cached season immediately; the caller still refreshes it. */
+    private suspend fun seedCachedEpisodes(seriesContentId: String, seasonNumber: Int): Boolean {
+        val cached = catalogRepository.getCachedEpisodes(seriesContentId, seasonNumber, libraryId = libraryId,
+            surface = episodeArtwork) ?: return false
+        if (_uiState.value.selectedSeason != seasonNumber) return false
+        val episodes = withLocalProgress(cached.episodes.sortedBy { it.episodeNumber })
+        if (_uiState.value.selectedSeason != seasonNumber) return false
+        loadedSeason = seasonNumber
+        episodeListGeneration += 1
+        _uiState.update {
+            if (it.selectedSeason == seasonNumber) {
+                it.copy(episodesLoading = false, episodes = episodes)
+            } else {
+                it
+            }
+        }
+        if (_uiState.value.selectedSeason != seasonNumber) return false
+        refreshNextUp(episodes)
+        recordCarouselSeason(seasonNumber, episodes)
+        return true
+    }
+
+    /**
+     * The profile this page was loaded for. A series track pick is saved for
+     * it, so a pick still being saved when the profile changes is dropped
+     * rather than filed under the next profile.
+     */
+    private var trackChoiceOwner: org.siloserver.silo.network.AuthScopeSnapshot? = null
+
+    /**
+     * [afterAccessChange] skips joining a Home warm-up still in flight, whose
+     * answer may predate the change.
+     */
+    private fun loadDetail(afterAccessChange: Boolean = false) {
+        val similarRun = ++similarGeneration
+        moreLikeThisJob?.cancel()
+        // A newer load replaces an unfinished one, so a response the server
+        // gave under an older access policy never lands after it.
+        detailLoadJob?.cancel()
+        quietDetailJob?.cancel()
+        // A new load shows no box set row until its own read answers.
+        boxSetGeneration++
+        boxSetJob?.cancel()
+        _uiState.update {
+            it.copy(moreLikeThis = emptyList(), moreLikeThisLoading = false, boxSet = null, boxSetItems = emptyList())
+        }
+        detailLoadJob = viewModelScope.launch {
+            val similarOwner = recommendationRepository?.captureSimilarAuthority()
+            trackChoiceOwner = catalogRepository.captureWatchAuthority()
+            when (val result = catalogRepository.getItemDetail(contentId, libraryId = libraryId, joinWarmup = !afterAccessChange)) {
+                is ApiResult.Success -> {
+                    val detail = withLocalProgress(result.data)
+                    if (isTvHiddenMediaType(detail.type)) {
+                        _uiState.update {
+                            it.copy(
+                                isLoading = false,
+                                detail = null,
+                                error = UiText.Res(CommonR.string.detail_error_notOnTv),
+                            )
+                        }
+                        return@launch
+                    }
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            detail = detail,
+                            seasonsLoading = detail.type.lowercase() == "series" || it.seasonsLoading,
+                            userRating = detail.userRating,
+                            isWatched = detail.userData?.played == true,
+                            error = null,
+                        )
+                    }
+                    seedSessionTrackSelection(detail)
+                    // Restore a durably-persisted audio/subtitle override (TM4).
+                    seedPersistedTrackSelection(detail)
+                    when (detail.type.lowercase()) {
+                        "series" -> loadSeasons(
+                            seriesContentId = detail.contentId,
+                            // Cached navigation may already have applied an
+                            // entry-route season before this fresh detail
+                            // response arrives. Carry it into the refresh so
+                            // the default/in-progress season cannot replace it.
+                            preferredSeasonNumber = _uiState.value.selectedSeason,
+                        )
+                        "season",
+                        "episode",
+                        -> detail.seriesId?.takeIf { it.isNotBlank() }?.let { seriesId ->
+                            loadSeasons(
+                                seriesContentId = seriesId,
+                                preferredSeasonNumber = detail.seasonNumber,
+                            )
+                        }
+                    }
+                    loadMoreLikeThis(detail, similarOwner, similarRun)
+                    loadBoxSet(detail)
+                }
+                is ApiResult.Error -> _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        // The durable cache still holds a title the server now
+                        // refuses; drop the copy seedCachedDetail painted so the
+                        // screen shows the error, not stale actions.
+                        detail = if (result.isAccessRefusal()) null else it.detail,
+                        error = result.errorText(CommonR.string.detail_error_loadFailed),
+                    )
+                }
+                is ApiResult.NetworkError -> _uiState.update {
+                    it.copy(isLoading = false, error = UiText.Res(CommonR.string.catalog_error_network))
+                }
+            }
+        }
+    }
+
+    private fun loadUserState() {
+        viewModelScope.launch {
+            val fav = personalDataRepository.isFavorite(contentId)
+            if (fav is ApiResult.Success) {
+                _uiState.update { it.copy(isFavorite = fav.data) }
+            }
+        }
+        viewModelScope.launch {
+            val watch = personalDataRepository.isInWatchlist(contentId)
+            if (watch is ApiResult.Success) {
+                _uiState.update { it.copy(inWatchlist = watch.data) }
+            }
+        }
+    }
+
+    /**
+     * Quiet refresh for returning to an already-loaded detail screen (e.g.
+     * backing out of playback): re-reads userData so the Play button's resume
+     * label, the episode rail, and next-up reflect the session that just
+     * ended. Deliberately NOT [loadAll] — no loading flashes, and the user's
+     * season selection is preserved.
+     */
+    fun refreshOnReturn() {
+        // Back on the page (from playback, or the background): its own picks
+        // whose writes have landed are dropped, whatever the page knows about
+        // the playback. The server holds them, or something newer picked in
+        // the player; the refreshes below bring that answer. Comparing it with
+        // the answer a pick was laid over cannot tell, since a newer choice can
+        // equal that older answer, and the playback return may already have
+        // been consumed by another refresh. A pick still on its way stays.
+        val pickedBefore = _uiState.value.pickedSeriesAudioChoices.keys + _uiState.value.pickedSeriesSubtitleChoices.keys
+        _uiState.update {
+            it.copy(
+                pickedSeriesSubtitleChoices = it.pickedSeriesSubtitleChoices.filterKeys(it.pendingSeriesSubtitleChoices::containsKey),
+                pickedSeriesAudioChoices = it.pickedSeriesAudioChoices.filterKeys(it.pendingSeriesAudioChoices::containsKey),
+                pickedSubtitleBaselines = it.pickedSubtitleBaselines.filterKeys(it.pendingSeriesSubtitleChoices::containsKey),
+                pickedAudioBaselines = it.pickedAudioBaselines.filterKeys(it.pendingSeriesAudioChoices::containsKey),
+            )
+        }
+        // Back from playing the Next Up episode (its return is consumed here,
+        // once): its selections picked here before are older than anything
+        // picked in the player. An explicit Off (or track) would otherwise
+        // also ride the next Next Up handoff. A movie or episode page resets
+        // its own selection from the playback return in [quietRefresh].
+        val nextUpPlayed = _uiState.value.nextUpEpisode?.contentId
+            ?.takeIf { it != contentId }
+            ?.let(TvDetailTrackSelectionSession::consumePlaybackReturn) != null
+        if (nextUpPlayed) _uiState.update {
+            it.copy(
+                selectedNextUpAudioIndex = null,
+                nextUpAudioPickedThisSession = false,
+                selectedNextUpSubtitleIndex = null,
+            )
+        }
+        // The Next Up episode's effective fields may predate the playback or
+        // a pick; the series refresh keeps the loaded episode detail, so
+        // re-read it.
+        if (nextUpPlayed || pickedBefore.isNotEmpty()) refreshNextUpPlaybackDetail()
+        applySeriesPlaybackReturn()
+        quietRefresh()
+    }
+
+    /**
+     * Back from playing this series: select the episode the player handed back
+     * (tvOS `SeriesPlaybackReturn`) — the one playback ended on, or the next
+     * one when it was finished.
+     */
+    private fun applySeriesPlaybackReturn() {
+        val detail = _uiState.value.detail ?: return
+        if (detail.type.lowercase() != "series") return
+        val target = TvDetailTrackSelectionSession.consumeSeriesReturn(
+            detail.contentId,
+            identityTransitions.generation.value,
+        ) ?: return
+        pendingReturnEpisodeId = target.episodeId
+        pendingReturnSeason = target.seasonNumber
+        selectPendingReturnEpisode()
+    }
+
+    /** Selects [pendingReturnEpisodeId] once its season is on the page. */
+    private fun selectPendingReturnEpisode() {
+        val id = pendingReturnEpisodeId ?: return
+        val state = _uiState.value
+        if ((state.carouselEpisodes + state.episodes).none { it.contentId == id }) {
+            val season = pendingReturnSeason
+            if (season != null && season != state.selectedSeason) {
+                onSeasonSelected(season)
+                // Selecting a season drops a pending return; this one is ours.
+                pendingReturnEpisodeId = id
+            }
+            return
+        }
+        onSeriesEpisodeActivated(id)
+        _uiState.update { it.copy(carouselJump = TvEpisodeCarouselJump(id, ++carouselJumpRevision)) }
+    }
+
+    /**
+     * Re-reads the shown Next Up episode's detail, keeping it on screen
+     * meanwhile. Published only while the same load (Next Up generation and
+     * episode) and the same identity still own the page. A refusal (404, 410,
+     * an access-denying 403) clears it as the Next Up load does; a transient
+     * failure keeps it.
+     */
+    private fun refreshNextUpPlaybackDetail() {
+        val episodeId = _uiState.value.nextUpPlaybackDetail?.contentId ?: return
+        val generation = nextUpPlaybackDetailGeneration
+        val identityGeneration = identityTransitions.generation.value
+        viewModelScope.launch {
+            val identity = captureNextUpIdentity(identityGeneration) ?: return@launch
+            val result = catalogRepository.getItemDetail(episodeId, libraryId = libraryId)
+            if (!ownsNextUpPlaybackDetailRequest(episodeId, generation)) return@launch
+            if (captureNextUpIdentity(identityGeneration) != identity) return@launch
+            when {
+                result is ApiResult.Success -> {
+                    val refreshed = withLocalProgress(result.data)
+                    _uiState.update { state ->
+                        if (!ownsNextUpPlaybackDetailRequest(episodeId, generation) ||
+                            state.nextUpPlaybackDetail?.contentId != episodeId
+                        ) state else state.copy(
+                            nextUpPlaybackDetail = state.nextUpEpisode
+                                ?.takeIf { it.contentId == episodeId }
+                                ?.let(refreshed::withEpisodeDescription) ?: refreshed,
+                        )
+                    }
+                }
+                result.isAccessRefusal() -> _uiState.update { state ->
+                    if (!ownsNextUpPlaybackDetailRequest(episodeId, generation)) state else state.copy(
+                        nextUpPlaybackDetail = null,
+                        isLoadingNextUpPlaybackDetail = false,
+                        didLoadNextUpPlaybackDetail = true,
+                    )
+                }
+                // Transient: keep what is shown.
+                else -> Unit
+            }
+        }
+    }
+
+    /**
+     * [refreshOnReturn] after the server reports an access change, except that
+     * a refusal ([isAccessRefusal]) replaces the detail with the error the
+     * initial load shows. Transient failures still keep the current detail.
+     * With no detail on screen (an earlier change refused it, or the first
+     * load failed), it runs the full load again, as Retry does, so a title the
+     * viewer regains access to comes back. A load still in flight is replaced
+     * the same way, because its answer may predate the change.
+     */
+    fun refreshAfterAccessChange() {
+        val state = _uiState.value
+        when {
+            // A load still in flight may have been answered under the old
+            // policy: replace its request rather than letting the change pass.
+            state.isLoading -> loadDetail(afterAccessChange = true)
+            state.detail == null -> loadAll(afterAccessChange = true)
+            else -> quietRefresh(showAccessRefusal = true)
+        }
+    }
+
+    /**
+     * [afterWatchedChange] reads the season list and episodes fresh from the
+     * server and skips repainting the rail from the on-disk catalog cache:
+     * the cache, and any coalesced request, still hold the pre-write state.
+     * [showAccessRefusal]: see [refreshAfterAccessChange].
+     */
+    private fun quietRefresh(afterWatchedChange: Boolean = false, showAccessRefusal: Boolean = false) {
+        val current = _uiState.value.detail ?: return
+        val consumedPlaybackReturn = TvDetailTrackSelectionSession.consumePlaybackReturn(contentId)
+        consumedPlaybackReturn?.let { saved ->
+            _uiState.update {
+                val returnedDetail = it.detail?.withPlaybackReturn(saved)
+                val resolvedFileId = returnedDetail?.let { detail ->
+                    resolveTvTrackSelectionVersion(detail, saved.fileId, it.preferredQuality)?.fileId
+                }
+                val tracksStillMatch = saved.trackFileId == null || saved.trackFileId == resolvedFileId
+                it.copy(
+                    detail = returnedDetail,
+                    selectedFileId = saved.fileId,
+                    selectedAudioIndex = saved.audio.takeIf { tracksStillMatch },
+                    selectedSubtitleIndex = saved.subtitle.takeIf { tracksStillMatch },
+                )
+            }
+        }
+        // A newer detail read replaces an unfinished one, so an older answer
+        // cannot land after it, for example restoring a title the newer read
+        // found refused. The replacement inherits an access-change refresh's
+        // refusal handling, so a return refresh cannot drop it.
+        val replacing = quietDetailJob?.isActive == true
+        val showRefusal = showAccessRefusal || (replacing && quietDetailShowsRefusal)
+        // The replaced read may still owe the player's saved position to its
+        // answer, unless a watched change has since replaced that position.
+        val playbackReturn = consumedPlaybackReturn
+            ?: quietPlaybackReturn.takeIf { replacing && !afterWatchedChange }
+        quietDetailJob?.cancel()
+        quietDetailShowsRefusal = showRefusal
+        quietPlaybackReturn = playbackReturn
+        quietDetailJob = viewModelScope.launch {
+            // Local overlay first: the player's final position write is already
+            // on disk, so the label corrects before the server round-trip.
+            val overlaid = withLocalProgress(current)
+                .let { refreshed -> playbackReturn?.let(refreshed::withPlaybackReturn) ?: refreshed }
+            if (overlaid != current) {
+                _uiState.update { it.copy(detail = overlaid) }
+            }
+            // Read after the player's final progress lands, so the answer
+            // includes it; a stalled stop only delays the read.
+            val settled = playbackReturn == null ||
+                withTimeoutOrNull(PLAYBACK_SETTLE_WAIT_MS) { awaitPlaybackSettled() } != null
+            when (val result = catalogRepository.getItemDetail(
+                contentId,
+                libraryId = libraryId,
+                // An access-change refresh must not reuse a pre-change warm-up.
+                joinWarmup = !showRefusal,
+                // Nor may a return from the player settle on a pre-playback answer;
+                // if this read fails, the page keeps the exit spot it already shows.
+                fresh = playbackReturn != null,
+            )) {
+                is ApiResult.Success -> {
+                    // The playback just closed finished the title: the server
+                    // reset its resume point (#842). Neither the player's exit
+                    // spot nor a local sample from before it may bring one back.
+                    val detail = if (playbackReturn != null && result.data.isWatchedWithoutResume()) {
+                        result.data
+                    } else {
+                        withLocalProgress(result.data)
+                            .let { refreshed -> playbackReturn?.let(refreshed::withPlaybackReturn) ?: refreshed }
+                    }
+                    if (!isTvHiddenMediaType(detail.type)) {
+                        _uiState.update {
+                            it.copy(
+                                detail = detail,
+                                userRating = detail.userRating,
+                                isWatched = detail.userData?.played == true,
+                            )
+                        }
+                    }
+                }
+                is ApiResult.Error -> if (showRefusal && result.isAccessRefusal()) {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            detail = null,
+                            error = result.errorText(CommonR.string.detail_error_loadFailed),
+                        )
+                    }
+                }
+                // Quiet refresh: on failure keep showing what we have.
+                is ApiResult.NetworkError -> Unit
+            }
+            // The stop outlasted the wait: read again once it lands. A newer
+            // refresh cancels this one, so it cannot overwrite a later answer.
+            if (!settled) {
+                awaitPlaybackSettled()
+                quietRefresh()
+            }
+        }
+        // Watched badges in the box set row follow the player and
+        // a watched change too.
+        loadBoxSet(current)
+        val seriesId = when (current.type.lowercase()) {
+            "series" -> current.contentId
+            "season", "episode" -> current.seriesId?.takeIf { it.isNotBlank() }
+            else -> null
+        }
+        val season = _uiState.value.selectedSeason
+        // Coming back from an episode's own screen: the favourite may have been
+        // toggled in there, and this view model still holds the old answer. Only
+        // the items actually changed are re-asked about.
+        val favoritesVersion = TvFavoriteRevalidationSession.currentVersion()
+        // Null: too far behind to be given a delta, so re-check the lot.
+        val favoritesToRecheck =
+            TvFavoriteRevalidationSession.changedSince(favoritesRevalidatedThrough)
+        if (current.type.lowercase() == "series" && seriesId != null) {
+            refreshSeasonsQuietly(seriesId, fresh = afterWatchedChange)
+        }
+        if (seriesId != null && season != null) {
+            loadEpisodes(
+                seriesId,
+                season,
+                quiet = true,
+                revalidateFavorites = favoritesToRecheck,
+                favoritesVersion = favoritesVersion,
+                freshRead = afterWatchedChange,
+            )
+        }
+    }
+
+    fun onToggleFavorite() {
+        val intent = personalDataRepository.memberships.begin(contentId, org.siloserver.silo.repository.port.MembershipPort.Kind.FAVORITE, !uiState.value.isFavorite)
+        viewModelScope.launch {
+            personalDataRepository.memberships.perform(intent)
+            if (personalDataRepository.memberships.confirmed(intent)) TvFavoriteRevalidationSession.markChanged(contentId)
+        }
+    }
+
+    fun onToggleWatchlist() {
+        val intent = personalDataRepository.memberships.begin(contentId, org.siloserver.silo.repository.port.MembershipPort.Kind.WATCHLIST, !uiState.value.inWatchlist)
+        viewModelScope.launch { personalDataRepository.memberships.perform(intent) }
+    }
+
+    private var watchedMutationOwner: org.siloserver.silo.repository.port.PersonalWriteIntent? = null
+    private var ratingMutationOwner: org.siloserver.silo.repository.port.PersonalWriteIntent? = null
+
+    private fun releaseInvalidatedPersonalMutations(generation: Long) {
+        if (watchedMutationOwner?.identityGeneration?.let { it < generation } == true) {
+            watchedMutationOwner = null
+            _uiState.update { it.copy(isTogglingWatched = false) }
+        }
+        if (ratingMutationOwner?.identityGeneration?.let { it < generation } == true) {
+            ratingMutationOwner = null
+            _uiState.update { it.copy(isTogglingRating = false) }
+        }
+    }
+
+    fun onToggleWatched() {
+        val current = _uiState.value
+        if (current.isTogglingWatched) return
+        val target = !current.isWatched
+        val previousDetail = current.detail
+        val admittedAtMs = System.currentTimeMillis()
+        val seriesGeneration = if (previousDetail?.type?.lowercase() == "series") {
+            seasonsRefreshGeneration++
+            ++seriesWatchMutationGeneration
+        } else {
+            null
+        }
+        val episodeMutationWatermark = nextEpisodeWatchMutationGeneration
+        _uiState.update {
+            it.copy(
+                isTogglingWatched = true,
+                isWatched = target,
+                detail = it.detail?.withWatchedPlaybackState(target),
+            )
+        }
+        val writeIntent = personalDataRepository.beginWatched(contentId, target)
+        watchedMutationOwner = writeIntent
+        viewModelScope.launch {
+            try {
+                val result = personalDataRepository.performPersonalWrite(writeIntent)
+                if (!personalDataRepository.isCurrent(writeIntent)) return@launch
+                if (result !is ApiResult.Success) {
+                    if (seriesGeneration != null && seriesGeneration == seriesWatchMutationGeneration) {
+                        failedSeriesWatchGeneration = seriesGeneration
+                    }
+                    // Roll back on error.
+                    _uiState.update {
+                        it.copy(
+                            isTogglingWatched = false,
+                            isWatched = !target,
+                            detail = previousDetail,
+                        )
+                    }
+                } else {
+                    _uiState.update { it.copy(isTogglingWatched = false) }
+                    val isSeries = previousDetail?.type?.lowercase() == "series"
+                    if (isSeries) {
+                        // The server applied the change to every episode, so
+                        // cached neighbour seasons in the carousel follow it.
+                        // Episodes written on their own since this began keep that
+                        // state: any successful write since, or a newer write that
+                        // has not failed.
+                        fun EpisodeListItem.applied(): EpisodeListItem {
+                            val latest = lastEpisodeWatchMutation[contentId] ?: 0L
+                            val keep = (succeededEpisodeWatchMutation[contentId] ?: 0L) > episodeMutationWatermark ||
+                                (latest > episodeMutationWatermark && failedEpisodeWatchMutation[contentId] != latest)
+                            return if (keep) this else withWatchedPlaybackState(target)
+                        }
+                        episodeWindow.mapEpisodes(null) { it.applied() }
+                        _uiState.update { state ->
+                            state.copy(episodes = state.episodes.map { it.applied() })
+                        }
+                        publishCarousel()
+                        userItemState.clearLocalPlaybackProgressBefore(
+                            (_uiState.value.carouselEpisodes + _uiState.value.episodes).map { it.contentId },
+                            admittedAtMs,
+                            writeIntent.identityGeneration,
+                        )
+                    }
+                    // Re-read server-resolved state (including series/season episode
+                    // resolution) without flashing the full detail loading screen.
+                    quietRefresh(afterWatchedChange = isSeries)
+                    if (isSeries && previousDetail != null) {
+                        // Seasons outside the carousel are read after the visible refresh starts.
+                        val loaded = (_uiState.value.carouselEpisodes + _uiState.value.episodes)
+                            .map { it.seasonNumber }
+                            .toSet()
+                        val unloaded = _uiState.value.seasons.map { it.seasonNumber }.filter { it !in loaded }
+                        userItemState.clearLocalPlaybackProgressBefore(
+                            unloaded.flatMap { seasonEpisodeIds(previousDetail.contentId, it) },
+                            admittedAtMs,
+                            writeIntent.identityGeneration,
+                        )
+                    }
+                }
+            } finally {
+                if (watchedMutationOwner == writeIntent) {
+                    watchedMutationOwner = null
+                    _uiState.update { it.copy(isTogglingWatched = false) }
+                }
+            }
+        }
+    }
+
+    /**
+     * Marks every episode of [season] from the series page's More dialog. The
+     * server applies the change to the season's episodes.
+     */
+    fun onSetSeasonWatched(season: Season, watched: Boolean) {
+        val current = _uiState.value
+        val detail = current.detail?.takeIf { it.type.lowercase() == "series" } ?: return
+        val seasonNumber = season.seasonNumber
+        val previousSeason = current.seasons.firstOrNull { it.seasonNumber == seasonNumber } ?: return
+        val previousPage = episodeWindow.get(seasonNumber)
+        val previousEpisodes = current.episodes.takeIf { current.selectedSeason == seasonNumber }
+        val admittedAtMs = System.currentTimeMillis()
+        val episodeMutationWatermark = nextEpisodeWatchMutationGeneration
+        val seriesGenerationAtStart = seriesWatchMutationGeneration
+        val generation = (seasonWatchMutationGenerations[seasonNumber] ?: 0L) + 1
+        seasonWatchMutationGenerations[seasonNumber] = generation
+        // A season list read already in flight predates this change.
+        seasonsRefreshGeneration++
+
+        episodeWindow.mapEpisodes(seasonNumber) { it.withWatchedPlaybackState(watched) }
+        _uiState.update { state ->
+            state.copy(
+                seasons = state.seasons.map {
+                    if (it.seasonNumber != seasonNumber) it else it.copy(
+                        userData = (it.userData ?: SeasonUserData()).copy(played = watched),
+                    )
+                },
+                episodes = if (state.selectedSeason == seasonNumber) {
+                    state.episodes.map { it.withWatchedPlaybackState(watched) }
+                } else {
+                    state.episodes
+                },
+            )
+        }
+        publishCarousel()
+        if (current.selectedSeason == seasonNumber) refreshNextUp(_uiState.value.episodes)
+
+        val writeIntent = personalDataRepository.beginWatched(season.contentId, watched)
+        viewModelScope.launch {
+            val result = personalDataRepository.performPersonalWrite(writeIntent)
+            if (!personalDataRepository.isCurrent(writeIntent)) return@launch
+            if (seasonWatchMutationGenerations[seasonNumber] != generation) return@launch
+            seasonWatchMutationGenerations.remove(seasonNumber)
+            if (result is ApiResult.Success) {
+                val known = (episodeWindow.get(seasonNumber).orEmpty() + previousEpisodes.orEmpty())
+                    .filter { it.seasonNumber == seasonNumber }
+                    .map { it.contentId }
+                val episodeIds = known.ifEmpty { seasonEpisodeIds(detail.contentId, seasonNumber) }
+                userItemState.clearLocalPlaybackProgressBefore(episodeIds, admittedAtMs, writeIntent.identityGeneration)
+                // Re-reads the series hero, the season list, and the selected season's episodes.
+                quietRefresh(afterWatchedChange = true)
+                return@launch
+            }
+            if (seriesWatchMutationGeneration != seriesGenerationAtStart &&
+                failedSeriesWatchGeneration != seriesWatchMutationGeneration
+            ) {
+                // A series write since this one began also covers this season;
+                // the snapshot is stale, so re-read the server instead.
+                quietRefresh(afterWatchedChange = true)
+                return@launch
+            }
+            // Restore by id: carousel moves may have republished the optimistic
+            // page. An episode marked on its own since the season write began
+            // keeps that newer state.
+            val previousById = (previousPage.orEmpty() + previousEpisodes.orEmpty())
+                .filter {
+                    val latest = lastEpisodeWatchMutation[it.contentId] ?: 0L
+                    // An episode written successfully on its own since the season
+                    // write began keeps that state. Otherwise a newer episode
+                    // write that failed rolled back to this season's optimistic
+                    // state, so undo it here too.
+                    (succeededEpisodeWatchMutation[it.contentId] ?: 0L) <= episodeMutationWatermark &&
+                        (latest <= episodeMutationWatermark || failedEpisodeWatchMutation[it.contentId] == latest)
+                }
+                .associateBy { it.contentId }
+            episodeWindow.mapEpisodes(seasonNumber) { previousById[it.contentId]?.withTranslatedDescription(it) ?: it }
+            _uiState.update { state ->
+                state.copy(
+                    seasons = state.seasons.map { if (it.seasonNumber == seasonNumber) previousSeason else it },
+                    episodes = if (state.selectedSeason == seasonNumber) {
+                        state.episodes.map { previousById[it.contentId]?.withTranslatedDescription(it) ?: it }
+                    } else {
+                        state.episodes
+                    },
+                )
+            }
+            publishCarousel()
+            if (_uiState.value.selectedSeason == seasonNumber) refreshNextUp(_uiState.value.episodes)
+        }
+    }
+
+    /** Episode ids of a season read fresh from the server; empty if the read fails. */
+    private suspend fun seasonEpisodeIds(seriesContentId: String, seasonNumber: Int): List<String> =
+        when (val r = catalogRepository.getEpisodes(seriesContentId, seasonNumber, libraryId = libraryId, fresh = true,
+            surface = episodeArtwork)) {
+            is ApiResult.Success -> r.data.episodes.map { it.contentId }
+            else -> emptyList()
+        }
+
+    /** Replaces the season list (and its watched state) without touching the selection. */
+    private fun refreshSeasonsQuietly(seriesContentId: String, fresh: Boolean = false) {
+        // Only the latest read publishes; a season watched change bumps the
+        // generation so an older read cannot undo its optimistic state.
+        val generation = ++seasonsRefreshGeneration
+        viewModelScope.launch {
+            val result = catalogRepository.getSeasons(seriesContentId, libraryId = libraryId, fresh = fresh)
+            if (result !is ApiResult.Success) return@launch
+            val seasons = result.data.seasons.sortedForDisplay()
+            _uiState.update { state ->
+                if (generation != seasonsRefreshGeneration || state.detail?.contentId != seriesContentId ||
+                    seasons.isEmpty()
+                ) state else state.copy(seasons = seasons)
+            }
+        }
+    }
+
+    fun onSetRating(stars: Int) {
+        val current = _uiState.value
+        if (current.isTogglingRating) return
+        val target = stars.coerceIn(1, 5)
+        val previous = current.userRating
+        _uiState.update { it.copy(isTogglingRating = true, userRating = target) }
+        val writeIntent = personalDataRepository.beginRating(contentId, target)
+        ratingMutationOwner = writeIntent
+        viewModelScope.launch {
+            try {
+                val result = personalDataRepository.performPersonalWrite(writeIntent)
+                if (!personalDataRepository.isCurrent(writeIntent)) return@launch
+                if (result !is ApiResult.Success) {
+                    // Roll back on error.
+                    _uiState.update {
+                        it.copy(isTogglingRating = false, userRating = previous)
+                    }
+                } else {
+                    _uiState.update { it.copy(isTogglingRating = false) }
+                }
+            } finally {
+                if (ratingMutationOwner == writeIntent) {
+                    ratingMutationOwner = null
+                    _uiState.update { it.copy(isTogglingRating = false) }
+                }
+            }
+        }
+    }
+
+    fun onClearRating() {
+        val current = _uiState.value
+        if (current.isTogglingRating) return
+        val previous = current.userRating ?: return
+        _uiState.update { it.copy(isTogglingRating = true, userRating = null) }
+        val writeIntent = personalDataRepository.beginRating(contentId, null)
+        ratingMutationOwner = writeIntent
+        viewModelScope.launch {
+            try {
+                val result = personalDataRepository.performPersonalWrite(writeIntent)
+                if (!personalDataRepository.isCurrent(writeIntent)) return@launch
+                if (result !is ApiResult.Success) {
+                    // Roll back on error.
+                    _uiState.update {
+                        it.copy(isTogglingRating = false, userRating = previous)
+                    }
+                } else {
+                    _uiState.update { it.copy(isTogglingRating = false) }
+                }
+            } finally {
+                if (ratingMutationOwner == writeIntent) {
+                    ratingMutationOwner = null
+                    _uiState.update { it.copy(isTogglingRating = false) }
+                }
+            }
+        }
+    }
+
+    fun onVersionSelected(fileId: Int?) {
+        // Track indexes are file-specific; clear them so a stale index can't
+        // carry over to a different version's track list.
+        _uiState.update {
+            it.copy(
+                selectedFileId = fileId,
+                selectedAudioIndex = null,
+                audioPickedThisSession = false,
+                selectedSubtitleIndex = null,
+            )
+        }
+        val state = _uiState.value
+        TvDetailTrackSelectionSession.remember(
+            contentId,
+            fileId,
+            audio = null,
+            subtitle = null,
+            trackFileId = state.detail?.let { selectedVersionFor(state, it)?.fileId },
+        )
+        // Do NOT persist here: a version switch resets the indexes to null, and
+        // persisting null clears the durable row — which would wipe the newly
+        // selected file's saved override before seedPersistedTrackSelection can
+        // restore it. Only explicit audio/subtitle picks persist.
+        _uiState.value.detail?.let(::seedPersistedTrackSelection)
+    }
+
+    /** Pre-select an audio track for the next Play (index into the version's audioTracks). */
+    fun onAudioTrackSelected(index: Int?) {
+        _uiState.update { it.copy(selectedAudioIndex = index, audioPickedThisSession = index != null) }
+        val state = _uiState.value
+        TvDetailTrackSelectionSession.remember(
+            contentId,
+            state.selectedFileId,
+            index,
+            state.selectedSubtitleIndex,
+            trackFileId = state.detail?.let { selectedVersionFor(state, it)?.fileId },
+        )
+        persistTrackSelection()
+        state.detail?.let { detail ->
+            rememberSeriesAudioChoice(detail, selectedVersionFor(state, detail), index)
+        }
+    }
+
+    /** Pre-select a subtitle track for the next Play (-1 = Off, null = auto). */
+    fun onSubtitleTrackSelected(index: Int?) {
+        _uiState.update { it.copy(selectedSubtitleIndex = index) }
+        val state = _uiState.value
+        TvDetailTrackSelectionSession.remember(
+            contentId,
+            state.selectedFileId,
+            state.selectedAudioIndex,
+            index,
+            trackFileId = state.detail?.let { selectedVersionFor(state, it)?.fileId },
+        )
+        persistTrackSelection()
+        state.detail?.let { detail ->
+            rememberSeriesSubtitleChoice(detail, selectedVersionFor(state, detail), index)
+        }
+    }
+
+    /**
+     * The detail selector's pick applies to the whole series (or the movie)
+     * and the profile's other devices, like a pick in the player: a track or
+     * Off is saved on the server, and Auto (null) deletes the saved choice.
+     */
+    private fun rememberSeriesSubtitleChoice(detail: ItemDetail, version: FileVersion?, index: Int?) {
+        val writer = seriesTrackChoiceWriter ?: return
+        val owner = trackChoiceOwner ?: return
+        if (detail.type != "movie" && detail.type != "episode") return
+        val key = org.siloserver.silo.model.playback.seriesTrackChoiceKey(detail.seriesId, detail.contentId) ?: return
+        val choice = when (index) {
+            null -> null
+            -1 -> org.siloserver.silo.model.playback.SeriesSubtitleChoice.Off
+            else -> {
+                val tracks = version?.subtitleTracks.orEmpty()
+                val track = tracks.getOrNull(combinedSubtitleSelectionIndexes(tracks).indexOf(index)) ?: return
+                org.siloserver.silo.model.playback.SeriesSubtitleChoice.of(track, index)
+            }
+        }
+        _uiState.update {
+            it.copy(
+                pickedSeriesSubtitleChoices = it.pickedSeriesSubtitleChoices +
+                    (key to org.siloserver.silo.model.playback.PendingSeriesSubtitleChoice(choice)),
+                pickedSubtitleBaselines = it.pickedSubtitleBaselines + (key to org.siloserver.silo.model.playback.PickedSubtitleBaseline.of(detail)),
+            )
+        }
+        viewModelScope.launch { writer.saveSubtitle(key, choice, owner) }
+    }
+
+    /** [rememberSeriesSubtitleChoice] for audio: a track is saved, Auto (null) deletes it. */
+    private fun rememberSeriesAudioChoice(detail: ItemDetail, version: FileVersion?, index: Int?) {
+        val writer = seriesTrackChoiceWriter ?: return
+        val owner = trackChoiceOwner ?: return
+        if (detail.type != "movie" && detail.type != "episode") return
+        val key = org.siloserver.silo.model.playback.seriesTrackChoiceKey(detail.seriesId, detail.contentId) ?: return
+        val choice = index?.let {
+            org.siloserver.silo.model.playback.SeriesAudioChoice.of(version?.audioTracks.orEmpty(), it) ?: return
+        }
+        _uiState.update {
+            it.copy(
+                pickedSeriesAudioChoices = it.pickedSeriesAudioChoices +
+                    (key to org.siloserver.silo.model.playback.PendingSeriesAudioChoice(choice)),
+                pickedAudioBaselines = it.pickedAudioBaselines + (key to org.siloserver.silo.model.playback.PickedAudioBaseline.of(detail)),
+            )
+        }
+        viewModelScope.launch { writer.saveAudio(key, choice, owner) }
+    }
+
+    private suspend fun subtitleResetToAuto(detail: ItemDetail): Boolean {
+        val key = org.siloserver.silo.model.playback.seriesTrackChoiceKey(detail.seriesId, detail.contentId) ?: return false
+        return seriesTrackChoiceWriter?.subtitleResetToAuto(key) == true
+    }
+
+    /** The exact version the Auto/display/player policy currently resolves. */
+    private fun selectedVersionFor(state: TvItemDetailUiState, detail: ItemDetail): FileVersion? {
+        return resolveTvTrackSelectionVersion(detail, state.selectedFileId, state.preferredQuality)
+    }
+
+    /**
+     * Durably persist the current audio/subtitle override for the selected
+     * version's file, so it survives leaving/re-opening the page AND the process
+     * (the in-memory [TvDetailTrackSelectionSession] only covers this process).
+     * Mirrors the phone I7 fix and tvOS TrackSelectionPersistence: record the
+     * catalog track's fingerprint against the shared UserItemStatePort keyed on
+     * (contentId, fileId); Auto (null) clears, explicit Off writes the off
+     * sentinel.
+     */
+    private fun persistTrackSelection() {
+        val state = _uiState.value
+        val detail = state.detail ?: return
+        persistTrackSelectionFor(
+            targetContentId = contentId,
+            detail = detail,
+            selectedFileId = state.selectedFileId,
+            selectedAudioIndex = state.selectedAudioIndex,
+            selectedSubtitleIndex = state.selectedSubtitleIndex,
+            preferredQuality = state.preferredQuality,
+        )
+    }
+
+    private fun persistTrackSelectionFor(
+        targetContentId: String,
+        detail: ItemDetail,
+        selectedFileId: Int?,
+        selectedAudioIndex: Int?,
+        selectedSubtitleIndex: Int?,
+        preferredQuality: String?,
+    ) {
+        val version = resolveTvTrackSelectionVersion(detail, selectedFileId, preferredQuality) ?: return
+        val selection = buildTrackSelectionPersistence(
+            targetContentId = targetContentId,
+            version = version,
+            selectedAudioIndex = selectedAudioIndex,
+            selectedSubtitleIndex = selectedSubtitleIndex,
+        )
+        viewModelScope.launch {
+            recordTrackSelection(userItemState, selection)
+        }
+    }
+
+    /**
+     * Seed the audio/subtitle selection from a previously persisted override for
+     * the selected version's file. Skips when a selection is already set (the
+     * in-memory session recall or the current pick wins), and only applies a
+     * dimension when a saved fingerprint matches a current track.
+     */
+    private fun seedPersistedTrackSelection(detail: ItemDetail) {
+        val state = _uiState.value
+        if (state.selectedSubtitleIndex != null || state.selectedAudioIndex != null) return
+        val version = selectedVersionFor(state, detail) ?: return
+        viewModelScope.launch {
+            val saved = userItemState.localTrackSelection(contentId, version.fileId)
+                ?.withSeriesTrackChoices(
+                    detail,
+                    version,
+                    _uiState.value.subtitleOverlayFor(detail),
+                    _uiState.value.audioOverlayFor(detail),
+                    subtitleResetToAuto = subtitleResetToAuto(detail),
+                )
+                ?: return@launch
+            val restored = restoreTrackSelection(version, saved)
+            val subOrdinal = restored.subtitleIndex
+            val audOrdinal = restored.audioIndex
+            if (subOrdinal == null && audOrdinal == null) return@launch
+            _uiState.update {
+                // The ordinals were resolved against `version`; if the user
+                // switched versions while this suspended, they'd index into the
+                // wrong track list — leave the new version untouched.
+                if (selectedVersionFor(it, detail)?.fileId != version.fileId) return@update it
+                it.copy(
+                    selectedSubtitleIndex = it.selectedSubtitleIndex ?: subOrdinal,
+                    selectedAudioIndex = it.selectedAudioIndex ?: audOrdinal,
+                )
+            }
+        }
+    }
+
+    private fun seedSessionTrackSelection(detail: ItemDetail) {
+        val saved = TvDetailTrackSelectionSession.recall(contentId) ?: return
+        val state = _uiState.value
+        val version = resolveTvTrackSelectionVersion(detail, saved.fileId, state.preferredQuality)
+        val tracksBelongToVersion = saved.trackFileId == null || saved.trackFileId == version?.fileId
+        val (audio, subtitle) = sessionTracksConsistentWithSeriesChoice(
+            detail = detail,
+            version = version,
+            audio = saved.audio.takeIf { tracksBelongToVersion },
+            subtitle = saved.subtitle.takeIf { tracksBelongToVersion },
+            pendingSubtitles = state.subtitleOverlayFor(detail),
+            pendingAudio = state.audioOverlayFor(detail),
+        )
+        _uiState.update {
+            it.copy(
+                selectedFileId = saved.fileId?.takeIf { id -> detail.versions.any { version -> version.fileId == id } },
+                selectedAudioIndex = audio,
+                selectedSubtitleIndex = subtitle,
+            )
+        }
+    }
+
+    fun onSeasonSelected(seasonNumber: Int) {
+        if (_uiState.value.selectedSeason == seasonNumber) return
+        seasonSelectionGeneration += 1
+        pendingCarouselEdge = null
+        pendingReturnEpisodeId = null
+        pendingCarouselSeasonJump = seasonNumber
+        // A focused episode belongs to the old season. The newly loaded rail
+        // chooses its own suggested/current episode, exactly like tvOS.
+        activeSeriesEpisodeContentId = null
+        _uiState.update {
+            it.copy(
+                selectedSeason = seasonNumber,
+                episodesLoading = true,
+                // Keep the previous episode as a layout placeholder, but never
+                // let Play launch it for the newly selected season.
+                nextUpTargetReady = false,
+            )
+        }
+        val detail = _uiState.value.detail ?: return
+        val seriesContentId = when (detail.type.lowercase()) {
+            "series" -> detail.contentId
+            "season" -> detail.seriesId
+            "episode" -> detail.seriesId
+            else -> null
+        } ?: return
+        loadEpisodes(seriesContentId, seasonNumber)
+    }
+
+    /**
+     * Series is one in-place browsing page: focus, not a pushed episode-detail
+     * route, owns the active episode. `null` restores Show mode's suggested
+     * episode while a concrete id updates the hero and playback selector.
+     */
+    fun onSeriesEpisodeActivated(contentId: String?) {
+        val state = _uiState.value
+        if (state.detail?.type?.lowercase() != "series") return
+        val active = contentId?.let { id ->
+            (state.carouselEpisodes.ifEmpty { state.episodes }).firstOrNull { it.contentId == id }
+        }
+        pendingCarouselEdge = null
+        pendingReturnEpisodeId = null
+        if (active != null) {
+            pendingCarouselSeasonJump = null
+            _uiState.update { it.copy(carouselJump = null) }
+        }
+        if (active != null && active.seasonNumber != state.selectedSeason) {
+            seasonSelectionGeneration += 1
+            episodeLoadRequestGeneration += 1
+            episodeLoadJob?.cancel()
+            loadedSeason = active.seasonNumber
+            episodeListGeneration += 1
+            _uiState.update {
+                it.copy(
+                    selectedSeason = active.seasonNumber,
+                    episodes = episodeWindow.get(active.seasonNumber).orEmpty(),
+                    episodesLoading = false,
+                )
+            }
+        }
+        activeSeriesEpisodeContentId = active?.contentId
+        updateNextUp(active ?: resolveNextUpEpisode(_uiState.value.episodes))
+        if (active != null) {
+            if (active.seasonNumber != state.selectedSeason) publishCarousel()
+            prefetchCarouselNeighbors()
+            viewModelScope.launch { refreshEpisodeFavoriteStates(listOf(active)) }
+        }
+    }
+
+    /**
+     * Applies an episode carried by a Continue Watching detail route exactly
+     * once. Keeping the latch in the ViewModel survives player round-trips but
+     * resets correctly if Android recreates the detail entry after process loss.
+     */
+    fun onEntrySeriesEpisodeRequested(contentId: String) {
+        val state = _uiState.value
+        if (state.entryEpisodeSelectionApplied || state.detail?.type?.lowercase() != "series") return
+        val active = state.episodes.firstOrNull { it.contentId == contentId }
+        _uiState.update { it.copy(entryEpisodeSelectionApplied = true) }
+        if (active != null) {
+            pendingCarouselSeasonJump = null
+            pendingCarouselEdge = null
+            activeSeriesEpisodeContentId = active.contentId
+            updateNextUp(active)
+            _uiState.update {
+                it.copy(carouselJump = TvEpisodeCarouselJump(active.contentId, ++carouselJumpRevision))
+            }
+        }
+    }
+
+    private val episodeWindow = TvEpisodeWindow()
+    private val carouselLoads = mutableMapOf<Int, Job>()
+    private var carouselJumpRevision = 0
+    private var pendingCarouselSeasonJump: Int? = null
+    private var pendingCarouselEdge: Pair<String, Int>? = null
+
+    private fun recordCarouselSeason(season: Int, episodes: List<EpisodeListItem>) {
+        if (_uiState.value.detail?.type?.lowercase() != "series") return
+        episodeWindow.put(season, episodes)
+        publishCarousel()
+        if (pendingCarouselSeasonJump == season) {
+            pendingCarouselSeasonJump = null
+            episodes.firstOrNull()?.let { first ->
+                activeSeriesEpisodeContentId = first.contentId
+                updateNextUp(first)
+                _uiState.update {
+                    it.copy(carouselJump = TvEpisodeCarouselJump(first.contentId, ++carouselJumpRevision))
+                }
+            }
+        }
+        selectPendingReturnEpisode()
+        prefetchCarouselNeighbors()
+    }
+
+    private fun publishCarousel() {
+        val state = _uiState.value
+        if (state.detail?.type?.lowercase() != "series") return
+        val selected = state.selectedSeason ?: return
+        // Preserve optimistic watched-state edits on the active page.
+        if (state.episodes.firstOrNull()?.seasonNumber == selected) {
+            episodeWindow.put(selected, state.episodes)
+        }
+        episodeWindow.retainNear(state.seasons, selected)
+        val snapshot = episodeWindow.snapshot(state.seasons, selected)
+        _uiState.update {
+            it.copy(
+                carouselEpisodes = snapshot.episodes,
+                carouselPreviousSeason = snapshot.previousSeason,
+                carouselNextSeason = snapshot.nextSeason,
+            )
+        }
+        val pending = pendingCarouselEdge ?: return
+        val index = snapshot.episodes.indexOfFirst { it.contentId == pending.first }
+        val target = snapshot.episodes.getOrNull(index + pending.second).takeIf { index >= 0 }
+        if (target != null) {
+            pendingCarouselEdge = null
+            _uiState.update {
+                it.copy(carouselJump = TvEpisodeCarouselJump(target.contentId, ++carouselJumpRevision, true))
+            }
+        }
+    }
+
+    fun onCarouselFocusLost() {
+        pendingCarouselEdge = null
+    }
+
+    private fun prefetchCarouselNeighbors() {
+        val state = _uiState.value
+        if (state.detail?.type?.lowercase() != "series") return
+        val order = episodeWindow.orderedSeasons(state.seasons)
+        val selectedIndex = order.indexOf(state.selectedSeason)
+        if (selectedIndex < 0) return
+        listOfNotNull(order.getOrNull(selectedIndex - 1), order.getOrNull(selectedIndex + 1))
+            .forEach(::loadCarouselNeighbor)
+    }
+
+    /** Called only at a loaded edge; holding Right never skips an unloaded season. */
+    fun onCarouselEdgeRequested(contentId: String, direction: Int) {
+        if (direction != -1 && direction != 1) return
+        pendingCarouselEdge = contentId to direction
+        val state = _uiState.value
+        val season = if (direction < 0) state.carouselPreviousSeason else state.carouselNextSeason
+        season?.let(::loadCarouselNeighbor)
+    }
+
+    private fun loadCarouselNeighbor(season: Int) {
+        val state = _uiState.value
+        val series = state.detail?.takeIf { it.type.lowercase() == "series" } ?: return
+        if (episodeWindow.get(season) != null || carouselLoads[season]?.isActive == true) return
+        carouselLoads[season] = viewModelScope.launch {
+            _uiState.update { it.copy(carouselLoadError = false) }
+            try {
+                val result = catalogRepository.getEpisodes(series.contentId, season, libraryId = libraryId)
+                if (result is ApiResult.Success) {
+                    val episodes = withLocalProgress(result.data.episodes)
+                    // A distant season jump can make this prefetch obsolete.
+                    val live = _uiState.value
+                    val order = episodeWindow.orderedSeasons(live.seasons)
+                    val distance = kotlin.math.abs(order.indexOf(season) - order.indexOf(live.selectedSeason))
+                    val edge = episodeWindow.snapshot(live.seasons, live.selectedSeason ?: return@launch)
+                    if (distance <= 2 || season == edge.previousSeason || season == edge.nextSeason) {
+                        episodeWindow.put(season, episodes)
+                        publishCarousel()
+                        // Empty seasons are traversed, never mistaken for the end of the series.
+                        if (episodes.isEmpty()) {
+                            val snapshot = episodeWindow.snapshot(live.seasons, live.selectedSeason ?: return@launch)
+                            val before = order.indexOf(season) < order.indexOf(live.selectedSeason)
+                            (if (before) snapshot.previousSeason else snapshot.nextSeason)
+                                ?.let(::loadCarouselNeighbor)
+                        }
+                    }
+                } else {
+                    _uiState.update { it.copy(carouselLoadError = true) }
+                }
+            } finally {
+                carouselLoads.remove(season)
+            }
+        }
+    }
+
+    private fun loadSeasons(
+        seriesContentId: String,
+        preferredSeasonNumber: Int? = null,
+    ) {
+        val selectionGenerationAtRequest = seasonSelectionGeneration
+        viewModelScope.launch {
+            _uiState.update { it.copy(seasonsLoading = true) }
+            when (val r = catalogRepository.getSeasons(seriesContentId, libraryId = libraryId)) {
+                is ApiResult.Success -> {
+                    val plan = r.data.seasons.initialSeasonDisplayPlan(preferredSeasonNumber)
+                    val currentSelection = _uiState.value.selectedSeason
+                    val preservesNewerSelection =
+                        seasonSelectionGeneration != selectionGenerationAtRequest &&
+                            currentSelection != null &&
+                            plan.seasons.any { it.seasonNumber == currentSelection }
+                    val selectedSeasonNumber = if (preservesNewerSelection) {
+                        currentSelection
+                    } else {
+                        plan.selectedSeasonNumber
+                    }
+                    _uiState.update {
+                        it.copy(
+                            seasonsLoading = false,
+                            seasons = plan.seasons,
+                            selectedSeason = selectedSeasonNumber,
+                            episodesLoading = it.episodesLoading || (!preservesNewerSelection && selectedSeasonNumber != null),
+                        )
+                    }
+                    if (!preservesNewerSelection) {
+                        selectedSeasonNumber?.let { seasonNumber ->
+                            loadEpisodes(seriesContentId, seasonNumber)
+                        }
+                    }
+                }
+                else -> _uiState.update { it.copy(seasonsLoading = false) }
+            }
+        }
+    }
+
+    private var episodeLoadJob: kotlinx.coroutines.Job? = null
+    private var episodeLoadRequestGeneration: Long = 0
+
+    /**
+     * How far through [TvFavoriteRevalidationSession] this screen has caught up.
+     * Starts at the current version: anything toggled before this screen existed
+     * is already reflected in the data it is about to load.
+     */
+    private var favoritesRevalidatedThrough: Long = TvFavoriteRevalidationSession.currentVersion()
+    private var moreLikeThisJob: Job? = null
+    private var detailLoadJob: Job? = null
+    private var quietDetailJob: Job? = null
+    /** Whether [quietDetailJob] clears the page on a refusal (an access-change refresh). */
+    private var quietDetailShowsRefusal = false
+    /** The playback return [quietDetailJob] overlays on its answer. */
+    private var quietPlaybackReturn: TvDetailTrackSelectionSession.Saved? = null
+    private var nextUpDetailJob: Job? = null
+    private var activeSeriesEpisodeContentId: String? = null
+    /** Episode a playback return selects once its season loads, and that season. */
+    private var pendingReturnEpisodeId: String? = null
+    private var pendingReturnSeason: Int? = null
+    // A seasons refresh may complete after the viewer has already changed the
+    // selected chip. Preserve that newer choice instead of replaying the
+    // refresh request's initial display plan.
+    private var seasonSelectionGeneration: Long = 0
+    // The season number the currently-shown episodes/next-up actually belong to.
+    // Lets a failed load revert the optimistic season selection so the chips and
+    // the rail stay consistent (T15).
+    private var loadedSeason: Int? = null
+    private var episodeListGeneration: Long = 0
+    private val episodeDescriptionRevisions = mutableMapOf<Int, Long>()
+    private var nextEpisodeWatchMutationGeneration: Long = 0
+    private val episodeWatchMutationGenerations = mutableMapOf<String, Long>()
+    private val seasonWatchMutationGenerations = mutableMapOf<Int, Long>()
+    // Unlike episodeWatchMutationGenerations, kept after completion so a season
+    // rollback can tell which episodes changed on their own since it began.
+    private val lastEpisodeWatchMutation = mutableMapOf<String, Long>()
+    private val failedEpisodeWatchMutation = mutableMapOf<String, Long>()
+    private val succeededEpisodeWatchMutation = mutableMapOf<String, Long>()
+    private var seriesWatchMutationGeneration: Long = 0
+    private var failedSeriesWatchGeneration: Long = -1
+    private var seasonsRefreshGeneration: Long = 0
+    private var nextUpPlaybackDetailGeneration: Long = 0
+    private var nextUpSelectorRevision: Long = 0
+    private var pendingNextUpSelectionHandoff: PendingNextUpSelectionHandoff? = null
+
+    private data class NextUpIdentity(
+        val serverId: String?,
+        val profileId: String?,
+        val generation: Long,
+    )
+
+    private data class PendingNextUpSelectionHandoff(
+        val targetContentId: String,
+        val refreshGeneration: Long,
+        val selectorRevision: Long,
+        val identity: NextUpIdentity,
+        val handoff: EpisodeSelectionHandoff,
+    )
+
+    private data class ResolvedNextUpTrackSelection(
+        val fileId: Int?,
+        val audioIndex: Int?,
+        val subtitleIndex: Int?,
+    )
+
+    /**
+     * Loads a season's episodes. [quiet] suppresses the loading spinner and is
+     * used by [refreshOnReturn], whose contract is a no-flash background refresh
+     * of the season already on screen.
+     */
+    private fun loadEpisodes(
+        seriesContentId: String,
+        seasonNumber: Int,
+        quiet: Boolean = false,
+        revalidateFavorites: Set<String>? = emptySet(),
+        favoritesVersion: Long? = null,
+        freshRead: Boolean = false,
+    ) {
+        // Cancel any in-flight episode load so a slower response for a
+        // previously-selected season can't overwrite episodes/next-up for the
+        // season the user is now on (rapid season switches / the initial
+        // selected-season load racing a route-driven season load). Cancellation
+        // alone is insufficient because the network wrapper converts a caught
+        // CancellationException into an error result; the generation remains
+        // the authoritative owner of the network result publications below.
+        episodeLoadRequestGeneration += 1
+        val requestGeneration = episodeLoadRequestGeneration
+        val descriptionRevision = episodeDescriptionRevisions[seasonNumber] ?: 0L
+        episodeLoadJob?.cancel()
+        episodeLoadJob = viewModelScope.launch {
+            fun ownsRequest(): Boolean =
+                requestGeneration == episodeLoadRequestGeneration &&
+                    _uiState.value.selectedSeason == seasonNumber
+
+            if (!ownsRequest()) return@launch
+            if (!quiet) _uiState.update { it.copy(episodesLoading = true) }
+            if (!freshRead) seedCachedEpisodes(seriesContentId, seasonNumber)
+            if (!ownsRequest()) return@launch
+            val result = catalogRepository.getEpisodes(
+                seriesContentId,
+                seasonNumber,
+                libraryId = libraryId,
+                fresh = freshRead,
+                surface = episodeArtwork,
+            )
+            if (!ownsRequest()) return@launch
+            when (result) {
+                is ApiResult.Success -> {
+                    val episodes = withLocalProgress(
+                        result.data.episodes.sortedBy { episode -> episode.episodeNumber },
+                    )
+                    if (!ownsRequest()) return@launch
+                    loadedSeason = seasonNumber
+                    episodeListGeneration += 1
+                    _uiState.update { state ->
+                        val current = state.episodes.associateBy { it.contentId }
+                        val rows = if (descriptionRevision != (episodeDescriptionRevisions[seasonNumber] ?: 0L)) {
+                            episodes.map { row -> current[row.contentId]?.let(row::withTranslatedDescription) ?: row }
+                        } else episodes
+                        state.copy(episodesLoading = false, episodes = rows)
+                    }
+                    val publishedEpisodes = _uiState.value.episodes
+                    refreshNextUp(publishedEpisodes)
+                    recordCarouselSeason(seasonNumber, publishedEpisodes)
+                    val revalidationComplete =
+                        refreshEpisodeFavoriteStates(episodes, revalidate = revalidateFavorites)
+                    // Caught up only now, and only if every id we were asked to
+                    // re-check actually answered. Advancing on read would drop
+                    // the signal when the reload failed; advancing after a
+                    // FAILED probe would drop it just as permanently, leaving
+                    // that one episode stale with nothing left to retry it.
+                    if (revalidationComplete && ownsRequest()) {
+                        favoritesVersion?.let { favoritesRevalidatedThrough = it }
+                    }
+                }
+                else -> {
+                    // Quiet-failure contract (T15): a failed season load must NOT
+                    // wipe the episode rail / next-up already on screen (that
+                    // kills the hero Play button and the rail). Keep what's shown
+                    // and revert the optimistic season selection to the season the
+                    // loaded episodes actually belong to, so the chips and the
+                    // rail stay in agreement.
+                    _uiState.update {
+                        it.copy(
+                            episodesLoading = false,
+                            selectedSeason = loadedSeason ?: it.selectedSeason,
+                        )
+                    }
+                    refreshNextUp(_uiState.value.episodes)
+                }
+            }
+        }
+    }
+
+    /**
+     * Fills in the favourite flag for episodes whose state this screen does not
+     * already know.
+     *
+     * There is no favourite field on an episode payload, so each one has to be
+     * asked for individually — `GET /favorites/{id}`, answering 404 for "not a
+     * favourite". Two things made that expensive enough to see in the field:
+     * every episode was asked on every season load even when the answer was
+     * already on screen, and all of them were asked at once. One series on a
+     * tester's Fire TV produced 116 such 404s at 150-520 ms each.
+     *
+     * So: ask only about episodes with no answer yet, and ask a few at a time.
+     * The map accumulates for the life of this view model, which is one visit
+     * to one item — leaving the screen and coming back still re-reads, so a
+     * favourite toggled on another device is picked up on the next visit
+     * rather than being cached indefinitely.
+     */
+    /**
+     * @param revalidate ids to re-ask about even though an answer is already
+     * held, because they were toggled on a screen further down. This view model
+     * is retained across that trip, so its answer for them is stale but
+     * present. Deliberately a targeted SET rather than a blanket flag:
+     * ON_RESUME also fires for returning from playback and for foregrounding
+     * the app, and re-probing a whole season on each of those would restore the
+     * request volume this window exists to prevent.
+     *
+     * Existing entries stay until a fresh answer replaces them — clearing first
+     * would render every episode as "not a favourite" for the length of a round
+     * trip, and permanently so for any probe that fails.
+     */
+    private suspend fun refreshEpisodeFavoriteStates(
+        episodes: List<EpisodeListItem>,
+        revalidate: Set<String>? = emptySet(),
+    ): Boolean {
+        // An empty season leaves the accumulated answers alone: rendering is
+        // keyed by the visible episode ids, so nothing stale can show, and
+        // clearing would make returning to a populated season re-probe it.
+        val episodeIds = episodes.map { it.contentId }
+        val visibleIds = episodeIds.toSet()
+
+        // Apply the change list to entries this screen holds but is not showing,
+        // before deciding anything else. Recording those as handled without
+        // acting on them is how a stale answer survives a season switch.
+        val stale = staleOffScreenFavorites(
+            requested = revalidate,
+            cachedIds = _uiState.value.episodeFavoriteStates.keys,
+            visibleIds = visibleIds,
+        )
+        if (stale.isNotEmpty()) {
+            _uiState.update { it.copy(episodeFavoriteStates = it.episodeFavoriteStates - stale) }
+        }
+
+        // Now safe: the only changes left to account for are visible ones, and
+        // an empty season has none.
+        if (episodes.isEmpty()) return true
+        val generation = episodeListGeneration
+        // A null delta means the signal could not tell us what changed, so
+        // nothing is treated as already known.
+        val knownIds =
+            if (revalidate == null) emptySet() else _uiState.value.episodeFavoriteStates.keys - revalidate
+        val membershipGeneration = personalDataRepository.memberships.generation.value
+        val resolved = probeEpisodeFavorites(
+            episodeIds = episodeIds,
+            knownIds = knownIds,
+            onResolved = { id, favorite ->
+                // Publish per answer rather than per batch. Guarded by the
+                // generation the probes were started for, so a season the
+                // viewer has already left cannot write into the one on screen.
+                if (episodeListGeneration == generation && personalDataRepository.memberships.generation.value == membershipGeneration) {
+                    _uiState.update {
+                        it.copy(episodeFavoriteStates = it.episodeFavoriteStates + (id to favorite))
+                    }
+                }
+            },
+        ) { personalDataRepository.isFavorite(it) }
+
+        return revalidationSatisfied(
+            requested = revalidate,
+            visibleIds = episodeIds,
+            answered = resolved.mapTo(mutableSetOf()) { it.first },
+        )
+    }
+
+    fun onSetEpisodeWatched(episodeContentId: String, watched: Boolean) {
+        val current = _uiState.value
+        val previousEpisodes = current.episodes
+        val previousEpisode = previousEpisodes.firstOrNull { it.contentId == episodeContentId }
+        val mutationSeason = current.selectedSeason
+        val listGeneration = episodeListGeneration
+        val mutationGeneration = ++nextEpisodeWatchMutationGeneration
+        episodeWatchMutationGenerations[episodeContentId] = mutationGeneration
+        lastEpisodeWatchMutation[episodeContentId] = mutationGeneration
+        val updatedEpisodes = previousEpisodes.map { episode ->
+            if (episode.contentId == episodeContentId) episode.withWatchedPlaybackState(watched) else episode
+        }
+        _uiState.update { it.copy(episodes = updatedEpisodes) }
+        publishCarousel()
+        refreshNextUp(updatedEpisodes)
+
+        val writeIntent = personalDataRepository.beginWatched(episodeContentId, watched)
+        viewModelScope.launch {
+            val result = personalDataRepository.performPersonalWrite(writeIntent)
+            if (!personalDataRepository.isCurrent(writeIntent)) return@launch
+            val isCurrentMutation = episodeWatchMutationGenerations[episodeContentId] == mutationGeneration
+            if (result is ApiResult.Success) {
+                succeededEpisodeWatchMutation[episodeContentId] =
+                    maxOf(succeededEpisodeWatchMutation[episodeContentId] ?: 0L, mutationGeneration)
+            }
+            if (result !is ApiResult.Success) {
+                if (isCurrentMutation) failedEpisodeWatchMutation[episodeContentId] = mutationGeneration
+                if (
+                    isCurrentMutation &&
+                    previousEpisode != null &&
+                    episodeListGeneration == listGeneration
+                ) {
+                    val live = _uiState.value
+                    if (live.selectedSeason == mutationSeason) {
+                        val restored = live.episodes.map { episode ->
+                            if (episode.contentId == episodeContentId) previousEpisode.withTranslatedDescription(episode) else episode
+                        }
+                        if (_uiState.compareAndSet(live, live.copy(episodes = restored))) {
+                            publishCarousel()
+                            refreshNextUp(restored)
+                        }
+                    }
+                }
+                if (isCurrentMutation) episodeWatchMutationGenerations.remove(episodeContentId)
+            } else if (isCurrentMutation) {
+                episodeWatchMutationGenerations.remove(episodeContentId)
+                // Re-read the server-resolved season state without collapsing
+                // the rail or flashing its loading placeholder.
+                val detail = _uiState.value.detail
+                val seriesId = when (detail?.type?.lowercase()) {
+                    "series" -> detail.contentId
+                    "season", "episode" -> detail.seriesId
+                    else -> null
+                }
+                val season = _uiState.value.selectedSeason
+                if (!seriesId.isNullOrBlank() && season != null) {
+                    loadEpisodes(seriesId, season, quiet = true)
+                }
+                // The season's watched state may have flipped with this episode.
+                if (detail?.type?.lowercase() == "series" && !seriesId.isNullOrBlank()) {
+                    refreshSeasonsQuietly(seriesId)
+                }
+            }
+        }
+    }
+
+    fun onSetEpisodeFavorite(episodeContentId: String, favorite: Boolean) {
+        val intent = personalDataRepository.memberships.begin(episodeContentId, org.siloserver.silo.repository.port.MembershipPort.Kind.FAVORITE, favorite)
+        viewModelScope.launch { personalDataRepository.memberships.perform(intent) }
+    }
+
+    private suspend fun withLocalProgress(detail: ItemDetail): ItemDetail =
+        applyLocalPlaybackProgress(detail, userItemState.localPlaybackProgress(detail.contentId))
+
+    private suspend fun withLocalProgress(episodes: List<EpisodeListItem>): List<EpisodeListItem> {
+        if (episodes.isEmpty()) return episodes
+        val progress = userItemState.localPlaybackProgressForContent(episodes.map { it.contentId })
+        if (progress.isEmpty()) return episodes
+        return episodes.map { episode -> applyLocalPlaybackProgress(episode, progress[episode.contentId]) }
+    }
+
+    /**
+     * Resolves the next-up episode for the selected season (series/season detail
+     * only) and kicks off its playback-detail load when it changes. Mirrors
+     * silo-apple's `nextUpEpisode` + the `.task(id:)`-driven
+     * `loadSeriesNextUpPlaybackDetail` / `loadSeasonNextUpPlaybackDetail`.
+     */
+    private fun refreshNextUp(episodes: List<EpisodeListItem>) {
+        val active = activeSeriesEpisodeContentId
+            ?.let { contentId -> episodes.firstOrNull { it.contentId == contentId } }
+        updateNextUp(active ?: resolveNextUpEpisode(episodes))
+    }
+
+    private fun updateNextUp(nextUp: EpisodeListItem?) {
+        val oldState = _uiState.value
+        val detail = oldState.detail
+        val type = detail?.type?.lowercase()
+        if (detail == null || (type != "series" && type != "season")) {
+            invalidateNextUpPlaybackDetailRequest()
+            // Movie / episode detail does not drive next-up; clear any state.
+            if (_uiState.value.nextUpEpisode != null || _uiState.value.nextUpPlaybackDetail != null) {
+                _uiState.update {
+                    it.copy(
+                        nextUpEpisode = null,
+                        nextUpTargetReady = false,
+                        nextUpPlaybackDetail = null,
+                        isLoadingNextUpPlaybackDetail = false,
+                        didLoadNextUpPlaybackDetail = false,
+                        selectedNextUpFileId = null,
+                        selectedNextUpAudioIndex = null,
+                        nextUpAudioPickedThisSession = false,
+                        selectedNextUpSubtitleIndex = null,
+                    )
+                }
+            }
+            return
+        }
+
+        val previousId = _uiState.value.nextUpEpisode?.contentId
+        if (nextUp?.contentId == previousId && _uiState.value.nextUpEpisode != null) {
+            // Same target — just refresh the snapshot (userData may have changed)
+            // without re-loading playback detail. A fresher row also carries
+            // the episode's translated description into the hero.
+            _uiState.update {
+                it.copy(
+                    nextUpEpisode = nextUp,
+                    nextUpTargetReady = true,
+                    nextUpPlaybackDetail = nextUp?.let { row -> it.nextUpPlaybackDetail?.withEpisodeDescription(row) } ?: it.nextUpPlaybackDetail,
+                )
+            }
+            return
+        }
+
+        if (nextUp == null) {
+            invalidateNextUpPlaybackDetailRequest()
+            _uiState.update {
+                it.copy(
+                    nextUpEpisode = null,
+                    nextUpTargetReady = false,
+                    nextUpPlaybackDetail = null,
+                    isLoadingNextUpPlaybackDetail = false,
+                    didLoadNextUpPlaybackDetail = false,
+                    selectedNextUpFileId = null,
+                    selectedNextUpAudioIndex = null,
+                    nextUpAudioPickedThisSession = false,
+                    selectedNextUpSubtitleIndex = null,
+                )
+            }
+            return
+        }
+
+        // Capture portable intent while the old target's selected version and
+        // combined subtitle index are still available. Raw file IDs and indexes
+        // never cross the episode boundary.
+        val handoff = captureNextUpSelectionHandoff(oldState)
+        val refreshGeneration = ++nextUpPlaybackDetailGeneration
+        val selectorRevision = nextUpSelectorRevision
+        val identityGeneration = identityTransitions.generation.value
+        pendingNextUpSelectionHandoff = null
+        _uiState.update {
+            it.copy(
+                nextUpEpisode = nextUp,
+                nextUpTargetReady = true,
+                nextUpPlaybackDetail = null,
+                isLoadingNextUpPlaybackDetail = true,
+                didLoadNextUpPlaybackDetail = false,
+                selectedNextUpFileId = null,
+                selectedNextUpAudioIndex = null,
+                nextUpAudioPickedThisSession = false,
+                selectedNextUpSubtitleIndex = null,
+            )
+        }
+        loadNextUpPlaybackDetail(
+            episodeContentId = nextUp.contentId,
+            refreshGeneration = refreshGeneration,
+            selectorRevision = selectorRevision,
+            identityGeneration = identityGeneration,
+            handoff = handoff,
+        )
+    }
+
+    private fun resolveNextUpEpisode(episodes: List<EpisodeListItem>): EpisodeListItem? {
+        episodes.firstOrNull { it.userData?.isInProgress == true }?.let { return it }
+        episodes.firstOrNull { it.userData?.played != true }?.let { return it }
+        return episodes.firstOrNull()
+    }
+
+    private fun loadNextUpPlaybackDetail(
+        episodeContentId: String,
+        refreshGeneration: Long,
+        selectorRevision: Long,
+        identityGeneration: Long,
+        handoff: EpisodeSelectionHandoff?,
+    ) {
+        nextUpDetailJob?.cancel()
+        nextUpDetailJob = viewModelScope.launch {
+            val requestIdentity = captureNextUpIdentity(identityGeneration)
+            if (!ownsNextUpPlaybackDetailRequest(episodeContentId, refreshGeneration) || requestIdentity == null) {
+                clearPendingNextUpHandoff(episodeContentId, refreshGeneration)
+                _uiState.update {
+                    if (!ownsNextUpPlaybackDetailRequest(episodeContentId, refreshGeneration)) it else it.copy(
+                        nextUpPlaybackDetail = null,
+                        isLoadingNextUpPlaybackDetail = false,
+                        didLoadNextUpPlaybackDetail = true,
+                    )
+                }
+                return@launch
+            }
+            if (handoff != null && nextUpSelectorRevision == selectorRevision) {
+                pendingNextUpSelectionHandoff = PendingNextUpSelectionHandoff(
+                    targetContentId = episodeContentId,
+                    refreshGeneration = refreshGeneration,
+                    selectorRevision = selectorRevision,
+                    identity = requestIdentity,
+                    handoff = handoff,
+                )
+            }
+            val result = catalogRepository.getItemDetail(episodeContentId, libraryId = libraryId)
+            if (!ownsNextUpPlaybackDetailRequest(episodeContentId, refreshGeneration)) {
+                clearPendingNextUpHandoff(episodeContentId, refreshGeneration)
+                return@launch
+            }
+            val completionIdentity = captureNextUpIdentity(identityGeneration)
+            if (completionIdentity != requestIdentity) {
+                clearPendingNextUpHandoff(episodeContentId, refreshGeneration)
+                _uiState.update {
+                    if (!ownsNextUpPlaybackDetailRequest(episodeContentId, refreshGeneration)) it else it.copy(
+                        nextUpPlaybackDetail = null,
+                        isLoadingNextUpPlaybackDetail = false,
+                        didLoadNextUpPlaybackDetail = true,
+                    )
+                }
+                return@launch
+            }
+            when (result) {
+                is ApiResult.Success -> {
+                    val playbackDetail = withLocalProgress(result.data)
+                    if (
+                        !ownsNextUpPlaybackDetailRequest(episodeContentId, refreshGeneration) ||
+                        captureNextUpIdentity(identityGeneration) != requestIdentity
+                    ) {
+                        clearPendingNextUpHandoff(episodeContentId, refreshGeneration)
+                        return@launch
+                    }
+                    val pending = pendingNextUpSelectionHandoff?.takeIf {
+                        it.targetContentId == episodeContentId &&
+                            it.refreshGeneration == refreshGeneration &&
+                            it.selectorRevision == nextUpSelectorRevision &&
+                            it.identity == requestIdentity
+                    }
+                    val selectionRevision = nextUpSelectorRevision
+                    val selection = resolveNextUpTrackSelection(
+                        episodeContentId = episodeContentId,
+                        detail = playbackDetail,
+                        handoff = pending?.handoff,
+                        preferredQuality = _uiState.value.preferredQuality,
+                    )
+                    if (
+                        !ownsNextUpPlaybackDetailRequest(episodeContentId, refreshGeneration) ||
+                        captureNextUpIdentity(identityGeneration) != requestIdentity
+                    ) {
+                        clearPendingNextUpHandoff(episodeContentId, refreshGeneration)
+                        return@launch
+                    }
+                    _uiState.update {
+                        if (!ownsNextUpPlaybackDetailRequest(episodeContentId, refreshGeneration)) {
+                            it
+                        } else if (nextUpSelectorRevision != selectionRevision) {
+                            // An explicit selector callback ran while a durable
+                            // read was suspended. Finish loading the target but
+                            // leave that newer explicit choice untouched.
+                            it.copy(
+                                nextUpPlaybackDetail = it.nextUpEpisode?.let(playbackDetail::withEpisodeDescription) ?: playbackDetail,
+                                isLoadingNextUpPlaybackDetail = false,
+                                didLoadNextUpPlaybackDetail = true,
+                            )
+                        } else {
+                            it.copy(
+                                nextUpPlaybackDetail = it.nextUpEpisode?.let(playbackDetail::withEpisodeDescription) ?: playbackDetail,
+                                isLoadingNextUpPlaybackDetail = false,
+                                didLoadNextUpPlaybackDetail = true,
+                                selectedNextUpFileId = selection.fileId,
+                                selectedNextUpAudioIndex = selection.audioIndex,
+                                nextUpAudioPickedThisSession = false,
+                                selectedNextUpSubtitleIndex = selection.subtitleIndex,
+                            )
+                        }
+                    }
+                    // This transition resolution is display/session input only.
+                    // Selector callbacks remain the sole writers to session/Room.
+                    clearPendingNextUpHandoff(episodeContentId, refreshGeneration)
+                }
+                else -> {
+                    clearPendingNextUpHandoff(episodeContentId, refreshGeneration)
+                    _uiState.update {
+                        if (!ownsNextUpPlaybackDetailRequest(episodeContentId, refreshGeneration)) it else it.copy(
+                            nextUpPlaybackDetail = null,
+                            isLoadingNextUpPlaybackDetail = false,
+                            didLoadNextUpPlaybackDetail = true,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun invalidateNextUpPlaybackDetailRequest() {
+        nextUpDetailJob?.cancel()
+        nextUpDetailJob = null
+        nextUpPlaybackDetailGeneration += 1
+        pendingNextUpSelectionHandoff = null
+    }
+
+    private fun ownsNextUpPlaybackDetailRequest(episodeContentId: String, refreshGeneration: Long): Boolean =
+        nextUpPlaybackDetailGeneration == refreshGeneration &&
+            _uiState.value.nextUpEpisode?.contentId == episodeContentId
+
+    private fun clearPendingNextUpHandoff(episodeContentId: String, refreshGeneration: Long) {
+        pendingNextUpSelectionHandoff = pendingNextUpSelectionHandoff?.takeUnless {
+            it.targetContentId == episodeContentId && it.refreshGeneration == refreshGeneration
+        }
+    }
+
+    private suspend fun captureNextUpIdentity(expectedGeneration: Long): NextUpIdentity? {
+        if (identityTransitions.generation.value != expectedGeneration) return null
+        // A snapshot is the only internally-consistent server/profile read.
+        // Null means this TokenManager cannot pin the active identity; fail
+        // closed instead of composing separately-timed getters.
+        val scope = tokenManager.snapshotCurrentScope() ?: return null
+        if (identityTransitions.generation.value != expectedGeneration) return null
+        return NextUpIdentity(scope.serverId, scope.profileId, expectedGeneration)
+    }
+
+    private fun captureNextUpSelectionHandoff(state: TvItemDetailUiState): EpisodeSelectionHandoff? {
+        val detail = state.nextUpPlaybackDetail ?: return null
+        val selectedVersion = state.selectedNextUpFileId
+            ?.let { fileId -> detail.versions.firstOrNull { it.fileId == fileId } }
+        val activeVersion = selectTvDetailDisplayVersion(
+            versions = detail.versions,
+            selectedFileId = state.selectedNextUpFileId,
+            lastFileId = detail.userData?.lastFileId,
+            preferredQuality = state.preferredQuality,
+        )
+        val subtitleChoices = buildPlaybackSubtitleChoices(
+            catalogTracks = activeVersion?.subtitleTracks.orEmpty(),
+            plannedTracks = emptyList(),
+        )
+        // Source intent is carried only for an explicit version choice; an
+        // automatic last-file/quality choice must remain automatic on the
+        // target. Subtitle intent uses the displayed version because its
+        // combined index belongs to that version's track list.
+        val handoff = EpisodeSelectionHandoff(
+            source = selectedVersion?.let(::captureEpisodeSourceIntent),
+            subtitle = captureEpisodeSubtitleIntent(state.selectedNextUpSubtitleIndex, subtitleChoices),
+        )
+        return handoff.takeIf {
+            it.source != null || it.subtitle.mode != EpisodeSubtitleMode.AUTO
+        }
+    }
+
+    private suspend fun resolveNextUpTrackSelection(
+        episodeContentId: String,
+        detail: ItemDetail,
+        handoff: EpisodeSelectionHandoff?,
+        preferredQuality: String,
+    ): ResolvedNextUpTrackSelection {
+        val session = TvDetailTrackSelectionSession.recall(episodeContentId)
+        val sourceSpecified = handoff?.source != null
+        val carriedFileId = resolveEpisodeSourceIntent(handoff?.source, detail.versions)
+        val sessionFileId = session?.fileId?.takeIf { fileId -> detail.versions.any { it.fileId == fileId } }
+        val selectedFileId = if (sourceSpecified) carriedFileId else sessionFileId
+        val selectedVersion = selectTvDetailDisplayVersion(
+            versions = detail.versions,
+            selectedFileId = selectedFileId,
+            lastFileId = detail.userData?.lastFileId,
+            preferredQuality = preferredQuality,
+        )
+            ?: return ResolvedNextUpTrackSelection(selectedFileId, null, null)
+
+        val sessionMatchesSelectedVersion = session != null &&
+            (session.trackFileId == null || session.trackFileId == selectedVersion.fileId)
+        val targetSubtitleChoices = buildPlaybackSubtitleChoices(
+            catalogTracks = selectedVersion.subtitleTracks.orEmpty(),
+            plannedTracks = emptyList(),
+        )
+        val carriedSubtitle = resolveEpisodeSubtitleIntent(
+            intent = handoff?.subtitle ?: EpisodeSubtitleIntent.auto(),
+            targetSubtitles = targetSubtitleChoices,
+        )
+        val durable = userItemState.localTrackSelection(episodeContentId, selectedVersion.fileId)
+            ?.withSeriesTrackChoices(
+                detail,
+                selectedVersion,
+                _uiState.value.subtitleOverlayFor(detail),
+                _uiState.value.audioOverlayFor(detail),
+                subtitleResetToAuto = subtitleResetToAuto(detail),
+            )
+            ?.let { restoreTrackSelection(selectedVersion, it) }
+
+        val (sessionAudio, sessionSubtitle) = sessionTracksConsistentWithSeriesChoice(
+            detail = detail,
+            version = selectedVersion,
+            audio = session?.audio.takeIf { sessionMatchesSelectedVersion },
+            subtitle = session?.subtitle.takeIf { sessionMatchesSelectedVersion },
+            pendingSubtitles = _uiState.value.subtitleOverlayFor(detail),
+            pendingAudio = _uiState.value.audioOverlayFor(detail),
+        )
+        return ResolvedNextUpTrackSelection(
+            fileId = selectedFileId,
+            audioIndex = sessionAudio ?: durable?.audioIndex,
+            subtitleIndex = if (carriedSubtitle.intentSpecified) {
+                carriedSubtitle.trackIndex
+            } else {
+                sessionSubtitle ?: durable?.subtitleIndex
+            },
+        )
+    }
+
+
+    /** Mirror of the phone flow: fire (auto = once per content+language), then
+     *  poll detail until `pending_translation_language` clears. */
+    fun translateDescription(auto: Boolean = false) {
+        val detail = _uiState.value.detail ?: return
+        val target = detail.pendingTranslationLanguage ?: return
+        if (auto) {
+            if (!descriptionTranslation.shouldAutoFire(detail.contentId, target)) return
+            descriptionTranslation.markAutoFired(detail.contentId, target)
+        }
+        descriptionTranslation.resetFailure()
+        viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            descriptionTranslation.translate(
+                contentId = detail.contentId,
+                targetLanguage = target,
+                refetchPendingLanguage = { owner ->
+                    when (val result = metadataAiRepository.refreshDetail(detail.contentId, owner)) {
+                        is ApiResult.Success -> {
+                            val refreshed = withLocalProgress(result.data)
+                            if (metadataAiRepository.isCurrent(owner) && _uiState.value.detail?.contentId == detail.contentId) {
+                                _uiState.update { it.copy(detail = refreshed) }
+                                val seriesId = detail.seriesId
+                                val seasonNumber = detail.seasonNumber
+                                if (detail.type.equals("season", ignoreCase = true) &&
+                                    seriesId != null && seasonNumber != null
+                                ) {
+                                    refreshEpisodesForTranslation(seriesId, seasonNumber, owner, target)
+                                        ?: refreshed.pendingTranslationLanguage
+                                } else refreshed.pendingTranslationLanguage
+                            } else target
+                        }
+                        else -> target // transient refetch failure: keep polling
+                    }
+                },
+                onTranslated = {},
+            )
+        }
+    }
+
+    private suspend fun refreshEpisodesForTranslation(
+        seriesId: String,
+        seasonNumber: Int,
+        owner: org.siloserver.silo.network.AuthScopeSnapshot?,
+        target: String,
+    ): String? {
+        val requestGeneration = episodeLoadRequestGeneration
+        val listGeneration = episodeListGeneration
+        val result = catalogRepository.getEpisodes(seriesId, seasonNumber, libraryId = libraryId, fresh = true,
+            surface = episodeArtwork)
+        if (result !is ApiResult.Success || !metadataAiRepository.isCurrent(owner)) return target
+        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+        if (_uiState.value.selectedSeason != seasonNumber) return result.data.episodes.pendingEpisodeTranslationLanguage()
+        val fresh = withLocalProgress(result.data.episodes)
+        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+        if (!metadataAiRepository.isCurrent(owner) ||
+            requestGeneration != episodeLoadRequestGeneration ||
+            listGeneration != episodeListGeneration ||
+            _uiState.value.selectedSeason != seasonNumber
+        ) return target
+        episodeDescriptionRevisions[seasonNumber] = (episodeDescriptionRevisions[seasonNumber] ?: 0L) + 1
+        _uiState.update { state ->
+            val current = state.episodes.associateBy { it.contentId }
+            val merged = fresh.sortedBy { it.episodeNumber }
+                .map { row -> current[row.contentId]?.withTranslatedDescription(row) ?: row }
+            state.copy(episodes = merged)
+        }
+        val episodes = _uiState.value.episodes
+        refreshNextUp(episodes)
+        recordCarouselSeason(seasonNumber, episodes)
+        return result.data.episodes.pendingEpisodeTranslationLanguage()
+    }
+
+    /**
+     * `auto` on-view mode for a series page's episode rail: start the shown
+     * season's translation once per (season, language) when its episode rows
+     * report a missing description, re-reading the rail until none does. The
+     * season detail's pending language covers its episodes, so it is the
+     * completion signal.
+     */
+    fun translateShownSeasonEpisodes() {
+        val state = _uiState.value
+        val detail = state.detail ?: return
+        if (!detail.type.equals("series", ignoreCase = true)) return
+        val seasonNumber = state.selectedSeason ?: return
+        val season = state.seasons.firstOrNull { it.seasonNumber == seasonNumber } ?: return
+        val target = state.episodes
+            .filter { it.seasonNumber == seasonNumber }
+            .pendingEpisodeTranslationLanguage() ?: return
+        // A season switched to while another season's job polls is retried
+        // when that job ends (below), rather than latched as already fired.
+        if (!episodeTranslation.claimAutoFire(season.contentId, target)) return
+        episodeTranslation.resetFailure()
+        viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            episodeTranslation.translate(
+                contentId = season.contentId,
+                targetLanguage = target,
+                refetchPendingLanguage = { owner ->
+                    refreshEpisodesForTranslation(detail.contentId, seasonNumber, owner, target)
+                },
+                onTranslated = {},
+            )
+            if (episodeTranslation.takeDeferredAuto()) translateShownSeasonEpisodes()
+        }
+    }
+
+    fun onNextUpVersionSelected(fileId: Int?) {
+        markNextUpSelectorInput()
+        _uiState.update {
+            it.copy(
+                selectedNextUpFileId = fileId,
+                selectedNextUpAudioIndex = null,
+                nextUpAudioPickedThisSession = false,
+                selectedNextUpSubtitleIndex = null,
+            )
+        }
+        rememberNextUpTrackSelection()
+        seedPersistedNextUpTrackSelection()
+    }
+
+    fun onNextUpAudioTrackSelected(index: Int?) {
+        markNextUpSelectorInput()
+        _uiState.update {
+            it.copy(
+                selectedNextUpAudioIndex = index,
+                nextUpAudioPickedThisSession = index != null,
+            )
+        }
+        rememberNextUpTrackSelection()
+        persistNextUpTrackSelection()
+        val state = _uiState.value
+        state.nextUpPlaybackDetail?.let { detail ->
+            rememberSeriesAudioChoice(
+                detail,
+                resolveTvTrackSelectionVersion(detail, state.selectedNextUpFileId, state.preferredQuality),
+                index,
+            )
+        }
+    }
+
+    fun onNextUpSubtitleTrackSelected(index: Int?) {
+        markNextUpSelectorInput()
+        _uiState.update { it.copy(selectedNextUpSubtitleIndex = index) }
+        rememberNextUpTrackSelection()
+        persistNextUpTrackSelection()
+        val state = _uiState.value
+        state.nextUpPlaybackDetail?.let { detail ->
+            rememberSeriesSubtitleChoice(
+                detail,
+                resolveTvTrackSelectionVersion(detail, state.selectedNextUpFileId, state.preferredQuality),
+                index,
+            )
+        }
+    }
+
+    private fun markNextUpSelectorInput() {
+        nextUpSelectorRevision += 1
+        pendingNextUpSelectionHandoff = null
+    }
+
+    private fun rememberNextUpTrackSelection() {
+        val state = _uiState.value
+        val nextUpContentId = state.nextUpEpisode?.contentId ?: return
+        TvDetailTrackSelectionSession.remember(
+            nextUpContentId,
+            state.selectedNextUpFileId,
+            state.selectedNextUpAudioIndex,
+            state.selectedNextUpSubtitleIndex,
+            trackFileId = state.nextUpPlaybackDetail?.let { detail ->
+                resolveTvTrackSelectionVersion(
+                    detail,
+                    state.selectedNextUpFileId,
+                    state.preferredQuality,
+                )?.fileId
+            },
+        )
+    }
+
+    private fun persistNextUpTrackSelection() {
+        val state = _uiState.value
+        val nextUpContentId = state.nextUpEpisode?.contentId ?: return
+        val detail = state.nextUpPlaybackDetail ?: return
+        persistTrackSelectionFor(
+            targetContentId = nextUpContentId,
+            detail = detail,
+            selectedFileId = state.selectedNextUpFileId,
+            selectedAudioIndex = state.selectedNextUpAudioIndex,
+            selectedSubtitleIndex = state.selectedNextUpSubtitleIndex,
+            preferredQuality = state.preferredQuality,
+        )
+    }
+
+    private fun seedPersistedNextUpTrackSelection(
+        episodeContentId: String? = _uiState.value.nextUpEpisode?.contentId,
+        detail: ItemDetail? = _uiState.value.nextUpPlaybackDetail,
+    ) {
+        val targetContentId = episodeContentId ?: return
+        val playbackDetail = detail ?: return
+        val selectedFileId = _uiState.value.selectedNextUpFileId
+        val selectorRevision = nextUpSelectorRevision
+        val refreshGeneration = nextUpPlaybackDetailGeneration
+        val version = resolveTvTrackSelectionVersion(
+            playbackDetail,
+            selectedFileId,
+            _uiState.value.preferredQuality,
+        ) ?: return
+        viewModelScope.launch {
+            val saved = userItemState.localTrackSelection(targetContentId, version.fileId)
+                ?.withSeriesTrackChoices(
+                    playbackDetail,
+                    version,
+                    _uiState.value.subtitleOverlayFor(playbackDetail),
+                    _uiState.value.audioOverlayFor(playbackDetail),
+                    subtitleResetToAuto = subtitleResetToAuto(playbackDetail),
+                )
+                ?: return@launch
+            val restored = restoreTrackSelection(version, saved)
+            var remembered: TvDetailTrackSelectionSession.Saved? = null
+            while (true) {
+                val current = _uiState.value
+                if (
+                    nextUpPlaybackDetailGeneration != refreshGeneration ||
+                    nextUpSelectorRevision != selectorRevision ||
+                    !shouldApplyNextUpTrackRestore(
+                        currentContentId = current.nextUpEpisode?.contentId,
+                        requestedContentId = targetContentId,
+                        currentSelectedFileId = current.selectedNextUpFileId,
+                        requestedSelectedFileId = selectedFileId,
+                    )
+                ) {
+                    break
+                }
+                val merged = mergeTrackSelection(
+                    currentAudioIndex = current.selectedNextUpAudioIndex,
+                    currentSubtitleIndex = current.selectedNextUpSubtitleIndex,
+                    durable = restored,
+                )
+                val updated = current.copy(
+                    selectedNextUpSubtitleIndex = merged.subtitleIndex,
+                    selectedNextUpAudioIndex = merged.audioIndex,
+                )
+                if (_uiState.compareAndSet(current, updated)) {
+                    remembered = TvDetailTrackSelectionSession.Saved(
+                        fileId = updated.selectedNextUpFileId,
+                        audio = updated.selectedNextUpAudioIndex,
+                        subtitle = updated.selectedNextUpSubtitleIndex,
+                        trackFileId = version.fileId,
+                    )
+                    break
+                }
+            }
+            // Remember exactly the successfully-owned target snapshot. Never
+            // reread the now-current UI after a suspension: it may be a carried
+            // selection for a different episode.
+            remembered?.let { selection ->
+                TvDetailTrackSelectionSession.remember(
+                    contentId = targetContentId,
+                    fileId = selection.fileId,
+                    audio = selection.audio,
+                    subtitle = selection.subtitle,
+                    trackFileId = selection.trackFileId,
+                )
+            }
+        }
+    }
+
+    /**
+     * Reads the box set row for a movie. A failed read keeps the row on
+     * screen, as a quiet refresh keeps the rest of the page.
+     */
+    private fun loadBoxSet(detail: ItemDetail) {
+        val run = ++boxSetGeneration
+        boxSetJob?.cancel()
+        boxSetJob = viewModelScope.launch {
+            val result = org.siloserver.silo.viewmodel.loadMovieBoxSet(catalogRepository, personalDataRepository, detail, libraryId)
+            if (run != boxSetGeneration || _uiState.value.detail?.contentId != detail.contentId) return@launch
+            if (result !is ApiResult.Success) return@launch
+            val boxSet = result.data
+            _uiState.update {
+                it.copy(
+                    boxSet = boxSet?.boxSet,
+                    boxSetItems = boxSet?.items.orEmpty().map { movie ->
+                        movie.toSectionItem().copy(positionSeconds = movie.positionSeconds, durationSeconds = movie.durationSeconds)
+                    },
+                )
+            }
+        }
+    }
+
+    private fun loadMoreLikeThis(detail: ItemDetail, owner: org.siloserver.silo.network.AuthScopeSnapshot?, run: Long) {
+        if (owner == null || detail.type.lowercase() == "episode" || run != similarGeneration) return
+        val recommendations = recommendationRepository ?: return
+        moreLikeThisJob?.cancel()
+        moreLikeThisJob = viewModelScope.launch {
+            delay(300)
+            if (!recommendations.isSimilarAuthorityCurrent(owner) || run != similarGeneration ||
+                _uiState.value.detail?.contentId != detail.contentId) return@launch
+            _uiState.update { it.copy(moreLikeThisLoading = true) }
+            recommendations.loadSimilarCards(detail.contentId, owner,
+                stillCurrent = { run == similarGeneration && _uiState.value.detail?.contentId == detail.contentId },
+                publish = { cards ->
+                    val items = similarCardsForTv(cards, detail.contentId)
+                    _uiState.update { it.copy(moreLikeThisLoading = false, moreLikeThis = items) }
+                })
+        }
+    }
+    // Start observers only after every cache and request field is initialized.
+    init {
+        viewModelScope.launch {
+            identityTransitions.transitions.collect { transition ->
+                if (transition.phase == IdentityTransitionPhase.WILL_CHANGE) {
+                    releaseInvalidatedPersonalMutations(transition.generation)
+                    pendingNextUpSelectionHandoff = null
+                    episodeListGeneration++
+                    _uiState.update { it.copy(isFavorite = false, inWatchlist = false, episodeFavoriteStates = emptyMap()) }
+                } else {
+                    loadUserState()
+                    refreshEpisodeFavoriteStates(_uiState.value.episodes, revalidate = null)
+                }
+            }
+        }
+        observePreferredQuality()
+        capabilityDetector?.let(::observeAutomaticAudioPolicy)
+        seriesTrackChoiceWriter?.let { writer ->
+            viewModelScope.launch {
+                writer.pendingSubtitleChoices.collect { pending ->
+                    _uiState.update { it.copy(pendingSeriesSubtitleChoices = pending) }
+                }
+            }
+            viewModelScope.launch {
+                writer.pendingAudioChoices.collect { pending ->
+                    _uiState.update { it.copy(pendingSeriesAudioChoices = pending) }
+                }
+            }
+        }
+        if (contentId.isNotBlank()) {
+            // Restore this title's pre-play track choices (QA 2026-07-08: a
+            // manual subtitle selection reset on every return to the page —
+            // season switches and detail re-entry build a fresh ViewModel).
+            TvDetailTrackSelectionSession.recall(contentId)?.let { saved ->
+                _uiState.update {
+                    it.copy(
+                        selectedFileId = saved.fileId,
+                    )
+                }
+            }
+            loadAll()
+        }
+    }
+
+}
+
+/** Watched and unwatched both reset resume progress, as the server does. */
+private fun ItemDetail.withWatchedPlaybackState(watched: Boolean): ItemDetail {
+    val current = userData ?: LeafItemUserData()
+    return copy(
+        userData = current.copy(
+            played = watched,
+            isInProgress = false,
+            positionSeconds = null,
+        ),
+    )
+}
+
+private fun EpisodeListItem.withWatchedPlaybackState(watched: Boolean): EpisodeListItem {
+    val current = userData ?: LeafItemUserData()
+    return copy(
+        userData = current.copy(
+            played = watched,
+            isInProgress = false,
+            positionSeconds = null,
+        ),
+    )
+}
+
+private fun ItemDetail.toSectionItem(): SectionItem = SectionItem(
+    contentId = contentId,
+    type = type,
+    title = title,
+    year = year,
+    genres = genres,
+    status = status,
+    ratingImdb = ratingImdb,
+    ratingTmdb = ratingTmdb,
+    contentRating = contentRating,
+    overview = overview,
+    posterUrl = posterUrl,
+    posterThumbhash = posterThumbhash,
+    backdropUrl = backdropUrl,
+    backdropThumbhash = backdropThumbhash,
+)
+
+private fun BrowseItem.toSectionItem(): SectionItem = SectionItem(
+    contentId = contentId,
+    type = type,
+    title = title,
+    year = year,
+    genres = genres,
+    status = status,
+    ratingImdb = ratingImdb,
+    ratingTmdb = ratingTmdb,
+    contentRating = contentRating,
+    overlaySummary = overlaySummary,
+    overview = overview,
+    posterUrl = posterUrl,
+    posterThumbhash = posterThumbhash,
+    backdropUrl = backdropUrl,
+    backdropThumbhash = backdropThumbhash,
+    userState = userState,
+)
+
+/**
+ * Session-scoped memory of the detail page's pre-play track choices, keyed by
+ * contentId. The detail ViewModel is nav-entry scoped, so any navigation that
+ * rebuilds the entry (season switch, re-opening the item) silently dropped a
+ * manual audio/subtitle pre-selection (QA 2026-07-08). In-memory on purpose:
+ * durable per-playback preferences are recorded by the player itself.
+ */
+/**
+ * Favourites toggled on one detail screen that other retained detail screens
+ * may still be showing the old answer for.
+ *
+ * Versioned rather than consume-once. Consume-once loses the signal whenever
+ * more than one screen can read it, and more than one always can: every detail
+ * screen refreshes on resume, so an episode screen returning from playback
+ * would swallow the marker meant for the series rail behind it. It also loses
+ * the signal when the read succeeds but the reload meant to act on it fails.
+ *
+ * So nothing is consumed. Each change gets a monotonically increasing version,
+ * and each reader remembers the version it has caught up to, advancing that
+ * mark only once a revalidation has actually succeeded. Any number of readers
+ * each see every change, and a failed reload simply tries again next resume.
+ *
+ * A targeted set remains the point: re-asking about every visible episode on
+ * every resume would restore the request volume the probe window exists to
+ * prevent, and ON_RESUME also fires for returning from playback and for
+ * foregrounding the app.
+ */
+internal object TvFavoriteRevalidationSession {
+    private val lock = Any()
+    private var version = 0L
+    private val changedAt = LinkedHashMap<String, Long>()
+
+    /**
+     * Highest version dropped by the cap. A reader behind this cannot be told
+     * what it missed, so it is told to re-check everything instead of being
+     * silently handed an incomplete delta.
+     */
+    private var evictedThrough = 0L
+
+    /** Ample for any one visit; oldest entries fall off rather than grow forever. */
+    private const val MAX_TRACKED = 256
+
+    fun markChanged(contentId: String) {
+        if (contentId.isBlank()) return
+        synchronized(lock) {
+            version += 1
+            changedAt.remove(contentId)
+            changedAt[contentId] = version
+            while (changedAt.size > MAX_TRACKED) {
+                val oldest = changedAt.entries.first()
+                evictedThrough = maxOf(evictedThrough, oldest.value)
+                changedAt.remove(oldest.key)
+            }
+        }
+    }
+
+    /** The mark a reader stores once it has caught up. */
+    fun currentVersion(): Long = synchronized(lock) { version }
+
+    /**
+     * Ids changed after [sinceVersion]; readers pass the mark they last stored.
+     *
+     * Null means "cannot say": this reader is behind entries the cap has since
+     * dropped, so a delta would be incomplete. Callers re-check everything
+     * visible rather than trusting a partial answer — being slow must cost a
+     * round of extra probes, never a silently missed change.
+     */
+    fun changedSince(sinceVersion: Long): Set<String>? = synchronized(lock) {
+        if (sinceVersion < evictedThrough) return null
+        changedAt.entries
+            .filter { it.value > sinceVersion }
+            .mapTo(LinkedHashSet()) { it.key }
+    }
+
+    fun reset() = synchronized(lock) {
+        version = 0L
+        evictedThrough = 0L
+        changedAt.clear()
+    }
+}
+
+internal object TvDetailTrackSelectionSession {
+    internal data class Saved(
+        val fileId: Int?,
+        val audio: Int?,
+        val subtitle: Int?,
+        /** File whose track ordinals belong to; [fileId] remains null for Auto. */
+        val trackFileId: Int? = fileId,
+        val positionSeconds: Double? = null,
+        val durationSeconds: Double? = null,
+    )
+
+    private val byContent = HashMap<String, Saved>()
+
+    fun remember(
+        contentId: String,
+        fileId: Int?,
+        audio: Int?,
+        subtitle: Int?,
+        trackFileId: Int? = fileId,
+    ) {
+        if (contentId.isBlank()) return
+        byContent[contentId] = Saved(fileId, audio, subtitle, trackFileId)
+    }
+
+    fun rememberPlaybackReturn(
+        contentId: String,
+        fileId: Int?,
+        audio: Int?,
+        subtitle: Int?,
+        positionSeconds: Double,
+        durationSeconds: Double?,
+    ) {
+        if (contentId.isBlank() || !positionSeconds.isFinite() || positionSeconds < 0.0) return
+        val previous = byContent[contentId]
+        byContent[contentId] = Saved(
+            // A playback return reports the resolved backing file, not a new
+            // manual Version choice. Preserve Auto/explicit UI intent.
+            fileId = previous?.fileId,
+            // The player reports the subtitle it ended on, not the audio. The
+            // page's own audio pick is not kept either: the viewer may have
+            // picked again in the player, and that pick is the series choice
+            // now. Auto shows (and Play resolves) whatever the server holds.
+            audio = audio,
+            // A null player result means the mounted track could not be
+            // resolved to a stable server index (keep current), not Off.
+            subtitle = subtitle ?: previous?.subtitle,
+            trackFileId = fileId ?: previous?.trackFileId,
+            positionSeconds = positionSeconds,
+            durationSeconds = durationSeconds?.takeIf { it.isFinite() && it > 0.0 },
+        )
+    }
+
+    fun recall(contentId: String): Saved? = byContent[contentId]
+
+    /** The episode a series page selects when its playback closes. */
+    internal data class SeriesReturn(
+        val seriesId: String,
+        val episodeId: String,
+        val seasonNumber: Int?,
+        /** Identity generation it was recorded under; the page applies it only under the same one. */
+        val identityGeneration: Long?,
+    )
+
+    private var seriesReturn: SeriesReturn? = null
+
+    fun rememberSeriesReturn(target: SeriesReturn) {
+        seriesReturn = target
+    }
+
+    /** Returns the series' pending playback return once, under the generation that recorded it. */
+    fun consumeSeriesReturn(seriesId: String, identityGeneration: Long): SeriesReturn? =
+        seriesReturn
+            ?.takeIf { it.seriesId == seriesId && it.identityGeneration == identityGeneration }
+            ?.also { seriesReturn = null }
+
+    /**
+     * Returns the pending player-exit progress once, while retaining the
+     * session's file and track choices for later detail-screen recreation.
+     */
+    fun consumePlaybackReturn(contentId: String): Saved? {
+        val saved = byContent[contentId]
+            ?.takeIf { it.positionSeconds != null }
+            ?: return null
+        byContent[contentId] = saved.copy(
+            positionSeconds = null,
+            durationSeconds = null,
+        )
+        return saved
+    }
+}
+
+private fun ItemDetail.isWatchedWithoutResume(): Boolean =
+    userData?.let { it.played && (it.positionSeconds ?: 0.0) <= 0.0 } == true
+
+private fun ItemDetail.withPlaybackReturn(saved: TvDetailTrackSelectionSession.Saved): ItemDetail {
+    val position = saved.positionSeconds?.takeIf { it.isFinite() && it >= 0.0 } ?: return this
+    val current = userData ?: LeafItemUserData()
+    return copy(
+        userData = current.copy(
+            isInProgress = position > 0.0,
+            positionSeconds = position.takeIf { it > 0.0 },
+            durationSeconds = saved.durationSeconds ?: current.durationSeconds,
+            lastFileId = saved.trackFileId ?: current.lastFileId,
+        ),
+    )
+}
+
+/** Similar cards keep their server rank while honoring the existing TV surface exclusions. */
+internal fun similarCardsForTv(cards: List<BrowseItem>, sourceId: String): List<SectionItem> =
+    cards.filterNot { isTvHiddenMediaType(it.type) || it.contentId == sourceId }.map { it.toSectionItem() }

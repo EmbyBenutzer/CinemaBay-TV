@@ -1,0 +1,54 @@
+name: Android Builds
+
+# CI gate: tests, lint, and release readiness on main pushes and pull requests.
+# Release artifacts (Play Store bundles, sideload APKs, GitHub releases) are owned by
+# release.yml, which only releases a commit this workflow passed on main.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      build_ffmpeg_aar:
+        description: Build the pinned Media3 FFmpeg decoder AAR instead of app jobs
+        required: false
+        default: false
+        type: boolean
+      build_cache:
+        description: Reuse Gradle task outputs (disable for a baseline measurement)
+        required: false
+        default: true
+        type: boolean
+      parallel:
+        description: Benchmark lint parallelism at the existing worker limit
+        required: false
+        default: false
+        type: boolean
+      configuration_cache:
+        description: Check configuration-cache compatibility without publishing artifacts
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-builds-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    # Hosted PR validation must exercise the proposed workflow revision. The
+    # runner group's main-only restriction still applies to self-hosted calls.
+    uses: ./.github/workflows/trusted-linux-ci.yml
+    with:
+      self_hosted: false
+      build_ffmpeg_aar: ${{ inputs.build_ffmpeg_aar || false }}
+      build_cache: ${{ github.event_name != 'workflow_dispatch' || inputs.build_cache }}
+      parallel: ${{ inputs.parallel || false }}
+      configuration_cache: ${{ inputs.configuration_cache || false }}
+    secrets:
+      SILO_TRANSLATIONS_TOKEN: ${{ secrets.SILO_TRANSLATIONS_READ_TOKEN }}

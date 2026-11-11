@@ -1,0 +1,31 @@
+libdovi 2.3.1
+Copyright (c) quietvoid
+
+Licensed under the MIT License. The pinned Android static libraries are from
+the dolby_vision crate in quietvoid/dovi_tool commit
+b25558062e4a56973482ec70133bd7b891320e48 and are built from source with the
+pinned Rust and Android NDK toolchains recorded in provenance.json. The source
+archive, Cargo.lock, per-ABI libraries, and final AAR are verified by SHA-256
+in scripts/build-dovi-aar.sh. The checked-in build lock updates only compatible
+crate releases needed to address OSV advisories published after upstream 2.3.1:
+anyhow 1.0.103 (RUSTSEC-2026-0190), removal of core2 0.4.0 through
+bitvec_helpers 4.0.2 and bitstream-io 4.10.0 (RUSTSEC-2026-0105), and
+crossbeam-epoch 0.9.20 (RUSTSEC-2026-0204).
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

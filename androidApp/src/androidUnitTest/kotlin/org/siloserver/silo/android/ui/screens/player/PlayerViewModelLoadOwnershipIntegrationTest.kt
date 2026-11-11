@@ -1,0 +1,2323 @@
+package org.siloserver.silo.android.ui.screens.player
+
+import org.siloserver.silo.network.apiv2.ApiV2Gate
+
+import android.app.Application
+import androidx.lifecycle.ViewModelStore
+import androidx.room.Room
+import androidx.test.core.app.ApplicationProvider
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.headersOf
+import io.ktor.serialization.kotlinx.json.json
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import org.siloserver.silo.common.data.db.SiloDatabase
+import org.siloserver.silo.common.downloads.DownloadMetadataStore
+import org.siloserver.silo.common.downloads.DownloadStorage
+import org.siloserver.silo.common.downloads.LegacyDownloadImporter
+import org.siloserver.silo.common.downloads.OfflineMediaResolver
+import org.siloserver.silo.common.network.ServerReachabilityMonitor
+import org.siloserver.silo.common.player.AudioCapabilityManager
+import org.siloserver.silo.common.player.FinalPlaybackPositionWriter
+import org.siloserver.silo.common.player.Playability
+import org.siloserver.silo.common.player.PlaybackAnalyticsListener
+import org.siloserver.silo.common.network.SiloClientBuildIdentity
+import org.siloserver.silo.common.player.PlaybackCapabilityDetector
+import org.siloserver.silo.common.player.PlaybackNetworkEvidenceProvider
+import org.siloserver.silo.common.player.PlaybackNetworkSnapshot
+import org.siloserver.silo.common.player.PlaybackSessionLifecycle
+import org.siloserver.silo.common.player.PlaybackSessionManager
+import org.siloserver.silo.common.player.SleepTimerController
+import org.siloserver.silo.common.player.StartParams
+import org.siloserver.silo.common.player.VideoSessionStartV3
+import org.siloserver.silo.common.player.video.PlaybackDiagnosticsCode
+import org.siloserver.silo.common.player.video.VideoPlaybackSessionCoordinator
+import org.siloserver.silo.common.player.video.VideoPlaybackStartRequest
+import org.siloserver.silo.common.player.video.VideoPlaybackStartResult
+import org.siloserver.silo.common.player.video.VideoPlaybackStarter
+import org.siloserver.silo.common.settings.PlayerSettingsStore
+import org.siloserver.silo.domain.player.BufferingQualityMode
+import org.siloserver.silo.domain.player.IntroAutoSkipController
+import org.siloserver.silo.domain.player.IntroSkipMode
+import org.siloserver.silo.libass.LibassBridge
+import org.siloserver.silo.model.catalog.FileVersion
+import org.siloserver.silo.model.catalog.AudioTrack
+import org.siloserver.silo.model.catalog.SubtitleTrack
+import org.siloserver.silo.model.playback.ClientCodecCapabilities
+import org.siloserver.silo.model.playback.ClientPlaybackContext
+import org.siloserver.silo.model.playback.PlayMethod
+import org.siloserver.silo.model.playback.PlaybackDelivery
+import org.siloserver.silo.model.playback.PlaybackPlanV3
+import org.siloserver.silo.model.playback.PlaybackSessionResponse
+import org.siloserver.silo.model.playback.PlaybackStreamProtocol
+import org.siloserver.silo.model.playback.PlaybackStreamV3
+import org.siloserver.silo.model.playback.PlaybackTrackIdentityV3
+import org.siloserver.silo.model.playback.SelectedPlaybackTracksV3
+import org.siloserver.silo.model.profile.Profile
+import org.siloserver.silo.model.server.ServerEntry
+import org.siloserver.silo.model.settings.SubtitleAppearance
+import org.siloserver.silo.network.ApiResult
+import org.siloserver.silo.network.ServerRegistry
+import org.siloserver.silo.network.SiloJson
+import org.siloserver.silo.network.TokenManager
+import org.siloserver.silo.network.api.CatalogApi
+import org.siloserver.silo.network.api.DefaultSubtitlesApi
+import org.siloserver.silo.network.api.HealthApi
+import org.siloserver.silo.network.api.PersonalDataApi
+import org.siloserver.silo.network.api.ProfileApi
+import org.siloserver.silo.repository.CatalogRepository
+import org.siloserver.silo.repository.PersonalDataRepository
+import org.siloserver.silo.repository.PlaybackRepository
+import org.siloserver.silo.repository.ProfileRepository
+import org.siloserver.silo.repository.SubtitlesRepository
+import org.siloserver.silo.repository.port.LocalTrackSelection
+import org.siloserver.silo.repository.port.NoOpUserItemStatePort
+import org.siloserver.silo.repository.port.UserItemStatePort
+import org.siloserver.silo.playback.audioTrackFingerprint
+import org.siloserver.silo.playback.encodeCatalogSubtitlePreference
+import org.siloserver.silo.watchtogether.WatchPartyPlaybackContext
+
+@OptIn(ExperimentalCoroutinesApi::class)
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34], application = Application::class)
+class PlayerViewModelLoadOwnershipIntegrationTest {
+    @get:Rule
+    val tmp = TemporaryFolder()
+
+    // StandardTestDispatcher, NOT Unconfined. Unconfined resumes continuations
+    // inline on whichever thread completed the suspending call, and reentrant
+    // resumptions land in that thread's internal unconfined event loop — a queue
+    // the test scheduler cannot reach. Waiting for such a continuation from
+    // another dispatcher was a genuine race: measured 2 failures in 6 idle runs.
+    // A standard dispatcher gives every continuation an explicit scheduler queue
+    // that `runTest` drains while the test body is suspended.
+    private val dispatcher = StandardTestDispatcher()
+    private lateinit var db: SiloDatabase
+
+    @BeforeTest
+    fun setUp() {
+        Dispatchers.setMain(dispatcher)
+        db = Room.inMemoryDatabaseBuilder(
+            ApplicationProvider.getApplicationContext(),
+            SiloDatabase::class.java,
+        ).allowMainThreadQueries().build()
+    }
+
+    @AfterTest
+    fun tearDown() {
+        db.close()
+        Dispatchers.resetMain()
+    }
+
+    @Test
+    fun recreatedScreenObservesAppliedSubtitleMountWithoutRemountingRetainedPlayback() = runTest(dispatcher) {
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            viewModel.loadContent(contentId = "movie", preferredFileId = 1)
+            starter.awaitRequestCount(1)
+            starter.complete(0, ready(starter.request(0), "session"))
+            viewModel.awaitState { it.sessionId == "session" && !it.isLoading }
+            val state = viewModel.uiState.value
+            val mount = MobileSubtitleMount(state.mediaMountGeneration, state.subtitleRefreshNonce)
+            viewModel.onSubtitleMediaMountApplied(mount)
+            viewModel.onMediaMountApplied(mount.generation)
+            assertTrue(viewModel.isCurrentSubtitleMount(mount))
+
+            // A replacement composition subscribes after the original collector is gone.
+            val reattachedMount = viewModel.mountedSubtitleMount.first()
+            assertEquals(mount, reattachedMount)
+            assertFalse(viewModel.shouldApplyMediaMount(mount.generation))
+            assertTrue(viewModel.isCurrentSubtitleMount(reattachedMount))
+
+            viewModel.onSubtitleMediaMountChanging()
+            assertNull(viewModel.mountedSubtitleMount.first())
+            assertFalse(viewModel.isCurrentSubtitleMount(reattachedMount))
+            viewModel.onSubtitleMediaMountApplied(mount)
+            assertTrue(viewModel.isCurrentSubtitleMount(viewModel.mountedSubtitleMount.first()))
+
+            viewModel.loadContent(contentId = "next", preferredFileId = 2)
+            assertNull(viewModel.mountedSubtitleMount.value)
+            assertFalse(viewModel.isCurrentSubtitleMount(mount))
+            starter.awaitRequestCount(2)
+            starter.complete(1, ready(starter.request(1), "next-session"))
+            viewModel.awaitState { it.sessionId == "next-session" && !it.isLoading }
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun differentContentLoadsCompletingOutOfOrderKeepNewestAndStopStaleReady() =
+        runTest(dispatcher) {
+            val starter = DeferredNonCooperativeStarter()
+            val fixture = playerViewModel(starter, backgroundScope)
+            val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+            try {
+                fixture.viewModel.loadContent(contentId = "old", preferredFileId = 1)
+                starter.awaitRequestCount(1)
+                fixture.viewModel.loadContent(contentId = "new", preferredFileId = 2)
+                starter.awaitRequestCount(2)
+
+                starter.complete(1, ready(starter.request(1), "new-session"))
+                fixture.viewModel.awaitState {
+                    it.contentId == "new" && it.sessionId == "new-session" && !it.isLoading
+                }
+                starter.complete(0, ready(starter.request(0), "old-session"))
+                fixture.manager.awaitStopped("old-session")
+
+                val state = fixture.viewModel.uiState.value
+                assertEquals("new", state.contentId)
+                assertEquals("new-session", state.sessionId)
+                assertEquals(2, state.mediaFileId)
+                assertEquals(listOf("old-session"), fixture.manager.stoppedSessions)
+            } finally {
+                store.clear()
+            }
+        }
+
+    @Test
+    fun sameContentFileAndQualityLoadsCompletingOutOfOrderKeepNewestRequest() =
+        runTest(dispatcher) {
+            val starter = DeferredNonCooperativeStarter()
+            val fixture = playerViewModel(starter, backgroundScope)
+            val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+            try {
+                fixture.viewModel.loadContent(
+                    contentId = "movie",
+                    preferredFileId = 10,
+                    preferredQuality = "720p",
+                )
+                starter.awaitRequestCount(1)
+                fixture.viewModel.loadContent(
+                    contentId = "movie",
+                    preferredFileId = 20,
+                    preferredQuality = "4k",
+                )
+                starter.awaitRequestCount(2)
+
+                starter.complete(1, ready(starter.request(1), "new-session"))
+                fixture.viewModel.awaitState { it.sessionId == "new-session" && !it.isLoading }
+                starter.complete(0, ready(starter.request(0), "old-session"))
+                fixture.manager.awaitStopped("old-session")
+
+                val state = fixture.viewModel.uiState.value
+                assertEquals("movie", state.contentId)
+                assertEquals(20, state.mediaFileId)
+                assertEquals("stream-new-session", state.streamUrl)
+                assertEquals("new-session", state.sessionId)
+            } finally {
+                store.clear()
+            }
+        }
+
+    @Test
+    fun sameTitleReloadsStartWithThePickedQualityAndAnotherTitleDropsIt() = runTest(dispatcher) {
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            viewModel.loadContent(contentId = "movie", preferredFileId = 1)
+            starter.awaitRequestCount(1)
+            assertNull(starter.request(0).preferredQualityOverride)
+
+            // What a committed Quality menu pick leaves behind.
+            viewModel.setPickedQuality("720p-medium")
+            starter.complete(0, VideoPlaybackStartResult.ServerUnreachable(contentId = "movie"))
+            viewModel.awaitState { it.serverUnreachable }
+            viewModel.playIgnoringServerReachability()
+            starter.awaitRequestCount(2)
+            assertEquals("720p-medium", starter.request(1).preferredQualityOverride)
+
+            viewModel.loadContent(contentId = "other", preferredFileId = 2)
+            starter.awaitRequestCount(3)
+            assertNull(starter.request(2).preferredQualityOverride)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun trackPicksHeldForANetworkMoveKeepTheirRouteIntent() = runTest(dispatcher) {
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            val sidecar = org.siloserver.silo.model.playback.PlayerSubtitleInfo(
+                index = 3,
+                language = "en",
+                url = "/api/v2/stream/s1/subtitles/3.vtt",
+            )
+            viewModel.mutableUiState().update {
+                it.copy(
+                    contentId = "movie",
+                    subtitleTracks = listOf(sidecar),
+                    audioTracks = listOf(AudioTrack(index = 0), AudioTrack(index = 1)),
+                )
+            }
+            val routeIntent = viewModel.privateField<MobilePlayerRouteIntentState>("routeIntentState")
+            routeIntent.beginLoad(
+                contentId = "movie",
+                fileId = null,
+                quality = null,
+                audioTrackIndex = null,
+                subtitleTrackIndex = null,
+                resumePositionSeconds = null,
+                preserveCurrent = false,
+            )
+            // An earlier pick has set up the track transaction for this title.
+            viewModel.onSelectAudio(0)
+            runCurrent()
+            assertFalse(routeIntent.current!!.subtitleTrackIsExplicit)
+
+            val move = kotlinx.coroutines.CompletableDeferred<Unit>()
+            viewModel.privateField<PicksDuringNetworkMove>("picksDuringNetworkMove")
+                .holdUntilDone(backgroundScope.async { move.await() })
+            viewModel.onSelectSubtitle(0)
+            viewModel.onSelectAudio(1)
+            // The move lands and publishes the tracks it committed, with no
+            // transaction in flight.
+            viewModel.landNetworkMove(org.siloserver.silo.model.playback.SubtitleIdentity.Off)
+            move.complete(Unit)
+            runCurrent()
+
+            val intent = routeIntent.current!!
+            assertTrue(intent.subtitleTrackIsExplicit, "the subtitle pick is the viewer's")
+            assertEquals(1, intent.audioTrackIndex)
+            assertTrue(intent.audioTrackIsExplicit, "the audio pick is the viewer's")
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun staleErrorCannotOverwriteCurrentReady() = runTest(dispatcher) {
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            fixture.viewModel.loadContent(contentId = "old", preferredFileId = 1)
+            starter.awaitRequestCount(1)
+            fixture.viewModel.loadContent(contentId = "new", preferredFileId = 2)
+            starter.awaitRequestCount(2)
+
+            starter.complete(1, ready(starter.request(1), "new-session"))
+            fixture.viewModel.awaitState { it.sessionId == "new-session" && !it.isLoading }
+            starter.complete(
+                0,
+                VideoPlaybackStartResult.Error(
+                    contentId = "old",
+                    message = "stale failure",
+                ),
+            )
+            // Drain, do not wait on a predicate. `awaitState { sessionId ==
+            // "new-session" }` was already true the moment it was called, so it
+            // returned without the stale error having been handled at all — the
+            // assertions below then proved nothing. Draining the scheduler makes
+            // "the stale error was processed AND still did not overwrite" the
+            // thing actually under test.
+            advanceUntilIdle()
+
+            val state = fixture.viewModel.uiState.value
+            assertEquals("new", state.contentId)
+            assertEquals("new-session", state.sessionId)
+            assertNull(state.error)
+            assertFalse(state.isLoading)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun exitDuringDeferredLoadRejectsAndStopsLateReady() = runTest(dispatcher) {
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            fixture.viewModel.loadContent(contentId = "movie", preferredFileId = 8)
+            starter.awaitRequestCount(1)
+
+            fixture.viewModel.onExit()
+            starter.complete(0, ready(starter.request(0), "late-session"))
+            fixture.manager.awaitStopped("late-session")
+
+            val state = fixture.viewModel.uiState.value
+            assertNull(state.sessionId)
+            assertNull(state.streamUrl)
+            assertFalse(state.isPlaying)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun clearDuringDeferredLoadRejectsAndStopsLateReady() = runTest(dispatcher) {
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+
+        fixture.viewModel.loadContent(contentId = "movie", preferredFileId = 8)
+        starter.awaitRequestCount(1)
+        store.clear()
+
+        starter.complete(0, ready(starter.request(0), "late-session"))
+        fixture.manager.awaitStopped("late-session")
+
+        val state = fixture.viewModel.uiState.value
+        assertNull(state.sessionId)
+        assertNull(state.streamUrl)
+        assertFalse(state.isPlaying)
+    }
+
+    @Test
+    fun nextUpKeepsTheOutgoingCardUntilTheSuccessorFrame() = runTest(dispatcher) {
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            viewModel.loadContent("episode-a", preferredFileId = 1)
+            starter.awaitRequestCount(1)
+            starter.complete(0, ready(starter.request(0), "session-a"))
+            viewModel.awaitState { it.sessionId == "session-a" && !it.isLoading }
+            val outgoingMount = viewModel.uiState.value.mediaMountGeneration
+            viewModel.offerNextEpisode()
+
+            viewModel.playUpNextNow()
+            starter.awaitRequestCount(2)
+            viewModel.playUpNextNow()
+            runCurrent()
+            assertTrue(viewModel.uiState.value.isNextUpTransitioning)
+            assertTrue(viewModel.uiState.value.showUpNext)
+            assertEquals("episode-b", starter.request(1).contentId)
+            starter.complete(1, ready(starter.request(1), "session-b"))
+            viewModel.awaitState { it.sessionId == "session-b" && !it.isLoading }
+
+            viewModel.onFirstVideoFrameRendered(outgoingMount)
+            assertTrue(viewModel.uiState.value.isNextUpTransitioning)
+            viewModel.dismissUpNext()
+            assertTrue(viewModel.uiState.value.showUpNext)
+            viewModel.onFirstVideoFrameRendered(viewModel.uiState.value.mediaMountGeneration)
+            assertFalse(viewModel.uiState.value.isNextUpTransitioning)
+            assertFalse(viewModel.uiState.value.showUpNext)
+            assertNull(viewModel.uiState.value.nextEpisode)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun keepWatchingSuppressesCreditsPromptButReopensNextUpAtPlaybackEnd() = runTest(dispatcher) {
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            viewModel.loadContent("episode-a", preferredFileId = 1)
+            starter.awaitRequestCount(1)
+            starter.complete(0, ready(starter.request(0), "session-a"))
+            viewModel.awaitState { it.sessionId == "session-a" && !it.isLoading }
+            viewModel.offerNextEpisode()
+            viewModel.onApproachingEnd()
+            assertTrue(viewModel.uiState.value.showUpNext)
+
+            viewModel.dismissUpNext()
+            viewModel.onApproachingEnd()
+            assertFalse(viewModel.uiState.value.showUpNext)
+            viewModel.onApproachingEnd(videoEnded = true)
+            assertTrue(viewModel.uiState.value.showUpNext)
+            assertTrue(viewModel.uiState.value.upNextVideoEnded)
+            assertNull(viewModel.uiState.value.upNextCountdownSeconds)
+            testScheduler.advanceTimeBy(30_000)
+            runCurrent()
+            assertEquals(1, starter.startedRequestCount)
+
+            viewModel.playUpNextNow()
+            starter.awaitRequestCount(2)
+            assertEquals("episode-b", starter.request(1).contentId)
+            starter.complete(1, ready(starter.request(1), "session-b"))
+            viewModel.awaitState { it.sessionId == "session-b" && !it.isLoading }
+            viewModel.onFirstVideoFrameRendered(viewModel.uiState.value.mediaMountGeneration)
+            assertFalse(viewModel.uiState.value.showUpNext)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun successorRemountBeforeItsFirstFrameStillCompletesNextUp() = runTest(dispatcher) {
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            viewModel.loadContent("episode-a", preferredFileId = 1)
+            starter.awaitRequestCount(1)
+            starter.complete(0, ready(starter.request(0), "session-a"))
+            viewModel.awaitState { it.sessionId == "session-a" && !it.isLoading }
+            viewModel.offerNextEpisode()
+            viewModel.playUpNextNow()
+            starter.awaitRequestCount(2)
+            starter.complete(1, ready(starter.request(1), "session-b"))
+            viewModel.awaitState { it.sessionId == "session-b" && !it.isLoading }
+            val initialMount = viewModel.uiState.value.mediaMountGeneration
+
+            // An intro skip or subtitle replan can replace the successor's
+            // stream before it renders. Exercise the common remount boundary.
+            val replacementMount = PlayerViewModel::class.java.getDeclaredMethod("expectNextMediaMount").let {
+                it.isAccessible = true
+                it.invoke(viewModel) as Long
+            }
+            viewModel.mutableUiState().update { it.copy(mediaMountGeneration = replacementMount) }
+            viewModel.onFirstVideoFrameRendered(initialMount)
+            assertTrue(viewModel.uiState.value.showUpNext)
+            viewModel.onFirstVideoFrameRendered(replacementMount)
+            assertFalse(viewModel.uiState.value.showUpNext)
+            assertFalse(viewModel.uiState.value.isNextUpTransitioning)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun failedSessionStopStillStartsTheSuccessor() = runTest(dispatcher) {
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            viewModel.loadContent("episode-a", preferredFileId = 1)
+            starter.awaitRequestCount(1)
+            starter.complete(0, ready(starter.request(0), "session-a"))
+            viewModel.awaitState { it.sessionId == "session-a" && !it.isLoading }
+            fixture.lifecycle.adoptActiveSession(
+                params = StartParams(
+                    contentId = "episode-a", fileId = 1, capabilities = ClientCodecCapabilities(),
+                    clientPlaybackContext = ClientPlaybackContext(formFactor = "mobile", appVersion = "test"),
+                ),
+                session = allocatedReady("session-a").session,
+                manageProgress = false,
+            )
+            fixture.manager.sequenced = true
+            fixture.manager.stopResult = ApiResult.Error(503, "stop_pending", "Stop is pending")
+            viewModel.offerNextEpisode()
+            viewModel.playUpNextNow()
+            fixture.manager.awaitStopped("session-a")
+            // The playback journal retries the stop before a later start; it never holds up this one.
+            starter.awaitRequestCount(2)
+            assertEquals(2, starter.startedRequestCount)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun successorStartupFailureIsHandledWhilePredecessorFailureIsIgnored() = runTest(dispatcher) {
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            viewModel.loadContent("episode-a", preferredFileId = 1)
+            starter.awaitRequestCount(1)
+            starter.complete(0, ready(starter.request(0), "session-a"))
+            viewModel.awaitState { it.sessionId == "session-a" && !it.isLoading }
+            val outgoingMount = viewModel.uiState.value.mediaMountGeneration
+            viewModel.offerNextEpisode()
+            viewModel.playUpNextNow()
+            starter.awaitRequestCount(2)
+            starter.complete(1, ready(starter.request(1), "session-b").copy(
+                fileId = 2, mediaFileId = 2, versions = listOf(FileVersion(fileId = 2)),
+            ))
+            viewModel.awaitState { it.sessionId == "session-b" && !it.isLoading }
+            val failure = Playability.StartupStalled(0, 15_000, "decoder_no_output")
+            viewModel.onUnsupportedPlayback(failure, outgoingMount)
+            runCurrent()
+            assertNull(viewModel.uiState.value.error)
+            assertTrue(viewModel.uiState.value.isNextUpTransitioning)
+
+            // This fixture has no allocated manager session, so a real recovery
+            // request fails and must expose error UI instead of leaving the card stuck.
+            viewModel.onUnsupportedPlayback(failure, viewModel.uiState.value.mediaMountGeneration)
+            viewModel.awaitState { it.error != null }
+            assertFalse(viewModel.uiState.value.isNextUpTransitioning)
+            assertFalse(viewModel.uiState.value.showUpNext)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun outageEndReopenRemountsAndRecoversOnlyOnlineWithTheServerAnswering() = runTest(dispatcher) {
+        val starter = DeferredNonCooperativeStarter()
+        val network = MutableStateFlow(PlaybackNetworkSnapshot(connected = false))
+        val evidence = object : PlaybackNetworkEvidenceProvider {
+            override fun snapshot() = network.value
+            override val updates get() = network
+        }
+        val fixture = playerViewModel(starter, backgroundScope, serverReachable = true, network = evidence)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            viewModel.loadContent("movie", preferredFileId = 1)
+            starter.awaitRequestCount(1)
+            starter.complete(0, ready(starter.request(0), "session-a").copy(playbackPlan = executionPlan()))
+            viewModel.awaitState { it.sessionId == "session-a" && !it.isLoading }
+            var mount = viewModel.uiState.value.mediaMountGeneration
+            viewModel.onMediaMountApplied(mount)
+
+            // No attempt to record a transport reopen on, so the error is an
+            // outage at once: wait for the network and the server, then reopen.
+            viewModel.onPlayerError(connectionFailed())
+            viewModel.awaitState { it.mediaMountGeneration != mount }
+            val reopened = viewModel.uiState.value
+            // The screen's mount effect applies only an awaited generation.
+            assertTrue(viewModel.shouldApplyMediaMount(reopened.mediaMountGeneration))
+            assertEquals("client_retry=outage_end", reopened.playbackPlan?.decisionTrace?.last())
+            assertNull(reopened.error)
+
+            // The reopened route fails while the device is offline: still an
+            // outage, so it waits and reopens again rather than replanning.
+            mount = reopened.mediaMountGeneration
+            viewModel.onMediaMountApplied(mount)
+            viewModel.onPlayerError(connectionFailed())
+            viewModel.awaitState { it.mediaMountGeneration != mount }
+            assertNull(viewModel.uiState.value.error)
+
+            // Online, with the server answering, the failure is the route's:
+            // failure recovery runs (and fails against this fake server).
+            mount = viewModel.uiState.value.mediaMountGeneration
+            viewModel.onMediaMountApplied(mount)
+            network.value = PlaybackNetworkSnapshot(connected = true)
+            viewModel.onPlayerError(connectionFailed())
+            viewModel.awaitState { it.error != null }
+            assertEquals(mount, viewModel.uiState.value.mediaMountGeneration)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun roomStartStreamsTheRoomFilePausedAndEveryRestartKeepsTheRoom() = runTest(dispatcher) {
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            val room = WatchPartyPlaybackContext(
+                roomId = "room",
+                selectionRevision = 3,
+                contentId = "movie",
+                fileId = 41,
+                libraryId = 7,
+                positionSeconds = 120.0,
+                paused = false,
+            )
+            viewModel.startRoomPlayback(room)
+            starter.awaitRequestCount(1)
+            val request = starter.request(0)
+            assertEquals(room, request.room)
+            assertEquals("room", request.roomId)
+            assertEquals("movie", request.contentId)
+            assertEquals(41, request.preferredFileId)
+            assertEquals(7, request.libraryId)
+
+            starter.complete(0, ready(request, "session-3"))
+            viewModel.awaitState { it.sessionId == "session-3" && !it.isLoading }
+            advanceUntilIdle()
+            // Only the room's command may start playback.
+            assertTrue(viewModel.uiState.value.isPaused)
+            assertFalse(viewModel.uiState.value.isPlaying)
+            assertEquals("session-3", viewModel.roomObservation.value.sessionId)
+            assertEquals(3L, viewModel.roomObservation.value.selectionRevision)
+
+            // The screen collecting the same epoch again (recreation) restarts nothing.
+            viewModel.startRoomPlayback(room)
+            advanceUntilIdle()
+            assertEquals(1, starter.startedRequestCount)
+
+            // A new epoch never exposes the outgoing session under its revision.
+            val next = room.copy(selectionRevision = 4, fileId = 42)
+            viewModel.startRoomPlayback(next)
+            starter.awaitRequestCount(2)
+            advanceUntilIdle()
+            assertNull(viewModel.roomObservation.value.sessionId)
+            assertEquals(4L, viewModel.roomObservation.value.selectionRevision)
+            assertTrue(viewModel.roomObservation.value.seekPending)
+
+            // Retry and Try Anyway replay the room start, never a solo one.
+            starter.complete(1, VideoPlaybackStartResult.ServerUnreachable(contentId = "movie"))
+            viewModel.awaitState { it.serverUnreachable }
+            viewModel.playIgnoringServerReachability()
+            starter.awaitRequestCount(3)
+            val retry = starter.request(2)
+            assertEquals(next, retry.room)
+            assertEquals(42, retry.preferredFileId)
+            assertTrue(retry.force)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun roomStartRefusalIsHandedToTheRoomWithoutChoosingAnotherFile() = runTest(dispatcher) {
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            val room = WatchPartyPlaybackContext(
+                roomId = "room",
+                selectionRevision = 5,
+                contentId = "movie",
+                fileId = 41,
+                libraryId = null,
+                positionSeconds = 0.0,
+                paused = true,
+            )
+            viewModel.startRoomPlayback(room)
+            starter.awaitRequestCount(1)
+            starter.complete(
+                0,
+                VideoPlaybackStartResult.Error(
+                    contentId = "movie",
+                    message = "This title needs HDR tone mapping.",
+                    diagnosticsCode = PlaybackDiagnosticsCode.serverTerminal("hdr_transcode_unsupported"),
+                    terminalReason = "hdr_transcode_unsupported",
+                ),
+            )
+            viewModel.awaitState { it.error != null }
+            advanceUntilIdle()
+            assertEquals(
+                PlayerViewModel.RoomRefusal(room, fileId = 41, reason = "hdr_transcode_unsupported"),
+                viewModel.roomRefusal.value,
+            )
+            assertEquals(1, starter.startedRequestCount)
+            viewModel.roomRefusal.value?.let(viewModel::consumeRoomRefusal)
+            assertNull(viewModel.roomRefusal.value)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun outsideRoomSeekStaysUnreportableUntilTheRestoreLands() = runTest(dispatcher) {
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            viewModel.startRoomPlayback(
+                WatchPartyPlaybackContext("room", 3, "movie", 41, null, 20.0, false),
+            )
+            starter.awaitRequestCount(1)
+            starter.complete(0, ready(starter.request(0), "session-3"))
+            viewModel.awaitState { it.sessionId == "session-3" && !it.isLoading }
+            advanceUntilIdle()
+            viewModel.onMediaMountApplied(viewModel.uiState.value.mediaMountGeneration)
+
+            fun sample(positionMs: Long) {
+                viewModel.onRoomEngineSample(
+                    positionMs, positionMs, playWhenReady = true, isPlaying = true,
+                    playbackState = androidx.media3.common.Player.STATE_READY,
+                )
+                viewModel.onPositionChanged(positionMs, 300_000L)
+            }
+            sample(20_000L)
+            assertFalse(viewModel.roomObservation.value.seekPending)
+
+            // A MediaSession controller has already jumped to 80 seconds.
+            // PlayerScreen arms the undo before publishing that sample.
+            viewModel.applyRoomSeek(20.0)
+            sample(80_000L)
+            assertEquals(80.0, viewModel.roomObservation.value.sourcePositionSeconds)
+            assertTrue(viewModel.roomObservation.value.seekPending)
+            assertEquals(20.0, viewModel.immediateSeeks.first())
+
+            sample(20_000L)
+            assertEquals(20.0, viewModel.roomObservation.value.sourcePositionSeconds)
+            assertFalse(viewModel.roomObservation.value.seekPending)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun roomCommandsHoldALocalSuspensionUntilTheViewerResumes() = runTest(dispatcher) {
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            viewModel.setInWatchTogetherRoom(true)
+            viewModel.applyRoomPlaying(true)
+            assertFalse(viewModel.uiState.value.isPaused)
+
+            viewModel.beginRoomSuspension(PlayerViewModel.RoomSuspensionReason.SleepTimer)
+            assertTrue(viewModel.uiState.value.isPaused)
+            assertTrue(viewModel.roomSuspended.value)
+            // The room plays on; this device stays held.
+            viewModel.applyRoomPlaying(true)
+            assertTrue(viewModel.uiState.value.isPaused)
+
+            viewModel.endRoomSuspensions(resumeLocally = true)
+            assertFalse(viewModel.uiState.value.isPaused)
+            assertFalse(viewModel.roomSuspended.value)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun PlayerViewModel.mutableUiState(): MutableStateFlow<PlayerViewModel.PlayerUiState> =
+        PlayerViewModel::class.java.getDeclaredField("_uiState").let {
+            it.isAccessible = true
+            it.get(this) as MutableStateFlow<PlayerViewModel.PlayerUiState>
+        }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun <T> PlayerViewModel.privateField(name: String): T =
+        PlayerViewModel::class.java.getDeclaredField(name).let {
+            it.isAccessible = true
+            it.get(this) as T
+        }
+
+    /** What a network move's adoption does: resets the track transaction to the tracks it committed. */
+    private fun PlayerViewModel.landNetworkMove(committedSubtitle: org.siloserver.silo.model.playback.SubtitleIdentity) {
+        val context = PlayerViewModel::class.java
+            .getDeclaredMethod("mobileSubtitleContext", PlayerViewModel.PlayerUiState::class.java)
+            .apply { isAccessible = true }
+            .invoke(this, uiState.value) as MobileSubtitlePlaybackContext
+        privateField<MobileSubtitleTransactionAdapter>("mobileSubtitleTransactions")
+            .resetContent(context, committedSubtitle)
+    }
+
+    private fun PlayerViewModel.setPickedQuality(quality: String) {
+        PlayerViewModel::class.java.getDeclaredField("sessionQualityOverride").let {
+            it.isAccessible = true
+            it.set(this, quality)
+        }
+    }
+
+    private fun PlayerViewModel.offerNextEpisode() {
+        mutableUiState().update { it.copy(nextEpisode = PlayerViewModel.NextEpisodeInfo(
+            contentId = "episode-b", seasonNumber = 1, episodeNumber = 2,
+            title = "Next", stillUrl = null, stillThumbhash = null, runtimeMinutes = 20,
+        )) }
+    }
+
+    private fun playerViewModel(
+        starter: DeferredNonCooperativeStarter,
+        scope: CoroutineScope,
+        shufflesApi: org.siloserver.silo.network.apiv2.ShufflesV2Api? = null,
+        shuffleStore: org.siloserver.silo.model.feature.ShuffleFeatureStore? =
+            shufflesApi?.let { org.siloserver.silo.model.feature.ShuffleFeatureStore(it) },
+        network: PlaybackNetworkEvidenceProvider = PlaybackNetworkEvidenceProvider.None,
+        /** The reachability probe answers; otherwise it has no server to probe. */
+        serverReachable: Boolean = false,
+    ): PlayerFixture {
+        val client = noOpClient()
+        val tokenManager = FakeTokenManager()
+        val profileRepository = FakeProfileRepository(client, tokenManager)
+        val manager = RecordingPlaybackSessionManager(client, tokenManager)
+        val healthApi = HealthApi(client)
+        val personalDataRepository = PersonalDataRepository(PersonalDataApi(client))
+        val context = ApplicationProvider.getApplicationContext<Application>()
+        val capabilityDetector = PlaybackCapabilityDetector(
+            context,
+            AudioCapabilityManager(context),
+            LibassBridge(false),
+            SiloClientBuildIdentity(buildNumber = "5", channel = "release"),
+        )
+        val lifecycle = PlaybackSessionLifecycle(manager, healthApi, personalDataRepository, scope)
+        return PlayerFixture(
+            viewModel = PlayerViewModel(
+                videoPlaybackCoordinator = VideoPlaybackSessionCoordinator(starter),
+                catalogRepository = CatalogRepository(CatalogApi(client)),
+                playbackSessionManager = manager,
+                playbackAnalytics = PlaybackAnalyticsListener(),
+                profileRepository = profileRepository,
+                personalDataRepository = personalDataRepository,
+                capabilityDetector = capabilityDetector,
+                offlineMediaResolver = OfflineMediaResolver(
+                    DownloadMetadataStore(db),
+                    DownloadStorage(tmp.newFolder()),
+                    LegacyDownloadImporter(tmp.newFolder(), db),
+                ),
+                serverRegistry = FakeServerRegistry(),
+                serverReachabilityMonitor = if (serverReachable) {
+                    reachableServerMonitor(scope)
+                } else {
+                    ServerReachabilityMonitor(org.siloserver.silo.network.apiv2.ApiV2Probe(client)::probeFresh, scope, { null })
+                },
+                playerSettingsStore = FakePlayerSettingsStore(),
+                introAutoSkipController = IntroAutoSkipController(scope),
+                sessionLifecycle = lifecycle,
+                sleepTimer = SleepTimerController(scope),
+                subtitlesRepository = SubtitlesRepository(
+                    DefaultSubtitlesApi(
+                        org.siloserver.silo.network.apiv2.SubtitleReadsV2Api(client, tokenManager, ApiV2Gate.Unrestricted),
+                        org.siloserver.silo.network.apiv2.SubtitleDownloadV2Api(client, tokenManager, ApiV2Gate.Unrestricted),
+                        org.siloserver.silo.network.apiv2.SubtitleAiReadsV2Api(client, tokenManager, ApiV2Gate.Unrestricted),
+                        org.siloserver.silo.network.apiv2.SubtitleAiCreateV2Api(client, tokenManager, ApiV2Gate.Unrestricted),
+                    ),
+                ),
+                userItemStatePort = NoOpUserItemStatePort,
+                finalPlaybackPositionWriter = FinalPlaybackPositionWriter(
+                    scope = scope,
+                    scopeProvider = { null },
+                    write = {},
+                ),
+                shuffleFeatureStore = shuffleStore,
+                networkEvidenceProvider = network,
+            ),
+            manager = manager,
+            lifecycle = lifecycle,
+        )
+    }
+
+    /** A shuffle server whose answers each test scripts; it records every request. */
+    private class FakeShuffleServer(testDispatcher: CoroutineDispatcher? = null) {
+        val requests: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
+
+        /**
+         * The requests so far. The engine records them on its own thread, so
+         * read a copy taken under the list's lock: iterating the live list
+         * while a request lands throws ConcurrentModificationException.
+         */
+        fun seen(): List<String> = synchronized(requests) { requests.toList() }
+        var read: String = shuffle(current = EPISODE_A, next = MOVIE_B)
+        var advance: String = shuffle(current = MOVIE_B, next = EPISODE_C)
+        var skip: String = shuffle(current = EPISODE_A, next = EPISODE_C)
+        var readStatus: HttpStatusCode = HttpStatusCode.OK
+        /** Holds the skip response until completed, to model a slow Pick Another. */
+        var skipGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+
+        val api = org.siloserver.silo.network.apiv2.ShufflesV2Api(
+            HttpClient(MockEngine.create {
+                dispatcher = testDispatcher
+                addHandler { request ->
+                    val body = (request.body as? io.ktor.http.content.TextContent)?.text.orEmpty()
+                    requests += "${request.method.value} ${request.url.encodedPath} $body".trim()
+                    val path = request.url.encodedPath
+                    val (status, json) = when {
+                        request.method.value == "DELETE" -> HttpStatusCode.NoContent to ""
+                        path == "/api/v2/shuffles" -> HttpStatusCode.Created to
+                            shuffle(current = EPISODE_A, next = MOVIE_B)
+                        path.endsWith("/advance") -> HttpStatusCode.OK to advance
+                        path.endsWith("/skip") -> {
+                            skipGate?.await()
+                            HttpStatusCode.OK to skip
+                        }
+                        readStatus.value >= 400 -> readStatus to
+                            """{"type":"https://siloserver.org/docs/api/v2/problems/conflict","title":"Conflict","status":${readStatus.value}}"""
+                        else -> HttpStatusCode.OK to read
+                    }
+                    respond(json, status, headersOf(HttpHeaders.ContentType, "application/json"))
+                }
+            }) { install(ContentNegotiation) { json(SiloJson) } },
+            FakeTokenManager(),
+            ApiV2Gate.Unrestricted,
+        )
+
+        companion object {
+            const val EPISODE_A =
+                """{"content_id":"episode-a","type":"episode","title":"Pilot","series_title":"Show","season_number":1,"episode_number":1}"""
+            const val MOVIE_B = """{"content_id":"movie-b","type":"movie","title":"Film","runtime":90}"""
+            const val EPISODE_C =
+                """{"content_id":"episode-c","type":"episode","title":"Third","series_title":"Show","season_number":0,"episode_number":3}"""
+
+            fun shuffle(current: String, next: String) =
+                """{"id":"sh1","scope":{"kind":"season","id":"show-S1","title":"Season 1","parent_title":"Show"},"current":$current,"next":$next,"created_at":"2026-10-05T10:00:00.000Z","updated_at":"2026-10-05T10:00:00.000Z"}"""
+        }
+    }
+
+    private suspend fun TestScope.startShuffledEpisode(
+        starter: DeferredNonCooperativeStarter,
+        viewModel: PlayerViewModel,
+    ) {
+        viewModel.attachShuffle("sh1")
+        viewModel.loadContent("episode-a", preferredFileId = 1, resumePositionOverride = 0.0, suppressResumeRewind = true)
+        starter.awaitRequestCount(1)
+        starter.complete(0, ready(starter.request(0), "session-a"))
+        viewModel.awaitState { it.sessionId == "session-a" && !it.isLoading }
+        runCurrent()
+    }
+
+    @Test
+    fun shuffleAnnouncesTheServerPickAndAdvancesToItFromTheBeginning() = runTest(dispatcher) {
+        val server = FakeShuffleServer()
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope, server.api)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            startShuffledEpisode(starter, viewModel)
+            viewModel.awaitState { it.nextEpisode != null }
+            val state = viewModel.uiState.value
+            assertEquals("Show · Season 1", state.shuffle?.scopeLabel)
+            val next = requireNotNull(state.nextEpisode)
+            assertEquals("movie-b", next.contentId)
+            // A movie heads the card with its own title, without an S:E line.
+            assertFalse(next.isEpisode)
+            assertEquals("Film", next.label)
+
+            viewModel.onApproachingEnd(videoEnded = true)
+            assertTrue(viewModel.uiState.value.showUpNext)
+            assertEquals(PlayerViewModel.UP_NEXT_COUNTDOWN_SECONDS, viewModel.uiState.value.upNextCountdownSeconds)
+
+            viewModel.playUpNextNow()
+            starter.awaitRequestCount(2)
+            // A second press while the advance is in flight plays the same pick once.
+            viewModel.playUpNextNow()
+            runCurrent()
+            val successor = starter.request(1)
+            assertEquals("movie-b", successor.contentId)
+            assertEquals(0.0, successor.resumePositionOverride)
+            assertTrue(successor.suppressResumeRewind)
+            assertEquals(2, starter.startedRequestCount)
+            assertEquals(
+                1,
+                server.seen().count { it == """POST /api/v2/shuffles/sh1/advance {"from_content_id":"episode-a"}""" },
+            )
+
+            starter.complete(1, ready(successor, "session-b"))
+            viewModel.awaitState { it.sessionId == "session-b" && !it.isLoading }
+            viewModel.onFirstVideoFrameRendered(viewModel.uiState.value.mediaMountGeneration)
+            runCurrent()
+            // The advance already named the following pick; no sequential episode replaces it.
+            assertEquals("episode-c", viewModel.uiState.value.nextEpisode?.contentId)
+            assertTrue(viewModel.uiState.value.nextEpisode?.isEpisode == true)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun playNowDuringASlowPickAnotherPlaysTheNewPick() = runTest(dispatcher) {
+        val server = FakeShuffleServer().apply { skipGate = kotlinx.coroutines.CompletableDeferred() }
+        server.advance = FakeShuffleServer.shuffle(FakeShuffleServer.EPISODE_C, FakeShuffleServer.MOVIE_B)
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope, server.api)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            startShuffledEpisode(starter, viewModel)
+            viewModel.awaitState { it.nextEpisode != null }
+            viewModel.onApproachingEnd(videoEnded = true)
+
+            viewModel.pickAnotherShuffle()
+            runCurrent()
+            assertTrue(viewModel.uiState.value.shuffle?.pickingAnother == true)
+            // Play Now while Pick Another is still waiting for the server.
+            viewModel.playUpNextNow()
+            runCurrent()
+            assertTrue(server.seen().none { it.contains("/advance") })
+
+            requireNotNull(server.skipGate).complete(Unit)
+            starter.awaitRequestCount(2)
+            assertEquals("episode-c", starter.request(1).contentId)
+            val seen = server.seen()
+            val skip = seen.indexOfFirst { it.contains("/skip") }
+            val advance = seen.indexOfFirst { it.contains("/advance") }
+            assertTrue(skip in 0 until advance)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun theFirstPickKnowsItsNextFromTheStartEvenWhenReadsFail() = runTest(dispatcher) {
+        val server = FakeShuffleServer().apply { readStatus = HttpStatusCode.ServiceUnavailable }
+        val starter = DeferredNonCooperativeStarter()
+        val shuffleStore = org.siloserver.silo.model.feature.ShuffleFeatureStore(server.api)
+        assertTrue(
+            shuffleStore.start(org.siloserver.silo.model.shuffle.ShuffleScopeKind.LIBRARY, "1") is
+                org.siloserver.silo.model.feature.ShuffleStart.Started,
+        )
+        val fixture = playerViewModel(starter, backgroundScope, server.api, shuffleStore)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            startShuffledEpisode(starter, viewModel)
+            viewModel.onApproachingEnd(videoEnded = true)
+            // The card's re-read fails like every read here.
+            withContext(Dispatchers.Default) {
+                withTimeout(5_000) {
+                    while (server.seen().none { it == "GET /api/v2/shuffles/sh1" }) delay(10)
+                }
+            }
+            runCurrent()
+            // The pick the start returned still plays next.
+            assertEquals("movie-b", viewModel.uiState.value.nextEpisode?.contentId)
+            assertTrue(viewModel.uiState.value.showUpNext)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun aShuffleWithOnePlayableItemShowsFinishedAndPlayNowDoesNothing() = runTest(dispatcher) {
+        val server = FakeShuffleServer().apply {
+            read = FakeShuffleServer.shuffle(FakeShuffleServer.EPISODE_A, FakeShuffleServer.EPISODE_A)
+        }
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope, server.api)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            startShuffledEpisode(starter, viewModel)
+            viewModel.onApproachingEnd(videoEnded = true)
+            runCurrent()
+            assertTrue(viewModel.uiState.value.showUpNext)
+            assertNull(viewModel.uiState.value.nextEpisode)
+            assertNull(viewModel.uiState.value.upNextCountdownSeconds)
+            viewModel.playUpNextNow()
+            testScheduler.advanceTimeBy(30_000)
+            runCurrent()
+            assertEquals(1, starter.startedRequestCount)
+            assertTrue(server.seen().none { it.contains("/advance") })
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun aShuffleThatCanNoLongerPlayAnythingShowsFinishedWhenTheCardOpens() = runTest(dispatcher) {
+        val server = FakeShuffleServer()
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope, server.api)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            startShuffledEpisode(starter, viewModel)
+            viewModel.awaitState { it.nextEpisode != null }
+            server.readStatus = HttpStatusCode.Conflict
+            viewModel.onApproachingEnd(videoEnded = true)
+            viewModel.awaitState { it.nextEpisode == null }
+            assertTrue(viewModel.uiState.value.showUpNext)
+            assertNull(viewModel.uiState.value.upNextCountdownSeconds)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun pickAnotherReplacesThePickWithAFullCountdownAndStopEndsTheShuffle() = runTest(dispatcher) {
+        val server = FakeShuffleServer(dispatcher)
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope, server.api)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            startShuffledEpisode(starter, viewModel)
+            viewModel.awaitState { it.nextEpisode != null }
+            viewModel.onApproachingEnd(videoEnded = true)
+            testScheduler.advanceTimeBy(3_500)
+            runCurrent()
+            assertEquals(PlayerViewModel.UP_NEXT_COUNTDOWN_SECONDS - 3, viewModel.uiState.value.upNextCountdownSeconds)
+
+            viewModel.pickAnotherShuffle()
+            // Keep the response and this waiter on the countdown's scheduler.
+            // Returning through Dispatchers.Default lets virtual time tick
+            // between publication of the full countdown and this assertion.
+            withTimeout(30_000) { viewModel.uiState.first { it.nextEpisode?.contentId == "episode-c" } }
+            assertTrue(server.seen().contains("""POST /api/v2/shuffles/sh1/skip {"next_content_id":"movie-b"}"""))
+            assertEquals(PlayerViewModel.UP_NEXT_COUNTDOWN_SECONDS, viewModel.uiState.value.upNextCountdownSeconds)
+
+            viewModel.stopShuffling()
+            assertNull(viewModel.uiState.value.shuffle)
+            assertNull(viewModel.uiState.value.nextEpisode)
+            testScheduler.advanceTimeBy(30_000)
+            runCurrent()
+            // Stopping cancels the countdown: nothing else starts.
+            assertEquals(1, starter.startedRequestCount)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
+    fun aReplacementLoadDuringThePartChangeStopKeepsThePartChangeFromLoading() = runTest(dispatcher) {
+        val server = FakeShuffleServer()
+        val starter = DeferredNonCooperativeStarter()
+        val fixture = playerViewModel(starter, backgroundScope, server.api)
+        val store = ViewModelStore().also { it.put("player", fixture.viewModel) }
+        try {
+            val viewModel = fixture.viewModel
+            startShuffledEpisode(starter, viewModel)
+            // Part 1 of a two-part pick is playing; part 2 is queued.
+            PlayerViewModel::class.java.getDeclaredField("shuffleNextPartFileId").let {
+                it.isAccessible = true
+                it.set(viewModel, 2)
+            }
+            fixture.lifecycle.adoptActiveSession(
+                params = StartParams(
+                    contentId = "episode-a", fileId = 1, capabilities = ClientCodecCapabilities(),
+                    clientPlaybackContext = ClientPlaybackContext(formFactor = "mobile", appVersion = "test"),
+                ),
+                session = allocatedReady("session-a").session,
+                manageProgress = false,
+            )
+            fixture.manager.sequenced = true
+            val stopGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            fixture.manager.stopGate = stopGate
+
+            // Part 1 ends: the part change stops the session and is held there.
+            viewModel.onApproachingEnd(videoEnded = true)
+            fixture.manager.awaitStopped("session-a")
+            // A replacement load of the same item starts while that stop is pending.
+            viewModel.loadContent("episode-a", preferredFileId = 1, preserveRouteIntent = true)
+            stopGate.complete(Unit)
+            starter.awaitRequestCount(2)
+            runCurrent()
+
+            assertEquals(2, starter.startedRequestCount)
+            assertEquals(1, starter.request(1).preferredFileId)
+        } finally {
+            store.clear()
+        }
+    }
+
+    private fun ready(
+        request: VideoPlaybackStartRequest,
+        sessionId: String,
+    ) = VideoPlaybackStartResult.Ready(
+        contentId = request.contentId,
+        fileId = request.preferredFileId,
+        streamUrl = "stream-$sessionId",
+        playMethod = PlayMethod.DIRECT,
+        title = request.contentId,
+        subtitle = null,
+        artworkUrl = null,
+        startPositionSeconds = 0.0,
+        sessionId = sessionId,
+        mediaFileId = request.preferredFileId,
+    )
+
+    private fun executionPlan() = org.siloserver.silo.model.playback.PlaybackExecutionPlan(
+        planId = "plan-a",
+        delivery = PlaybackDelivery.ORIGINAL_HTTP,
+        routeFamily = org.siloserver.silo.model.playback.PlaybackRouteFamily.PLATFORM_NATIVE,
+    )
+
+    /** A reachability monitor whose probe always finds the server. */
+    private fun reachableServerMonitor(scope: CoroutineScope) = ServerReachabilityMonitor(
+        {
+            org.siloserver.silo.network.apiv2.ApiV2ProbeResult.V2(
+                org.siloserver.silo.network.apiv2.SystemInfo(
+                    "test",
+                    2,
+                    "digest",
+                    org.siloserver.silo.network.apiv2.SystemInfoLinks("/openapi", "/capabilities"),
+                ),
+            )
+        },
+        scope,
+        { org.siloserver.silo.common.network.ReachabilityTarget(SERVER_ID, "https://silo.test", 1) },
+    )
+
+    private fun connectionFailed() = androidx.media3.common.PlaybackException(
+        "connection failed",
+        null,
+        androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+    )
+
+    private data class PlayerFixture(
+        val viewModel: PlayerViewModel,
+        val manager: RecordingPlaybackSessionManager,
+        val lifecycle: PlaybackSessionLifecycle,
+    )
+}
+
+@OptIn(ExperimentalCoroutinesApi::class)
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34], application = Application::class)
+class MobileVideoPlaybackStarterCancellationTest {
+    private val dispatcher = UnconfinedTestDispatcher()
+
+    @BeforeTest
+    fun setUp() {
+        Dispatchers.setMain(dispatcher)
+    }
+
+    @AfterTest
+    fun tearDown() {
+        Dispatchers.resetMain()
+    }
+
+    @Test
+    fun cancellationAfterAllocationBeforeAdoptionStopsSessionAndPropagates() =
+        runTest(dispatcher) {
+            val client = starterCatalogClient()
+            val tokenManager = FakeTokenManager()
+            val profileRepository = FakeProfileRepository(client, tokenManager)
+            val manager = RecordingPlaybackSessionManager(client, tokenManager)
+            val context = ApplicationProvider.getApplicationContext<Application>()
+            val adoptionEntered = kotlinx.coroutines.CompletableDeferred<Unit>()
+            var allocated = false
+            val starter = MobileVideoPlaybackStarter(
+                catalogRepository = CatalogRepository(CatalogApi(client, watchDetail = org.siloserver.silo.network.apiv2.WatchDetailV2Api(client, tokenManager, ApiV2Gate.Unrestricted))),
+                playbackSessionManager = manager,
+                profileRepository = profileRepository,
+                capabilityDetector = PlaybackCapabilityDetector(
+                    context,
+                    AudioCapabilityManager(context),
+                    LibassBridge(false),
+                    SiloClientBuildIdentity(buildNumber = "5", channel = "release"),
+                ),
+                playerSettingsStore = FakePlayerSettingsStore(),
+                sessionLifecycle = PlaybackSessionLifecycle(
+                    manager,
+                    HealthApi(client),
+                    PersonalDataRepository(PersonalDataApi(client)),
+                    backgroundScope,
+                ),
+                reachabilityMonitor = ServerReachabilityMonitor(org.siloserver.silo.network.apiv2.ApiV2Probe(client)::probeFresh, backgroundScope, { null }),
+                sessionAllocator = MobileVideoSessionAllocator {
+                    allocated = true
+                    ApiResult.Success(allocatedReady("allocated-session"))
+                },
+                sessionAdopter = MobileVideoSessionAdopter { _, _ ->
+                    adoptionEntered.complete(Unit)
+                    awaitCancellation()
+                },
+            )
+
+            var cancellationPropagatedFromStarter = false
+            var starterReturnedNormally = false
+            val result = async {
+                try {
+                    starter.start(
+                        VideoPlaybackStartRequest(
+                            contentId = "starter",
+                            preferredFileId = 41,
+                            roomId = null,
+                            resumePositionOverride = null,
+                        ),
+                    ).also { starterReturnedNormally = true }
+                } catch (error: CancellationException) {
+                    cancellationPropagatedFromStarter = true
+                    throw error
+                }
+            }
+            adoptionEntered.await()
+            assertTrue(allocated)
+
+            result.cancel()
+            assertFailsWith<CancellationException> { result.await() }
+
+            assertTrue(cancellationPropagatedFromStarter)
+            assertFalse(starterReturnedNormally)
+            assertEquals(listOf("allocated-session"), manager.stoppedSessions)
+            assertEquals(listOf(true), manager.stopContextsActive)
+        }
+
+    private fun starterCatalogClient(): HttpClient =
+        HttpClient(
+            MockEngine { request ->
+                if (request.url.encodedPath == "/api/v2/watch/starter") {
+                    respond(
+                        content = """
+                            {
+                              "content_id": "starter",
+                              "type": "movie",
+                              "title": "Starter",
+                              "versions": [
+                                {
+                                  "file_id": "41",
+                                  "container": "mkv",
+                                  "duration_seconds": 120.0
+                                }
+                              ]
+                            }
+                        """.trimIndent(),
+                        status = HttpStatusCode.OK,
+                        headers = JSON_HEADERS,
+                    )
+                } else {
+                    respond(
+                        content = """{"error":"not_found","message":"not found"}""",
+                        status = HttpStatusCode.NotFound,
+                        headers = JSON_HEADERS,
+                    )
+                }
+            },
+        ) {
+            install(ContentNegotiation) { json(SiloJson) }
+        }
+}
+
+/**
+ * The phone starter must take its subtitle preferences from the server's
+ * resolved `effective_*` fields, the way TvVideoPlaybackStarter does.
+ *
+ * The settings screens write these preferences canonically now
+ * (`PUT /settings/values/{key}?scope=profile`); nothing on the server mirrors
+ * a canonical write back into `user_profiles`, so the profile columns
+ * `GET /profiles` serves are stale from the first edit. Reading them here is
+ * how the same profile ends up auto-selecting a different subtitle track on
+ * the phone than on the TV.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34], application = Application::class)
+class MobileVideoPlaybackStarterSubtitlePreferenceTest {
+    private val dispatcher = UnconfinedTestDispatcher()
+
+    @BeforeTest
+    fun setUp() {
+        Dispatchers.setMain(dispatcher)
+    }
+
+    @AfterTest
+    fun tearDown() {
+        Dispatchers.resetMain()
+    }
+
+    @Test
+    fun serverResolvedSubtitlePreferencesWinOverTheStaleProfileColumns() = runTest(dispatcher) {
+        val ready = start(
+            effective = """
+                "effective_subtitle_language": "ja",
+                "effective_subtitle_mode": "always",
+                "effective_show_forced_subtitles": false,
+            """.trimIndent(),
+            // What GET /profiles still serves after a canonical-only write.
+            profile = Profile(
+                id = PROFILE_ID,
+                name = "Profile",
+                subtitleLanguage = "en",
+                subtitleMode = "off",
+                showForcedSubtitles = true,
+            ),
+        )
+
+        assertEquals("ja", ready.preferredTextLanguage)
+        assertEquals("always", ready.preferredSubtitleMode)
+        assertFalse(ready.showForcedSubtitles)
+    }
+
+    @Test
+    fun profileColumnsRemainTheFallbackWhenTheServerSendsNoResolvedValues() =
+        runTest(dispatcher) {
+            val ready = start(
+                effective = "",
+                profile = Profile(
+                    id = PROFILE_ID,
+                    name = "Profile",
+                    subtitleLanguage = "de",
+                    subtitleMode = "always",
+                    showForcedSubtitles = false,
+                ),
+            )
+
+            assertEquals("de", ready.preferredTextLanguage)
+            assertEquals("always", ready.preferredSubtitleMode)
+            assertFalse(ready.showForcedSubtitles)
+        }
+
+    @Test
+    fun persistedPerFileTracksAreIncludedInTheInitialV3Allocation() = runTest(dispatcher) {
+        val audioTracks = listOf(
+            AudioTrack(codec = "aac", language = "en", title = "Stereo"),
+            AudioTrack(codec = "truehd", language = "en", title = "Atmos"),
+        )
+        // Catalog order intentionally differs from the server's combined
+        // external-then-embedded subtitle index space. English is catalog
+        // ordinal 0 but combined index 1.
+        val subtitleTracks = listOf(
+            SubtitleTrack(index = 12, codec = "subrip", language = "en", title = "English"),
+            SubtitleTrack(index = 0, codec = "srt", language = "fr", title = "French", external = true),
+        )
+        val persisted = LocalTrackSelection(
+            audioFingerprint = audioTrackFingerprint(audioTracks[1]),
+            subtitleFingerprint = encodeCatalogSubtitlePreference(subtitleTracks, 0),
+        )
+        val localState = object : UserItemStatePort by NoOpUserItemStatePort {
+            override suspend fun localTrackSelection(contentId: String, fileId: Int) = persisted
+        }
+        var allocation: MobileVideoSessionAllocation? = null
+
+        start(
+            // The series choice on the server is this same English track, so
+            // the per-file memory may restore it (see the next test for a
+            // choice the server no longer holds).
+            effective = """
+                "effective_subtitle_track_signature": {"source":"embedded","language":"en","codec":"subrip","label":"English"},
+            """.trimIndent(),
+            profile = Profile(id = PROFILE_ID, name = "Profile"),
+            versionFields = """
+                "audio_tracks": [
+                  {"codec":"aac","language":"en","title":"Stereo"},
+                  {"codec":"truehd","language":"en","title":"Atmos"}
+                ],
+                "subtitle_tracks": [
+                  {"index":12,"codec":"subrip","language":"en","title":"English","external":false},
+                  {"index":0,"codec":"srt","language":"fr","title":"French","external":true}
+                ]
+            """.trimIndent(),
+            userItemStatePort = localState,
+            audioLanguage = "eng",
+            onAllocation = { allocation = it },
+        )
+
+        assertEquals(1, allocation?.audioTrackIndex)
+        assertEquals(1, allocation?.subtitleTrackIndex)
+    }
+
+    @Test
+    fun perFileSubtitleMemoryRestoresWhenTheServerHoldsNoSeriesChoice() = runTest(dispatcher) {
+        // A per-file pick whose write never landed is still remembered here.
+        assertEquals(0, startWithPerFileEnglishSubtitle(effective = ""))
+    }
+
+    @Test
+    fun perFileSubtitleMemoryYieldsToSeriesOff() = runTest(dispatcher) {
+        assertEquals(null, startWithPerFileEnglishSubtitle(effective = "\"effective_subtitle_mode\": \"off\","))
+    }
+
+    private suspend fun TestScope.startWithPerFileEnglishSubtitle(effective: String): Int? {
+        val subtitleTracks = listOf(
+            SubtitleTrack(index = 12, codec = "subrip", language = "en", title = "English"),
+        )
+        val persisted = LocalTrackSelection(
+            audioFingerprint = null,
+            subtitleFingerprint = encodeCatalogSubtitlePreference(subtitleTracks, 0),
+        )
+        val localState = object : UserItemStatePort by NoOpUserItemStatePort {
+            override suspend fun localTrackSelection(contentId: String, fileId: Int) = persisted
+        }
+        var allocation: MobileVideoSessionAllocation? = null
+        start(
+            effective = effective,
+            profile = Profile(id = PROFILE_ID, name = "Profile"),
+            versionFields = """
+                "subtitle_tracks": [
+                  {"index":12,"codec":"subrip","language":"en","title":"English","external":false}
+                ]
+            """.trimIndent(),
+            userItemStatePort = localState,
+            onAllocation = { allocation = it },
+        )
+        return allocation?.subtitleTrackIndex
+    }
+
+    @Test
+    fun audioLanguageSettingIsResolvedBeforeTheInitialV3Allocation() = runTest(dispatcher) {
+        var allocation: MobileVideoSessionAllocation? = null
+
+        start(
+            effective = "",
+            profile = Profile(id = PROFILE_ID, name = "Profile"),
+            versionFields = """
+                "audio_tracks": [
+                  {"codec":"aac","language":"eng","title":"English"},
+                  {"codec":"truehd","language":"ja-JP","title":"Japanese","default":true}
+                ]
+            """.trimIndent(),
+            audioLanguage = "jpn",
+            onAllocation = { allocation = it },
+        )
+
+        assertEquals(1, allocation?.audioTrackIndex)
+    }
+
+    @Test
+    fun automaticAudioFallsBackFromUnsupportedDefaultToSupportedTrack() {
+        val selection = resolveMobileInitialTrackSelection(
+            explicitAudioTrackIndex = null,
+            explicitSubtitleTrackIndex = null,
+            audioTracks = listOf(
+                AudioTrack(codec = "truehd", language = "eng", isDefault = true),
+                AudioTrack(codec = "aac", language = "eng"),
+            ),
+            subtitleTracks = emptyList(),
+            persisted = null,
+            preferredAudioLanguage = "eng",
+            capabilities = ClientCodecCapabilities(codecsAudio = listOf("aac")),
+        )
+
+        assertEquals(1, selection.audioTrackIndex)
+    }
+
+    @Test
+    fun theServersSeriesAudioChoiceOutranksPerFileMemoryButNotAPick() {
+        val tracks = listOf(
+            AudioTrack(codec = "aac", language = "eng", title = "English"),
+            AudioTrack(codec = "aac", language = "eng", title = "Commentary"),
+            AudioTrack(codec = "aac", language = "jpn", title = "Japanese"),
+        )
+        // An older pick on this device; the series choice (Japanese) has
+        // since been made here or on another device.
+        val persisted = LocalTrackSelection(audioFingerprint = audioTrackFingerprint(tracks[1]), subtitleFingerprint = null)
+        fun select(explicit: Int?, server: Int?) = resolveMobileInitialTrackSelection(
+            explicitAudioTrackIndex = explicit,
+            explicitSubtitleTrackIndex = null,
+            audioTracks = tracks,
+            subtitleTracks = emptyList(),
+            persisted = persisted,
+            preferredAudioLanguage = "eng",
+            capabilities = ClientCodecCapabilities(codecsAudio = listOf("aac")),
+            serverAudioTrackIndex = server,
+        ).audioTrackIndex
+
+        assertEquals(2, select(explicit = null, server = 2))
+        assertEquals(0, select(explicit = 0, server = 2))
+        // No server answer: the per-file memory, as before.
+        assertEquals(1, select(explicit = null, server = null))
+    }
+
+    @Test
+    fun explicitAudioSelectionWinsOverTheLanguageSetting() = runTest(dispatcher) {
+        var allocation: MobileVideoSessionAllocation? = null
+
+        start(
+            effective = "",
+            profile = Profile(id = PROFILE_ID, name = "Profile"),
+            versionFields = """
+                "audio_tracks": [
+                  {"codec":"aac","language":"eng","title":"English"},
+                  {"codec":"truehd","language":"jpn","title":"Japanese"}
+                ]
+            """.trimIndent(),
+            explicitAudioTrackIndex = 0,
+            audioLanguage = "jpn",
+            onAllocation = { allocation = it },
+        )
+
+        assertEquals(0, allocation?.audioTrackIndex)
+    }
+
+    @Test
+    fun explicitPlaybackSubtitleIndexWinsAndPassesThroughUnchanged() = runTest(dispatcher) {
+        var allocation: MobileVideoSessionAllocation? = null
+
+        start(
+            effective = "",
+            profile = Profile(id = PROFILE_ID, name = "Profile"),
+            versionFields = """
+                "subtitle_tracks": [
+                  {"index":12,"codec":"subrip","language":"en","title":"English","external":false},
+                  {"index":0,"codec":"srt","language":"fr","title":"French","external":true}
+                ]
+            """.trimIndent(),
+            explicitSubtitleTrackIndex = 1,
+            onAllocation = { allocation = it },
+        )
+
+        assertEquals(1, allocation?.subtitleTrackIndex)
+    }
+
+    @Test
+    fun serverSelectedSubtitleIndexIsRetainedForSessionRenewal() = runTest(dispatcher) {
+        var adoptedParams: StartParams? = null
+
+        start(
+            effective = "",
+            profile = Profile(id = PROFILE_ID, name = "Profile"),
+            readyStart = allocatedReady("subtitle-session", selectedSubtitleIndex = 4),
+            onAdoption = { adoptedParams = it },
+        )
+
+        assertEquals(4, adoptedParams?.subtitleTrackIndex)
+    }
+
+    @Test
+    fun mobileDataStartsAtTheCellularPair() = runTest(dispatcher) {
+        assertStartsAtTheCellularPair(
+            PlaybackNetworkSnapshot(connected = true, metered = true, transport = "cellular", cellular = true),
+        )
+    }
+
+    @Test
+    fun aVpnOverWifiStartsAtTheMainPair() = runTest(dispatcher) {
+        var allocation: MobileVideoSessionAllocation? = null
+
+        start(
+            effective = "",
+            profile = Profile(id = PROFILE_ID, name = "Profile"),
+            // Android marks most VPNs metered; Tailscale at home is still Wi-Fi.
+            network = PlaybackNetworkSnapshot(connected = true, metered = true, transport = "wifi", vpn = true),
+            onAllocation = { allocation = it },
+        )
+
+        assertEquals("auto", allocation?.qualityPreference)
+        assertNull(allocation?.maxBitrateKbps)
+    }
+
+    @Test
+    fun aRenewalCarriesNoQualityThatCameFromTheSettings() = runTest(dispatcher) {
+        // Settings for mobile data: 720p at 2 Mbps. A renewal reads them again
+        // for the connection it is on rather than pinning 720p.
+        var adopted: StartParams? = null
+
+        start(
+            effective = "",
+            profile = Profile(id = PROFILE_ID, name = "Profile"),
+            network = PlaybackNetworkSnapshot(connected = true, metered = true, transport = "cellular", cellular = true),
+            onAdoption = { adopted = it },
+        )
+
+        assertNull(adopted?.qualityPreference)
+    }
+
+    @Test
+    fun aRenewalCarriesAQualityPickedInThePlayer() = runTest(dispatcher) {
+        var allocation: MobileVideoSessionAllocation? = null
+        var adopted: StartParams? = null
+
+        start(
+            effective = "",
+            profile = Profile(id = PROFILE_ID, name = "Profile"),
+            preferredQualityOverride = "1080p",
+            onAllocation = { allocation = it },
+            onAdoption = { adopted = it },
+        )
+
+        assertEquals("1080p", allocation?.qualityPreference)
+        assertEquals("1080p", adopted?.qualityPreference)
+    }
+
+    @Test
+    fun aMeteredWifiNetworkStartsAtTheCellularPair() = runTest(dispatcher) {
+        // A phone hotspot, or Wi-Fi the user marked metered.
+        assertStartsAtTheCellularPair(PlaybackNetworkSnapshot(connected = true, metered = true, transport = "wifi"))
+    }
+
+    private suspend fun TestScope.assertStartsAtTheCellularPair(network: PlaybackNetworkSnapshot) {
+        var allocation: MobileVideoSessionAllocation? = null
+
+        start(
+            effective = "",
+            profile = Profile(id = PROFILE_ID, name = "Profile"),
+            network = network,
+            onAllocation = { allocation = it },
+        )
+
+        // The store's cellular defaults: the 720p preset.
+        assertEquals("720p", allocation?.qualityPreference)
+        assertEquals(2_000, allocation?.maxBitrateKbps)
+    }
+
+    @Test
+    fun unmeteredNetworksStartAtTheMainPair() = runTest(dispatcher) {
+        var allocation: MobileVideoSessionAllocation? = null
+
+        start(
+            effective = "",
+            profile = Profile(id = PROFILE_ID, name = "Profile"),
+            network = PlaybackNetworkSnapshot(connected = true, metered = false, transport = "wifi"),
+            onAllocation = { allocation = it },
+        )
+
+        assertEquals("auto", allocation?.qualityPreference)
+        assertNull(allocation?.maxBitrateKbps)
+    }
+
+    @Test
+    fun unknownSourceDurationStaysUnknownAtTheStarterBoundary() = runTest(dispatcher) {
+        val ready = start(
+            effective = "",
+            profile = Profile(id = PROFILE_ID, name = "Profile"),
+        )
+
+        assertNull(ready.durationSeconds)
+    }
+
+    private suspend fun TestScope.start(
+        effective: String,
+        profile: Profile,
+        versionFields: String = "",
+        explicitAudioTrackIndex: Int? = null,
+        explicitSubtitleTrackIndex: Int? = null,
+        audioLanguage: String = "",
+        userItemStatePort: UserItemStatePort = NoOpUserItemStatePort,
+        onAllocation: (MobileVideoSessionAllocation) -> Unit = {},
+        readyStart: VideoSessionStartV3.Ready = allocatedReady("subtitle-session"),
+        onAdoption: (StartParams) -> Unit = {},
+        network: PlaybackNetworkSnapshot = PlaybackNetworkSnapshot(),
+        preferredQualityOverride: String? = null,
+    ): VideoPlaybackStartResult.Ready {
+        val client = catalogClient(effective, versionFields)
+        val tokenManager = FakeTokenManager()
+        val profileRepository = FakeProfileRepository(client, tokenManager, profile)
+        val manager = RecordingPlaybackSessionManager(client, tokenManager)
+        val context = ApplicationProvider.getApplicationContext<Application>()
+        val starter = MobileVideoPlaybackStarter(
+            catalogRepository = CatalogRepository(CatalogApi(client, watchDetail = org.siloserver.silo.network.apiv2.WatchDetailV2Api(client, tokenManager, ApiV2Gate.Unrestricted))),
+            playbackSessionManager = manager,
+            profileRepository = profileRepository,
+            capabilityDetector = PlaybackCapabilityDetector(
+                context,
+                AudioCapabilityManager(context),
+                LibassBridge(false),
+                SiloClientBuildIdentity(buildNumber = "5", channel = "release"),
+            ),
+            playerSettingsStore = FakePlayerSettingsStore(audioLanguage),
+            sessionLifecycle = PlaybackSessionLifecycle(
+                manager,
+                HealthApi(client),
+                PersonalDataRepository(PersonalDataApi(client)),
+                backgroundScope,
+            ),
+            reachabilityMonitor = ServerReachabilityMonitor(org.siloserver.silo.network.apiv2.ApiV2Probe(client)::probeFresh, backgroundScope, { null }),
+            userItemStatePort = userItemStatePort,
+            sessionAllocator = {
+                assertEquals(tokenManager.metadataOwner, it.expectedMetadataOwner)
+                onAllocation(it)
+                ApiResult.Success(readyStart)
+            },
+            sessionAdopter = { params, _ -> onAdoption(params) },
+            networkEvidenceProvider = { network },
+        )
+
+        val result = starter.start(
+            VideoPlaybackStartRequest(
+                contentId = "starter",
+                preferredFileId = 41,
+                roomId = null,
+                resumePositionOverride = null,
+                audioTrackIndex = explicitAudioTrackIndex,
+                subtitleTrackIndex = explicitSubtitleTrackIndex,
+                preferredQualityOverride = preferredQualityOverride,
+            ),
+        )
+        assertTrue(result is VideoPlaybackStartResult.Ready, "expected a ready start, got $result")
+        return result
+    }
+
+    private fun catalogClient(effective: String, versionFields: String): HttpClient {
+        val extraVersionFields = versionFields
+            .trim()
+            .takeIf(String::isNotEmpty)
+            ?.let { ",\n$it" }
+            .orEmpty()
+        return HttpClient(
+            MockEngine { request ->
+                if (request.url.encodedPath == "/api/v2/watch/starter") {
+                    respond(
+                        content = """
+                            {
+                              "content_id": "starter",
+                              "type": "movie",
+                              "title": "Starter",
+                              $effective
+                              "versions": [
+                                {
+                                  "file_id": "41",
+                                  "container": "mkv",
+                                  "duration_seconds": 120.0
+                                  $extraVersionFields
+                                }
+                              ]
+                            }
+                        """.trimIndent(),
+                        status = HttpStatusCode.OK,
+                        headers = JSON_HEADERS,
+                    )
+                } else {
+                    respond(
+                        content = """{"error":"not_found","message":"not found"}""",
+                        status = HttpStatusCode.NotFound,
+                        headers = JSON_HEADERS,
+                    )
+                }
+            },
+        ) {
+            install(ContentNegotiation) { json(SiloJson) }
+        }
+    }
+}
+
+private class DeferredNonCooperativeStarter : VideoPlaybackStarter {
+    private data class Pending(
+        val request: VideoPlaybackStartRequest,
+        val continuation: Continuation<VideoPlaybackStartResult>,
+        var completed: Boolean = false,
+    )
+
+    private val pending = mutableListOf<Pending>()
+
+    /** Replayable so a request that lands before the wait begins is still seen. */
+    private val requestCount = MutableStateFlow(0)
+    val startedRequestCount: Int get() = requestCount.value
+
+    override suspend fun start(request: VideoPlaybackStartRequest): VideoPlaybackStartResult =
+        suspendCoroutine { continuation ->
+            requestCount.value = synchronized(pending) {
+                pending += Pending(request, continuation)
+                pending.size
+            }
+        }
+
+    fun request(index: Int): VideoPlaybackStartRequest =
+        synchronized(pending) { pending[index].request }
+
+    fun complete(index: Int, result: VideoPlaybackStartResult) {
+        val continuation = synchronized(pending) {
+            pending[index].also {
+                check(!it.completed) { "Request $index already completed" }
+                it.completed = true
+            }.continuation
+        }
+        continuation.resume(result)
+    }
+
+    suspend fun awaitRequestCount(count: Int) {
+        awaitRealTime { requestCount.first { it >= count } }
+    }
+}
+
+private class RecordingPlaybackSessionManager(
+    client: HttpClient,
+    tokenManager: TokenManager,
+) : PlaybackSessionManager(
+    PlaybackRepository(testSequencedPlayback(client, tokenManager)),
+    tokenManager,
+) {
+    var sequenced = false
+    var stopResult: ApiResult<Unit> = ApiResult.Success(Unit)
+    /** Holds every stop until completed, to model a slow stop request. */
+    var stopGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+    override fun isSequenced(sessionId: String): Boolean = sequenced
+
+    private val stopped = mutableListOf<String>()
+    private val stopActiveContexts = mutableListOf<Boolean>()
+    private val stoppedSignal = MutableStateFlow<Set<String>>(emptySet())
+
+    val stoppedSessions: List<String>
+        get() = synchronized(stopped) { stopped.toList() }
+
+    val stopContextsActive: List<Boolean>
+        get() = synchronized(stopActiveContexts) { stopActiveContexts.toList() }
+
+    override suspend fun stopSession(sessionId: String): ApiResult<Unit> {
+        val contextActive = currentCoroutineContext().isActive
+        synchronized(stopped) {
+            stopped += sessionId
+            stopActiveContexts += contextActive
+        }
+        stoppedSignal.update { it + sessionId }
+        stopGate?.await()
+        return stopResult
+    }
+
+    suspend fun awaitStopped(sessionId: String) {
+        awaitRealTime { stoppedSignal.first { sessionId in it } }
+    }
+}
+
+private class FakeProfileRepository(
+    client: HttpClient,
+    tokenManager: TokenManager,
+    private val profile: Profile = Profile(id = PROFILE_ID, name = "Profile"),
+) : ProfileRepository(ProfileApi(client, ApiV2Gate.Unrestricted), tokenManager) {
+    override suspend fun getActiveProfileId(): String = PROFILE_ID
+
+    override suspend fun listProfiles(): ApiResult<List<Profile>> = ApiResult.Success(listOf(profile))
+}
+
+private class FakeTokenManager : TokenManager {
+    var metadataOwner: org.siloserver.silo.network.AuthScopeSnapshot? = org.siloserver.silo.network.AuthScopeSnapshot(SERVER_ID, PROFILE_ID, "https://silo.test", null, identityGeneration = 1, isIdentityGenerationStamped = true, credentialEpoch = 1)
+    var beforeSnapshot: suspend () -> Unit = {}
+    override suspend fun snapshotCurrentScope(): org.siloserver.silo.network.AuthScopeSnapshot? {
+        beforeSnapshot()
+        return metadataOwner
+    }
+    override val sessionExpired = MutableSharedFlow<Unit>()
+    override suspend fun getAccessToken(): String = "access-token"
+    override suspend fun getRefreshToken(): String? = null
+    override suspend fun saveTokens(accessToken: String, refreshToken: String, expiresIn: Long) = Unit
+    override suspend fun clearTokens() = Unit
+    override suspend fun invalidateSession() = Unit
+    override suspend fun getProfileId(): String = PROFILE_ID
+    override suspend fun setProfileId(profileId: String?) = Unit
+    override suspend fun getProfileToken(): String? = null
+    override suspend fun setProfileToken(token: String?) = Unit
+    override suspend fun getServerUrl(): String = "https://silo.test"
+    override suspend fun setServerUrl(url: String) = Unit
+    override suspend fun getCurrentServerId(): String = SERVER_ID
+    override suspend fun switchActiveServer(serverId: String?) = Unit
+    override suspend fun signOutCurrentServer() = Unit
+}
+
+private class FakeServerRegistry : ServerRegistry {
+    override val entries: StateFlow<List<ServerEntry>> = MutableStateFlow(emptyList())
+    override val activeServerId: StateFlow<String?> = MutableStateFlow(SERVER_ID)
+    override val activeEntry: StateFlow<ServerEntry?> = MutableStateFlow(null)
+    override suspend fun addOrUpdate(url: String, fetchedName: String?): String = SERVER_ID
+    override suspend fun rename(serverId: String, userOverrideName: String?) = Unit
+    override suspend fun setFetchedName(serverId: String, fetchedName: String?) = Unit
+    override suspend fun setProfileId(serverId: String, profileId: String?) = Unit
+    override suspend fun remove(serverId: String) = Unit
+    override suspend fun signOut(serverId: String) = Unit
+    override suspend fun switchTo(serverId: String) = Unit
+    override suspend fun touchActive() = Unit
+}
+
+private class FakePlayerSettingsStore(
+    private val audioLanguage: String = "",
+) : PlayerSettingsStore {
+    override val introSkipModeFlow: Flow<IntroSkipMode> = flowOf(IntroSkipMode.ASK)
+    override val bufferingQualityModeFlow: Flow<BufferingQualityMode> = flowOf(BufferingQualityMode.Default)
+    override val autoSkipCreditsFlow: Flow<Boolean> = flowOf(false)
+    override val autoPlayNextFlow: Flow<Boolean> = flowOf(true)
+    override val themeMusicEnabledFlow: Flow<Boolean> = flowOf(false)
+    override val themeMusicLoopFlow: Flow<Boolean> = flowOf(false)
+    override val hdrEnabledFlow: Flow<Boolean> = flowOf(true)
+    override val dvProfile7HDR10FallbackFlow: Flow<Boolean> = flowOf(true)
+    override val dolbyVisionEnabledFlow: Flow<Boolean> = flowOf(true)
+    override val matchContentFrameRateFlow: Flow<Boolean> = flowOf(false)
+    override val pictureInPictureEnabledFlow: Flow<Boolean> = flowOf(true)
+    override val forceHdrPassthroughFlow: Flow<Boolean> = flowOf(false)
+    override val downloadsWifiOnlyFlow: Flow<Boolean> = flowOf(true)
+    override val keepWatchedDownloadsFlow: Flow<Boolean> = flowOf(false)
+    override val defaultDownloadQualityFlow: Flow<String> = flowOf("original")
+    override val playbackSpeedFlow: Flow<Double> = flowOf(1.0)
+    override val audioSyncMsFlow: Flow<Int> = flowOf(0)
+    override val subtitleSyncMsFlow: Flow<Int> = flowOf(0)
+    override val nextUpPromptSecondsFlow: Flow<Int> = flowOf(30)
+    override val sleepTimerDefaultMinutesFlow: Flow<Int> = flowOf(30)
+    override val resumeRewindSecondsFlow: Flow<Int> = flowOf(7)
+    override val passOutThresholdFlow: Flow<Int> = flowOf(3)
+    override val preferredQualityFlow: Flow<String> = flowOf("auto")
+    override val maxBitrateKbpsFlow: Flow<Int?> = flowOf(null)
+    override val audioLanguageFlow: Flow<String> = flowOf(audioLanguage)
+    override val videoGravityFlow: Flow<String> = flowOf("fit")
+    override val orientationModeFlow: Flow<String> = flowOf("auto")
+    override val subtitleAppearanceFlow: Flow<SubtitleAppearance> = flowOf(SubtitleAppearance.DEFAULT)
+    override val savedCustomSubtitleAppearanceFlow: Flow<SubtitleAppearance> =
+        flowOf(SubtitleAppearance.DEFAULT)
+    override val subtitleUsesDeviceOverrideFlow: Flow<Boolean> = flowOf(false)
+    override val subtitleMatchesDeviceFlow: Flow<Boolean> = flowOf(false)
+    override val showAudiobooksFlow: Flow<Boolean> = flowOf(false)
+    override val effectiveSubtitleAppearanceFlow: Flow<SubtitleAppearance> =
+        flowOf(SubtitleAppearance.DEFAULT)
+
+    override suspend fun setIntroSkipMode(value: IntroSkipMode) = Unit
+    override suspend fun setBufferingQualityMode(value: BufferingQualityMode) = Unit
+    override suspend fun setAutoSkipCredits(value: Boolean) = Unit
+    override suspend fun setAutoPlayNext(value: Boolean) = Unit
+    override suspend fun setThemeMusicEnabled(value: Boolean) = Unit
+    override suspend fun setThemeMusicLoop(value: Boolean) = Unit
+    override suspend fun setHdrEnabled(value: Boolean) = Unit
+    override suspend fun setDvProfile7HDR10Fallback(value: Boolean) = Unit
+    override suspend fun setDolbyVisionEnabled(value: Boolean) = Unit
+    override suspend fun setMatchContentFrameRate(value: Boolean) = Unit
+    override suspend fun setPictureInPictureEnabled(value: Boolean) = Unit
+    override suspend fun setForceHdrPassthrough(value: Boolean) = Unit
+    override suspend fun setDownloadsWifiOnly(value: Boolean) = Unit
+    override suspend fun setKeepWatchedDownloads(value: Boolean) = Unit
+    override suspend fun setDefaultDownloadQuality(value: String) = Unit
+    override suspend fun setPlaybackSpeed(value: Double) = Unit
+    override suspend fun setAudioSyncMs(value: Int) = Unit
+    override suspend fun setSubtitleSyncMs(value: Int) = Unit
+    override suspend fun setNextUpPromptSeconds(value: Int) = Unit
+    override suspend fun setSleepTimerDefaultMinutes(value: Int) = Unit
+    override suspend fun setResumeRewindSeconds(value: Int) = Unit
+    override suspend fun setPassOutThreshold(value: Int) = Unit
+    override suspend fun setPreferredQuality(value: String) = Unit
+    override suspend fun setAudioLanguage(value: String) = Unit
+    override suspend fun setVideoGravity(value: String) = Unit
+    override suspend fun setOrientationMode(value: String) = Unit
+    override suspend fun setSubtitleAppearance(value: SubtitleAppearance) = Unit
+    override suspend fun flushProjectedSubtitleAppearance() = Unit
+    override suspend fun refreshFromServer() = Unit
+    override suspend fun setSubtitleDeviceOverrideEnabled(enabled: Boolean) = Unit
+    override suspend fun setSubtitleMatchesDevice(enabled: Boolean) = Unit
+    override suspend fun setShowAudiobooks(enabled: Boolean) = Unit
+    override suspend fun resetDeviceSetting(key: String) = Unit
+    override suspend fun resetAllDeviceSettings() = true
+    override suspend fun flushPendingDeviceSettings() = Unit
+}
+
+private fun allocatedReady(
+    sessionId: String,
+    selectedSubtitleIndex: Int? = null,
+): VideoSessionStartV3.Ready {
+    val selectedSubtitle = selectedSubtitleIndex?.let { index ->
+        PlaybackTrackIdentityV3("file:41:subtitle:$index", index)
+    }
+    val plan = PlaybackPlanV3(
+        planId = "plan-$sessionId",
+        planAttemptKey = "v3:test:$sessionId",
+        sessionId = sessionId,
+        delivery = PlaybackDelivery.ORIGINAL_HTTP,
+        stream = PlaybackStreamV3(
+            url = "https://silo.test/stream/$sessionId",
+            protocol = PlaybackStreamProtocol.HTTP_PROGRESSIVE,
+            container = "mkv",
+        ),
+        decisionReason = "test",
+        effectiveMediaFileId = 41,
+        selectedTracks = SelectedPlaybackTracksV3(subtitle = selectedSubtitle),
+    )
+    return VideoSessionStartV3.Ready(
+        session = PlaybackSessionResponse(
+            sessionId = sessionId,
+            userId = 1,
+            profileId = PROFILE_ID,
+            mediaFileId = 41,
+            playMethod = PlayMethod.DIRECT,
+            streamUrl = plan.stream.url,
+        ),
+        plan = plan,
+        playbackAttemptId = "playback-attempt",
+        planAttemptId = "plan-attempt",
+        planAttemptKey = "plan-key",
+        capabilities = ClientCodecCapabilities(),
+        clientPlaybackContext = ClientPlaybackContext(formFactor = "mobile", appVersion = "test"),
+    )
+}
+
+private fun noOpClient(): HttpClient =
+    HttpClient(
+        MockEngine {
+            respond(
+                content = """{"error":"not_found","message":"not found"}""",
+                status = HttpStatusCode.NotFound,
+                headers = JSON_HEADERS,
+            )
+        },
+    ) {
+        install(ContentNegotiation) { json(SiloJson) }
+    }
+
+private suspend fun PlayerViewModel.awaitState(
+    predicate: (PlayerViewModel.PlayerUiState) -> Boolean,
+) {
+    awaitRealTime { uiState.first(predicate) }
+}
+
+/**
+ * Runs [block] under a REAL, generous deadline.
+ *
+ * The deadline has to be real: this load path does unavoidable work on
+ * `Dispatchers.IO` before it ever reaches the fake starter — the offline
+ * preflight in `PlayerViewModel.tryLocalPlayback` and, beneath it,
+ * `LegacyDownloadImporter` both hard-code that dispatcher — and virtual time
+ * cannot advance a real thread. A purely virtual timeout raced straight past
+ * that work and failed every test in this class.
+ *
+ * What must NOT come back is polling. Waiters here suspend on a signal, so a
+ * result that arrives before the wait begins is still seen, and a waiter can no
+ * longer give up on work that simply had not been dispatched yet.
+ */
+private suspend fun <T> awaitRealTime(block: suspend () -> T): T =
+    withContext(Dispatchers.Default) {
+        // The deadline exists to turn a hang into a failure, not to police
+        // latency — a passing test signals in milliseconds and never waits.
+        // Five seconds was tight enough that a full-suite run, with dozens of
+        // Robolectric classes competing for the same JVM, could blow it while
+        // the work was merely slow. That looked exactly like the race this
+        // helper was written to remove, which is worse than useless.
+        withTimeout(30_000) { block() }
+    }
+
+
+private const val SERVER_ID = "server"
+private const val PROFILE_ID = "profile"
+private val JSON_HEADERS = headersOf(HttpHeaders.ContentType, "application/json")
+
+@OptIn(ExperimentalCoroutinesApi::class)
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34], application = Application::class)
+class MobileStartupMetadataOwnerTest {
+    @Test fun missingAndLateMetadataAuthorityCannotAllocate() = runTest {
+        for (stage in listOf("missing", "metadata")) runScenario(stage)
+    }
+    @Test fun injectedAllocatorRetainsOwnerAndLateAdoptionCannotPublish() = runTest {
+        for (stage in listOf("allocation", "adoption")) runScenario(stage)
+    }
+    private suspend fun TestScope.runScenario(stage: String) {
+        val tokens = FakeTokenManager()
+        val original = tokens.metadataOwner
+        if (stage == "missing") tokens.metadataOwner = null
+        var reads = 0
+        var allocations = 0
+        var adoptions = 0
+        val client = HttpClient(MockEngine { req ->
+            assertEquals("/api/v2/watch/starter", req.url.encodedPath)
+            reads++
+            if (stage == "metadata") tokens.metadataOwner = original!!.copy(profileToken = "replacement")
+            respond("""{"content_id":"starter","type":"movie","title":"Starter","versions":[{"file_id":"41","duration_seconds":120}]}""", HttpStatusCode.OK, JSON_HEADERS)
+        }) { install(ContentNegotiation) { json(SiloJson) } }
+        try {
+            val manager = RecordingPlaybackSessionManager(client, tokens)
+            val context = ApplicationProvider.getApplicationContext<Application>()
+            val starter = MobileVideoPlaybackStarter(
+                CatalogRepository(CatalogApi(client, watchDetail = org.siloserver.silo.network.apiv2.WatchDetailV2Api(client, tokens, ApiV2Gate.Unrestricted))),
+                manager, FakeProfileRepository(client, tokens),
+                PlaybackCapabilityDetector(context, AudioCapabilityManager(context), LibassBridge(false), SiloClientBuildIdentity(buildNumber = "5", channel = "release")),
+                FakePlayerSettingsStore(),
+                PlaybackSessionLifecycle(manager, HealthApi(client), PersonalDataRepository(PersonalDataApi(client)), backgroundScope),
+                ServerReachabilityMonitor(org.siloserver.silo.network.apiv2.ApiV2Probe(client)::probeFresh, backgroundScope, { null }),
+                sessionAllocator = {
+                    allocations++
+                    assertEquals(original, it.expectedMetadataOwner)
+                    if (stage == "allocation") tokens.metadataOwner = original!!.copy(identityGeneration = 3)
+                    ApiResult.Success(allocatedReady("owner-session"))
+                },
+                sessionAdopter = { _, _ ->
+                    adoptions++
+                    if (stage == "adoption") tokens.metadataOwner = original!!.copy(credentialEpoch = 2)
+                },
+            )
+            assertTrue(starter.start(VideoPlaybackStartRequest(contentId = "starter", preferredFileId = 41, roomId = null, resumePositionOverride = null)) is VideoPlaybackStartResult.Error)
+            assertEquals(if (stage == "missing") 0 else 1, reads)
+            assertEquals(if (stage in listOf("missing", "metadata")) 0 else 1, allocations)
+            assertEquals(if (stage == "adoption") 1 else 0, adoptions)
+            assertEquals(if (allocations == 0) emptyList() else listOf("owner-session"), manager.stoppedSessions)
+        } finally { client.close() }
+    }
+}
+
+
+@OptIn(ExperimentalCoroutinesApi::class)
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34], application = Application::class)
+class MobileStartupAdoptedOwnerCleanupTest {
+    @Test fun finalOwnerRejectionRetiresActualLifecycle() = runTest { scenario(false, false) }
+    @Test fun finalSnapshotCancellationRetiresActualLifecycle() = runTest { scenario(true, false) }
+    @Test fun finalOwnerRejectionProtectsNewerLifecycle() = runTest { scenario(false, true) }
+    @Test fun finalSnapshotCancellationProtectsNewerLifecycle() = runTest { scenario(true, true) }
+
+    private suspend fun TestScope.scenario(cancel: Boolean, replace: Boolean) {
+        val tokens = FakeTokenManager()
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val client = HttpClient(MockEngine { req ->
+            // No fabricated final progress, recovery probe or extra cleanup transport.
+            assertEquals("/api/v2/watch/starter", req.url.encodedPath)
+            respond("""{"content_id":"starter","type":"movie","title":"Starter","versions":[{"file_id":"41","duration_seconds":120}]}""", HttpStatusCode.OK, JSON_HEADERS)
+        }) { install(ContentNegotiation) { json(SiloJson) } }
+        try {
+            val manager = RecordingPlaybackSessionManager(client, tokens)
+            val lifecycle = PlaybackSessionLifecycle(manager, HealthApi(client), PersonalDataRepository(PersonalDataApi(client)), backgroundScope)
+            fun field(name: String): Any? = PlaybackSessionLifecycle::class.java.getDeclaredField(name).let {
+                it.isAccessible = true
+                it.get(lifecycle)
+            }
+            var held = false
+            tokens.beforeSnapshot = {
+                if (!held && field("lastAdoptedSessionId") == "rejected") {
+                    held = true
+                    entered.complete(Unit)
+                    release.await()
+                }
+            }
+            val context = ApplicationProvider.getApplicationContext<Application>()
+            val starter = MobileVideoPlaybackStarter(
+                CatalogRepository(CatalogApi(client, watchDetail = org.siloserver.silo.network.apiv2.WatchDetailV2Api(client, tokens, ApiV2Gate.Unrestricted))),
+                manager, FakeProfileRepository(client, tokens),
+                PlaybackCapabilityDetector(context, AudioCapabilityManager(context), LibassBridge(false), SiloClientBuildIdentity(buildNumber = "5", channel = "release")),
+                FakePlayerSettingsStore(), lifecycle,
+                ServerReachabilityMonitor(org.siloserver.silo.network.apiv2.ApiV2Probe(client)::probeFresh, backgroundScope, { null }),
+                sessionAllocator = { ApiResult.Success(allocatedReady("rejected")) },
+                // Deliberately use production lifecycle adoption, not sessionAdopter.
+            )
+            val start = async {
+                starter.start(VideoPlaybackStartRequest(contentId = "starter", preferredFileId = 41, roomId = null, resumePositionOverride = null))
+            }
+            entered.await()
+            assertTrue(lifecycle.state.value is org.siloserver.silo.common.player.SessionState.Active)
+            val oldReporter = field("reporterJob") as kotlinx.coroutines.Job
+            assertTrue(oldReporter.isActive)
+            if (replace) {
+                lifecycle.adoptActiveSession(
+                    field("lastStartParams") as org.siloserver.silo.common.player.StartParams,
+                    allocatedReady("newer").session,
+                )
+            }
+            val newerReporter = if (replace) field("reporterJob") else null
+            tokens.metadataOwner = tokens.metadataOwner!!.copy(profileToken = "replacement")
+            if (cancel) {
+                start.cancel()
+                start.join()
+                assertTrue(start.isCancelled)
+            } else {
+                release.complete(Unit)
+                assertTrue(start.await() is VideoPlaybackStartResult.Error)
+            }
+            assertEquals(listOf("rejected"), manager.stoppedSessions)
+            assertTrue(manager.stopContextsActive.all { it })
+            assertFalse(oldReporter.isActive)
+            if (replace) {
+                assertEquals("newer", field("lastAdoptedSessionId"))
+                assertTrue(lifecycle.state.value is org.siloserver.silo.common.player.SessionState.Active)
+                assertTrue(field("reporterJob") === newerReporter)
+                assertTrue((newerReporter as kotlinx.coroutines.Job).isActive)
+                assertTrue(field("lastStartParams") != null)
+            } else {
+                assertEquals(org.siloserver.silo.common.player.SessionState.Idle, lifecycle.state.value)
+                for (name in listOf("lastAdoptedSessionId", "lastStartParams", "reporterJob", "recoveryJob", "recoveringFromMissingSession", "pendingActiveSessionPublication")) {
+                    assertNull(field(name), name)
+                }
+            }
+        } finally { client.close() }
+    }
+}
+
+private fun testSequencedPlayback(client: HttpClient, tokens: TokenManager): org.siloserver.silo.repository.SequencedPlayback {
+    val journal = object : org.siloserver.silo.repository.PlaybackJournalStore {
+        var entries = emptyList<org.siloserver.silo.repository.PlaybackJournalEntry>()
+        override suspend fun read() = entries
+        override suspend fun write(entries: List<org.siloserver.silo.repository.PlaybackJournalEntry>) { this.entries = entries }
+    }
+    val authorities = object : org.siloserver.silo.network.DurableLoginAuthorityProvider {
+        override suspend fun snapshotDurableLoginAuthority(): org.siloserver.silo.network.DurableLoginAuthority? = null
+    }
+    return org.siloserver.silo.repository.SequencedPlayback(
+        org.siloserver.silo.network.apiv2.PlaybackV2Api(client, ApiV2Gate.Unrestricted), tokens, authorities, journal) { "stop" }
+}

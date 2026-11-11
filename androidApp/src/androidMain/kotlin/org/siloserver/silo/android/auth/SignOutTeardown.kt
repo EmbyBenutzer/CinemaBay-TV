@@ -1,0 +1,149 @@
+package org.siloserver.silo.android.auth
+
+import org.siloserver.silo.android.push.AndroidPushRegistrar
+import org.siloserver.silo.android.push.PushRemoval
+import org.siloserver.silo.android.push.tolerateFailure
+import org.siloserver.silo.common.settings.CardPresentationStore
+import org.siloserver.silo.common.settings.EpisodeSpoilerStore
+import org.siloserver.silo.common.settings.LibraryPlaybackPrefsStore
+import org.siloserver.silo.common.settings.OverlayPrefsStore
+import org.siloserver.silo.common.settings.PlayerSettingsStore
+import org.siloserver.silo.common.settings.SeekIntervalStore
+import org.siloserver.silo.common.settings.TitleArtStore
+import org.siloserver.silo.model.feature.MetadataAiFeatureStore
+import org.siloserver.silo.model.feature.RequestsFeatureStore
+import org.siloserver.silo.model.profile.ActiveProfileStore
+import org.siloserver.silo.network.ServerRegistry
+import org.siloserver.silo.repository.AuthRepository
+
+/**
+ * The one sign-out of the active server's account, shared by Settings, the
+ * profile menu and device pairing's "Switch account". Pending device settings
+ * are pushed first, while the session they belong to still exists; then the
+ * per-profile caches are dropped so the next account's shell doesn't render
+ * (or write back) the previous profile's values.
+ *
+ * Signing out of Silo leaves the provider's session in the browser, so the
+ * server's next provider sign-in asks the provider to offer another account
+ * ([NativeSignInCoordinator.requestAccountChoice]). A session that expired
+ * never comes through here and never asks.
+ */
+class SignOutTeardown(
+    private val authRepository: AuthRepository,
+    private val playerSettingsStore: PlayerSettingsStore,
+    private val libraryPlaybackPrefsStore: LibraryPlaybackPrefsStore,
+    private val overlayPrefsStore: OverlayPrefsStore,
+    private val activeProfileStore: ActiveProfileStore,
+    private val cardPresentationStore: CardPresentationStore,
+    private val seekIntervalStore: SeekIntervalStore,
+    private val titleArtStore: TitleArtStore,
+    private val episodeSpoilerStore: EpisodeSpoilerStore,
+    private val requestsFeatureStore: RequestsFeatureStore,
+    private val metadataAiFeatureStore: MetadataAiFeatureStore,
+    private val serverRegistry: ServerRegistry,
+    private val nativeSignIn: NativeSignInCoordinator,
+    /**
+     * Removes this device's push registration on a server while the account
+     * leaving holds it ([AndroidPushRegistrar.unregisterDevice]).
+     */
+    private val unregisterPush: suspend (serverEntryId: String, accountId: String?) -> PushRemoval? = { _, _ -> null },
+    /** Undoes that removal when the sign-out then stops ([AndroidPushRegistrar.restoreRegistration]). */
+    private val restorePush: suspend (PushRemoval) -> Unit = {},
+) {
+    /**
+     * Push settings still waiting to sync. Call before switching servers so
+     * they reach the server they were made on.
+     */
+    suspend fun flushPendingSettings() {
+        playerSettingsStore.flushPendingDeviceSettings()
+    }
+
+    /**
+     * Sign out of the active server and drop per-profile state.
+     * [flushFirst] is false only when the caller already flushed, before a
+     * server switch. [startSignIn] ("Not you? Switch account" where the
+     * provider is asked to offer another account) has the login screen that
+     * follows start the provider sign-in by itself.
+     *
+     * False when another server or login became active while the sign-out
+     * waited on the network (flushing settings, removing the push
+     * registration, ending the server's session): nobody is signed out here
+     * then, as whoever is active now is not who asked to leave.
+     */
+    suspend fun signOut(flushFirst: Boolean = true, startSignIn: Boolean = false): Boolean {
+        // Captured before anything it waits on: this is the account that leaves.
+        val signedOutOf = serverRegistry.activeServerId.value
+        val signedOutAccount = serverRegistry.activeAccountId.value
+        val target = authRepository.captureSignOutTarget()
+        fun stillActive() = serverRegistry.activeServerId.value == signedOutOf &&
+            serverRegistry.activeAccountId.value == signedOutAccount
+        if (flushFirst) flushPendingSettings()
+        if (!stillActive()) return false
+        // Before the credentials are cleared: a server without the retirement
+        // route can only be told with them. A retirement the server has not
+        // answered stays queued and is sent again without them, as a
+        // registration left behind keeps the server pushing this device for an
+        // account it no longer holds. Failing to remove it never stops the
+        // sign-out; cancellation still does, before anyone is signed out.
+        var removal: PushRemoval? = null
+        if (signedOutOf != null) tolerateFailure { removal = unregisterPush(signedOutOf, signedOutAccount) }
+        if (!stillActive()) {
+            // Removed above, but that server keeps its login, so it keeps its pushes.
+            removal?.let { tolerateFailure { restorePush(it) } }
+            return false
+        }
+        if (!authRepository.logout(target)) return false
+        nativeSignIn.discardPending()
+        if (signedOutOf != null) nativeSignIn.requestAccountChoice(signedOutOf, autoStart = startSignIn)
+        libraryPlaybackPrefsStore.clear()
+        overlayPrefsStore.clear()
+        activeProfileStore.reset()
+        cardPresentationStore.clear()
+        seekIntervalStore.clear()
+        titleArtStore.clear()
+        episodeSpoilerStore.clear()
+        requestsFeatureStore.reset()
+        metadataAiFeatureStore.reset()
+        return true
+    }
+
+    /**
+     * "Sign out & remove server": [signOut], then forget the server, which is
+     * offered only while it has no other account. Another saved server
+     * becomes active with no account open, as after a plain sign-out, so the
+     * person chooses where to go next. False when nothing was signed out, or
+     * the server gained another account meanwhile (it then stays saved).
+     */
+    suspend fun signOutAndRemoveServer(): Boolean {
+        val serverId = serverRegistry.activeServerId.value ?: return false
+        val accountId = serverRegistry.activeAccountId.value
+        fun hasOtherAccount() = serverRegistry.accounts.value.any { it.serverId == serverId && it.localAccountId != accountId }
+        if (hasOtherAccount()) return false
+        if (!signOut()) return false
+        if (hasOtherAccount()) return true
+        serverRegistry.remove(serverId)
+        // The registry promotes the next server with its last account; open
+        // none of them, and probe the promoted server as a switch does.
+        serverRegistry.activeServerId.value?.let { promoted -> authRepository.switchToAccount(promoted, null) }
+        return true
+    }
+
+    /**
+     * Sign out of [accountId] on [serverId] (Settings › Accounts, or replacing
+     * an expired account). The active account goes through [signOut]. Any
+     * other account is signed out where it is, without switching to it, so
+     * the person using the app keeps their profile and caches: its push
+     * registration (if it holds the server's) is removed, its session ends on
+     * the server, and its tokens, preferences and downloads are deleted.
+     */
+    suspend fun signOutAccount(serverId: String, accountId: String): Boolean {
+        if (serverRegistry.activeServerId.value == serverId && serverRegistry.activeAccountId.value == accountId) {
+            return signOut()
+        }
+        var removal: PushRemoval? = null
+        tolerateFailure { removal = unregisterPush(serverId, accountId) }
+        val signedOut = authRepository.signOutAccount(serverId, accountId)
+        if (!signedOut) removal?.let { tolerateFailure { restorePush(it) } }
+        return signedOut
+    }
+}

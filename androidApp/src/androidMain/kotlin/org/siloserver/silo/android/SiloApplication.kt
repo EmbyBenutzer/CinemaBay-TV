@@ -1,0 +1,258 @@
+package org.siloserver.silo.android
+
+import android.app.Application
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.os.Build
+import androidx.work.Configuration
+import androidx.work.WorkManager
+import coil3.ImageLoader
+import coil3.PlatformContext
+import coil3.SingletonImageLoader
+import org.siloserver.silo.android.di.androidModule
+import org.siloserver.silo.android.downloads.AppWorkerFactory
+import org.siloserver.silo.android.notifications.NotificationsForegroundStarter
+import org.siloserver.silo.android.push.AndroidPushRegistrationStarter
+import org.siloserver.silo.common.di.playerInfraModule
+import org.siloserver.silo.common.ui.marquee.marqueeModule
+import org.siloserver.silo.common.di.watchPartyModule
+import org.siloserver.silo.common.di.playerModule
+import org.siloserver.silo.common.diagnostics.DiagnosticsCoordinator
+import org.siloserver.silo.common.diagnostics.DiagnosticsStartup
+import org.siloserver.silo.common.diagnostics.diagnosticsModule
+import org.siloserver.silo.common.downloads.DownloadWorker
+import org.siloserver.silo.di.sharedModules
+import kotlinx.coroutines.launch
+import org.koin.android.ext.koin.androidContext
+import org.koin.core.context.startKoin
+import org.siloserver.silo.common.images.buildSiloImageLoader
+
+/**
+ * Implements `Configuration.Provider` rather than calling
+ * `workManagerFactory()` inside `startKoin { … }`. The latter only wins if
+ * WorkManager hasn't been auto-initialised yet (and the androidx.startup
+ * provider initialises it before `Application.onCreate` runs on many devices),
+ * which silently leaves WorkManager using its reflection-based factory and
+ * crashes when constructing DI-built workers like DownloadWorker. The
+ * Provider path is the modern, reliable recipe.
+ */
+class SiloApplication : Application(), Configuration.Provider, SingletonImageLoader.Factory {
+    override fun onCreate() {
+        super.onCreate()
+        DiagnosticsStartup.installCrashCapture(this)
+        // Before any request: v2 problem details show in the app's language.
+        org.siloserver.silo.common.i18n.ServerText.install(this)
+        org.siloserver.silo.common.i18n.LocaleFormat.refresh(this)
+        org.siloserver.silo.common.i18n.EnglishText.install(this)
+        val koinApp = startKoin {
+            androidContext(this@SiloApplication)
+            modules(sharedModules() + playerModule + playerInfraModule + marqueeModule + watchPartyModule + androidModule + diagnosticsModule)
+        }
+        DiagnosticsStartup.startCoordinator { koinApp.koin.get<DiagnosticsCoordinator>() }
+        // Account-scoped preferences and local state: adopt pre-account values
+        // into the migrated account (synchronously, before any store reads
+        // them), purge signed-out accounts, and remember the last tile.
+        // Guarded — never load-bearing for cold start.
+        runCatching {
+            org.siloserver.silo.common.store.AccountLocalData(
+                context = this@SiloApplication,
+                registry = koinApp.koin.get(),
+                launchPreferences = koinApp.koin.get(),
+            ).start()
+        }.onFailure {
+            android.util.Log.w("SiloApplication", "Account local data init failed: ${it::class.simpleName}")
+        }
+        koinApp.koin.get<org.siloserver.silo.repository.ImageCapabilitiesSession>().start(
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO),
+        )
+        // Profile-verification recovery: clears a profile whose PIN token the
+        // server stopped accepting (after an access change), including when
+        // background work hits it first. Guarded — never load-bearing.
+        runCatching {
+            koinApp.koin.get<org.siloserver.silo.repository.ProfileVerificationRecovery>()
+        }.onFailure {
+            // Class name only: the exception chain can carry auth or server data.
+            android.util.Log.w("SiloApplication", "Profile verification recovery init failed: ${it::class.simpleName}")
+        }
+        // Drive notifications realtime off the app foreground lifecycle. Guarded:
+        // it's a foreground accelerator, never load-bearing for cold start.
+        runCatching {
+            NotificationsForegroundStarter(
+                repository = koinApp.koin.get(),
+            ).register()
+        }.onFailure {
+            android.util.Log.w("SiloApplication", "Notifications starter init failed", it)
+        }
+        runCatching {
+            AndroidPushRegistrationStarter(
+                registrar = koinApp.koin.get(),
+                notificationsRepository = koinApp.koin.get(),
+                registry = koinApp.koin.get(),
+            ).register()
+        }.onFailure {
+            android.util.Log.w("SiloApplication", "Android push registration starter init failed", it)
+        }
+        // SiloCast session lifecycle: foreground pings a live TV session and
+        // probes for a silent auto-resume of the last-controlled TV; background
+        // drops unengaged auto-resumed sessions. Guarded — never load-bearing.
+        runCatching {
+            org.siloserver.silo.android.cast.SiloCastForegroundStarter(
+                controller = koinApp.koin.get(),
+            ).register()
+        }.onFailure {
+            android.util.Log.w("SiloApplication", "SiloCast foreground starter init failed", it)
+        }
+        runCatching {
+            org.siloserver.silo.android.cast.SiloCastMediaSessionStarter(
+                context = this@SiloApplication,
+                controller = koinApp.koin.get(),
+            ).start()
+        }.onFailure {
+            android.util.Log.w("SiloApplication", "SiloCast media-session starter init failed", it)
+        }
+        // Configuration.Provider wasn't reliably picked up by WM's androidx.startup
+        // auto-init (the auto-init seemed to win the race, leaving WM with its
+        // default reflection-based WorkerFactory). Force-initialise explicitly
+        // with our AppWorkerFactory now that Koin is up.
+        runCatching {
+            WorkManager.initialize(this, workManagerConfiguration)
+            android.util.Log.i("SiloApplication", "WorkManager.initialize called with AppWorkerFactory")
+        }.onFailure {
+            android.util.Log.w("SiloApplication", "WorkManager.initialize failed (already initialised?)", it)
+        }
+        // Live-home socket (Apple realtime-updates spec). Guarded — a dead
+        // socket degrades to pull-to-refresh behavior.
+        runCatching {
+            org.siloserver.silo.android.home.HomeRealtimeForegroundStarter(
+                coordinator = koinApp.koin.get(),
+                profileRepository = koinApp.koin.get(),
+                accessCheck = koinApp.koin.getOrNull(),
+            ).register()
+        }.onFailure {
+            android.util.Log.w("SiloApplication", "Home realtime starter init failed", it)
+        }
+        // Use the active server's local address at home (LocalRouteController).
+        // Guarded — without it every request stays on the saved address.
+        runCatching {
+            org.siloserver.silo.common.network.LocalRouteStarter.create(
+                context = this@SiloApplication,
+                registry = koinApp.koin.get(),
+                tokenManager = koinApp.koin.get(),
+            ).start(androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle)
+        }.onFailure {
+            android.util.Log.w("SiloApplication", "Local route starter init failed", it)
+        }
+        // Measure the connection in the background after sign-in and each
+        // return to the foreground, for Auto quality and Settings. Guarded —
+        // without it playback sends no estimate.
+        runCatching {
+            koinApp.koin.get<org.siloserver.silo.common.player.probe.BandwidthProbeScheduler>()
+                .start(androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle, phoneOrTablet = true)
+        }.onFailure {
+            android.util.Log.w("SiloApplication", "Bandwidth probe scheduler init failed: ${it::class.simpleName}")
+        }
+        // Send the playback telemetry an earlier launch left unsent, such as
+        // the summary of a plan still playing when the app was backgrounded
+        // and its process died. Off the main thread. Guarded — never
+        // load-bearing for cold start.
+        runCatching {
+            org.siloserver.silo.common.player.RouteEventReplayStarter(
+                registry = koinApp.koin.get(),
+                playback = koinApp.koin.get(),
+            ).start()
+        }.onFailure {
+            android.util.Log.w("SiloApplication", "Route event replay starter init failed: ${it::class.simpleName}")
+        }
+        // Drain the user-state outbox (Track B) on launch + when connectivity
+        // returns. Guarded — never load-bearing for cold start.
+        runCatching {
+            org.siloserver.silo.common.data.sync.OutboxSyncStarter(
+                context = this@SiloApplication,
+                registry = koinApp.koin.get(),
+            ).start()
+        }.onFailure {
+            android.util.Log.w("SiloApplication", "Outbox sync starter init failed", it)
+        }
+        // Reclaim the disk and Room rows of servers the user has removed.
+        // Derived from "rows with no registry entry", so it is idempotent, also
+        // cleans installs that removed servers before this existed, and cannot
+        // strand anything if a pass is interrupted. Guarded — never load-bearing
+        // for cold start.
+        runCatching {
+            org.siloserver.silo.common.downloads.installOrphanedServerDataPurge(
+                context = this@SiloApplication,
+                registry = koinApp.koin.get(),
+                database = koinApp.koin.get(),
+                storage = koinApp.koin.get(),
+                legacyImporter = koinApp.koin.getOrNull(),
+            )
+        }.onFailure {
+            android.util.Log.w("SiloApplication", "Orphaned server purge init failed", it)
+        }
+        // One-time migration: drain the legacy .record.json download sidecar tree
+        // into Room so pre-cutover downloads keep their metadata. Guarded — never
+        // load-bearing for cold start; runs off the main thread.
+        runCatching {
+            val importer = koinApp.koin.get<org.siloserver.silo.common.downloads.LegacyDownloadImporter>()
+            kotlinx.coroutines.CoroutineScope(
+                kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+            ).launch {
+                runCatching { importer.awaitImport(System.currentTimeMillis()) }
+                    .onFailure { android.util.Log.w("SiloApplication", "Legacy download import failed", it) }
+            }
+        }.onFailure {
+            android.util.Log.w("SiloApplication", "Legacy download importer init failed", it)
+        }
+        // Keep monitored-download subscriptions evaluated in the background.
+        // The periodic request carries no scope input, so the worker follows
+        // whatever server/profile is active when it fires. Guarded — never
+        // load-bearing for cold start.
+        runCatching {
+            org.siloserver.silo.common.downloads.DownloadSubscriptionWorker.enqueuePeriodic(this)
+        }.onFailure {
+            android.util.Log.w("SiloApplication", "Download subscription periodic enqueue failed", it)
+        }
+        // Re-fetch saved subtitle sidecars the server has retimed since they
+        // were downloaded. Guarded for the same reason.
+        runCatching {
+            org.siloserver.silo.common.downloads.OfflineSubtitleRefreshWorker.enqueuePeriodic(this)
+        }.onFailure {
+            android.util.Log.w("SiloApplication", "Offline subtitle refresh periodic enqueue failed", it)
+        }
+        registerDownloadsNotificationChannel()
+    }
+
+    override val workManagerConfiguration: Configuration
+        get() {
+            android.util.Log.i("SiloApplication", "workManagerConfiguration accessed; installing AppWorkerFactory")
+            return Configuration.Builder()
+                .setWorkerFactory(AppWorkerFactory())
+                .build()
+        }
+
+    /** Coil setup is shared with the TV app — see [buildSiloImageLoader]. */
+    override fun newImageLoader(context: PlatformContext): ImageLoader =
+        buildSiloImageLoader(context, cacheDir)
+
+    /**
+     * Channel for offline download progress / completion notifications.
+     * Required on API 26+ before any notification can be posted. Low
+     * importance so the user isn't interrupted while we silently
+     * download bytes in the background.
+     */
+    private fun registerDownloadsNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val nm = getSystemService(NotificationManager::class.java) ?: return
+        // Shown in system settings: use the app language, as the activities do.
+        val text = org.siloserver.silo.common.i18n.AppLocales.wrap(this)
+        val channel = NotificationChannel(
+            DownloadWorker.NOTIFICATION_CHANNEL_ID,
+            text.getString(org.siloserver.silo.common.R.string.downloads_notification_channelName),
+            NotificationManager.IMPORTANCE_LOW,
+        ).apply {
+            description = text.getString(org.siloserver.silo.common.R.string.downloads_notification_channelDescription)
+            setShowBadge(false)
+        }
+        nm.createNotificationChannel(channel)
+    }
+}

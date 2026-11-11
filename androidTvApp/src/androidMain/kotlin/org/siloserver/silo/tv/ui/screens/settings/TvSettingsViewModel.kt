@@ -1,0 +1,931 @@
+package org.siloserver.silo.tv.ui.screens.settings
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import org.siloserver.silo.common.settings.CardPresentationSource
+import org.siloserver.silo.common.settings.CardPresentationStore
+import org.siloserver.silo.common.settings.CardPresentationSupport
+import org.siloserver.silo.common.settings.EpisodeSpoilerSetting
+import org.siloserver.silo.common.settings.EpisodeSpoilerState
+import org.siloserver.silo.common.settings.EpisodeSpoilerStore
+import org.siloserver.silo.common.settings.PlayerSettingsStore
+import org.siloserver.silo.common.settings.SeekIntervalSettingsModel
+import org.siloserver.silo.common.settings.SeekIntervalStore
+import org.siloserver.silo.common.player.AudiobookSettingsStore
+import org.siloserver.silo.model.settings.CardPresentation
+import org.siloserver.silo.model.auth.User
+import org.siloserver.silo.domain.player.BufferingQualityMode
+import org.siloserver.silo.domain.player.IntroSkipMode
+import org.siloserver.silo.domain.settings.ProfileSettingsController
+import org.siloserver.silo.model.settings.QualityPresets
+import org.siloserver.silo.model.settings.SubtitleAppearance
+import org.siloserver.silo.model.settings.SubtitleBackgroundStylePreset
+import org.siloserver.silo.model.settings.SubtitleFontSizePreset
+import org.siloserver.silo.model.settings.SubtitlePositionPreset
+import org.siloserver.silo.network.ApiResult
+import org.siloserver.silo.network.ServerRegistry
+import org.siloserver.silo.common.ui.components.ProfileAvatarRef
+import org.siloserver.silo.common.ui.components.avatarRef
+import org.siloserver.silo.network.TokenManager
+import org.siloserver.silo.network.apiv2.PlaybackLearnedLimitV2
+import org.siloserver.silo.repository.AuthRepository
+import org.siloserver.silo.repository.PlaybackConnectionRepository
+import org.siloserver.silo.common.player.probe.BandwidthProbeScheduler
+import org.siloserver.silo.common.settings.ConnectionSpeedSettingsModel
+import org.siloserver.silo.repository.ProfileRepository
+import org.siloserver.silo.tv.data.preferences.LegacyTvPrefsMigration
+import org.siloserver.silo.common.profiles.ProfileLaunchBehavior
+import org.siloserver.silo.tv.data.preferences.SubtitleMode
+import org.siloserver.silo.tv.data.preferences.SubtitleSize
+import org.siloserver.silo.common.profiles.ProfileLaunchPreferences
+import org.siloserver.silo.tv.watchnext.WatchNextSeeder
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import org.siloserver.silo.common.settings.SettingsSaveError
+
+/**
+ * ViewModel for the TV settings screen. Server-managed device settings
+ * flow exclusively through [PlayerSettingsStore] (mirror of iOS
+ * `PlayerSettings.shared`); profile-level preferences go through
+ * [ProfileSettingsController], which writes them as canonical settings at
+ * `scope=profile` rather than as columns on the profile endpoint — the same
+ * path the phone uses, so the two screens cannot drift.
+ * [LegacyTvPrefsMigration] runs the one-time legacy `tv_prefs` → server
+ * import on first boot (sentinel-gated no-op after).
+ *
+ * Switch-profile emits a one-shot [NavAction]
+ * signal that the screen collects and forwards to the top-level NavHost.
+ */
+class TvSettingsViewModel(
+    private val authRepository: AuthRepository,
+    private val profileRepository: ProfileRepository,
+    private val tokenManager: TokenManager,
+    private val serverRegistry: ServerRegistry,
+    private val playerSettingsStore: PlayerSettingsStore,
+    private val cardPresentationStore: CardPresentationStore,
+    private val legacyTvPrefsMigration: LegacyTvPrefsMigration,
+    private val profileSettings: ProfileSettingsController,
+    private val tvLibraryScopeStore: org.siloserver.silo.tv.data.preferences.TvLibraryScopeStore? = null,
+    private val seekIntervalStore: SeekIntervalStore? = null,
+    private val episodeSpoilerStore: EpisodeSpoilerStore? = null,
+    audiobookSettingsStore: AudiobookSettingsStore? = null,
+    private val profileLaunchPreferences: ProfileLaunchPreferences? = null,
+    private val watchNextSeeder: WatchNextSeeder? = null,
+    private val playbackConnection: PlaybackConnectionRepository? = null,
+    bandwidthProbe: BandwidthProbeScheduler? = null,
+) : ViewModel() {
+
+    /**
+     * Profile-wide video and audiobook skip intervals (settings revision 9).
+     * Null only in hand-built instances without the player stores.
+     */
+    val seekIntervals: SeekIntervalSettingsModel? =
+        if (seekIntervalStore != null && audiobookSettingsStore != null) {
+            SeekIntervalSettingsModel(seekIntervalStore, audiobookSettingsStore, viewModelScope)
+                .also { it.refresh() }
+        } else {
+            null
+        }
+
+    /**
+     * Playback → Connection: the measured speed, **Test speed** and Auto's
+     * budget. Null without the probe; hidden unless the server measures speed.
+     */
+    val connectionSpeed: ConnectionSpeedSettingsModel? = bandwidthProbe?.let { probe ->
+        playbackConnection?.let { connection -> ConnectionSpeedSettingsModel(probe, connection, viewModelScope) }
+    }
+
+    enum class NavAction { SWITCH_PROFILE }
+
+    data class UiState(
+        val user: User? = null,
+        val userLoading: Boolean = true,
+        val userError: String? = null,
+        // Active profile identity for the tappable account header row.
+        val profileName: String? = null,
+        val profileAvatar: ProfileAvatarRef = ProfileAvatarRef.None,
+        val serverUrl: String = "",
+        val serverName: String = "",
+        // Whether the canonical settings probe succeeded; playback is
+        // unaffected either way.
+        val settingsAvailability: ProfileSettingsController.Availability =
+            ProfileSettingsController.Availability.UNKNOWN,
+        // Quality is two orthogonal values behind one picker:
+        // playback.preferred_quality (resolution) and
+        // playback.max_bitrate_kbps (bandwidth; null = uncapped). The preset
+        // table is shared with the phone, so the two cannot drift.
+        val qualityResolution: String = QualityPresets.RESOLUTION_AUTO,
+        val maxBitrateKbps: Int? = null,
+        val subtitleMode: SubtitleMode = SubtitleMode.Auto,
+        val subtitleLanguage: String = "",
+        val subtitleLanguageSuggestions: List<String> = emptyList(),
+        // Metadata AI: preferred description/metadata language ("" = server default).
+        val metadataLanguage: String = "",
+        val metadataLanguageSuggestions: List<String> = emptyList(),
+        val audioLanguage: String = "",
+        val audioLanguageSuggestions: List<String> = emptyList(),
+        val subtitleSize: SubtitleSize = SubtitleSize.Medium,
+        val showForcedSubtitles: Boolean = true,
+        // Full subtitle appearance + whether the device-scoped override is on.
+        // Mirrors iOS `subtitleAppearance` / `subtitleUsesDeviceAppearanceOverride`.
+        val subtitleAppearance: SubtitleAppearance = SubtitleAppearance.DEFAULT,
+        val effectiveSubtitleAppearance: SubtitleAppearance = SubtitleAppearance.DEFAULT,
+        val subtitleUsesDeviceOverride: Boolean = false,
+        /** False when the server is known to discard subtitle text opacity. */
+        val subtitleTextOpacitySupported: Boolean = true,
+        val autoPlayNext: Boolean = true,
+        val introSkipMode: IntroSkipMode = IntroSkipMode.Default,
+        val bufferingQualityMode: BufferingQualityMode = BufferingQualityMode.Default,
+        /** The server's settings manifest is known to define the buffering mode: its row shows only then. */
+        val bufferingQualityModeSupported: Boolean = false,
+        /**
+         * The limit the server learned for this device on this connection
+         * after buffering, or null when there is none or the server does not
+         * advertise the feature. Read with the connection
+         * ([ConnectionSpeedSettingsModel]).
+         */
+        val learnedLimit: PlaybackLearnedLimitV2? = null,
+        /** True after a reset the server did not confirm, until the next attempt. */
+        val learnedLimitResetFailed: Boolean = false,
+        val matchContentFrameRate: Boolean = false,
+        val dolbyVisionEnabled: Boolean = true,
+        val showAudiobooksTab: Boolean = false,
+        // Profile Selection (tvOS General → PROFILE AT LAUNCH), device-wide.
+        val profileLaunchBehavior: ProfileLaunchBehavior = ProfileLaunchBehavior.Automatic,
+        val subtitleMatchesDevice: Boolean = false,
+        val dvProfile7HDR10Fallback: Boolean = false,
+        val forceHdrPassthrough: Boolean = false,
+        val trueBlackBars: Boolean = false,
+        val autoSkipCredits: Boolean = false,
+        // Seconds to skip back on resume (0 = off); consecutive auto-advances
+        // before the "Still watching?" prompt (0 = off).
+        val resumeRewindSeconds: Int = 7,
+        val passOutThreshold: Int = 3,
+        // Seconds before the end of an episode to surface the Up-Next prompt
+        // (0 = at the very end). Mirrors tvOS `nextUpPromptSeconds`.
+        val nextUpPromptSeconds: Int = 10,
+        /**
+         * Keys this device holds its own value for. A profile-layered control
+         * whose key is absent shows "Use profile setting" as its choice.
+         */
+        val deviceOverrides: Set<String> = emptySet(),
+        /**
+         * Outcome of the last "Use Profile Settings", until the screen has told
+         * the user: true when the server confirmed every clear, false when it
+         * couldn't (offline, refused, or interrupted).
+         */
+        val playbackOverridesReset: Boolean? = null,
+        // Cards & Posters (`ui.card_presentation`), mirrored from
+        // CardPresentationStore. Source drives the "Only This Device" toggle
+        // and the "Use Profile Default" action; support gates the whole group.
+        val cardPresentation: CardPresentation = CardPresentation.DEFAULT,
+        val cardPresentationSource: CardPresentationSource = CardPresentationSource.Unknown,
+        val cardPresentationSupport: CardPresentationSupport = CardPresentationSupport.Unknown,
+        // Spoiler protection for unwatched episodes, mirrored
+        // from EpisodeSpoilerStore. The group is hidden unless supported.
+        val episodeSpoilers: EpisodeSpoilerState = EpisodeSpoilerState(),
+        /** Why the last spoiler switch change wasn't saved. */
+        val episodeSpoilerSaveError: SettingsSaveError? = null,
+        val navAction: NavAction? = null,
+    )
+
+    private val _uiState = MutableStateFlow(UiState())
+    val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+
+    /** A second Reset press while the first is in flight is ignored. */
+    private var learnedLimitResetInFlight = false
+
+    init {
+        loadUser()
+        loadSettings()
+        observePlayerSettings()
+        observeCardPresentation()
+        observeEpisodeSpoilers()
+        observeProfileLaunch()
+        observeLearnedLimit()
+    }
+
+    private fun observeLearnedLimit() {
+        val model = connectionSpeed ?: return
+        viewModelScope.launch {
+            model.settings.collect { settings ->
+                _uiState.update { it.copy(learnedLimit = settings?.connection?.learnedLimit) }
+            }
+        }
+    }
+
+    private fun observeProfileLaunch() {
+        val preferences = profileLaunchPreferences ?: return
+        viewModelScope.launch {
+            preferences.state.collect { launch ->
+                _uiState.update { it.copy(profileLaunchBehavior = launch.behavior) }
+            }
+        }
+    }
+
+    /**
+     * Loads the current user, and the active profile that supplies the account
+     * header's name and avatar. A transient failure would blank that header, so
+     * retry a few times with a short backoff before surfacing
+     * [UiState.userError]. Only the final attempt's failure is reported; a
+     * flaky load recovers. Exposed publicly so a screen-level retry can also
+     * call it.
+     */
+    fun loadUser() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(userLoading = true, userError = null) }
+            repeat(UserLoadMaxAttempts) { attempt ->
+                val isLastAttempt = attempt == UserLoadMaxAttempts - 1
+                when (val r = authRepository.getCurrentUser()) {
+                    is ApiResult.Success -> {
+                        // Retried alongside /me. getActiveProfile collapses
+                        // "network failed", "no active id" and "not found" into
+                        // null, so without this a transient failure left the
+                        // account header without a name or avatar for the life
+                        // of this ViewModel. Bounded by the same attempt budget
+                        // so it cannot become a poll.
+                        var profile = profileRepository.getActiveProfile()
+                        var profileAttempt = 1
+                        while (profile == null && profileAttempt < UserLoadMaxAttempts) {
+                            delay(ProfileResolveRetryMs)
+                            profile = profileRepository.getActiveProfile()
+                            profileAttempt += 1
+                        }
+                        _uiState.update {
+                            it.copy(
+                                user = r.data,
+                                userLoading = false,
+                                userError = null,
+                                profileName = profile?.name,
+                                profileAvatar = profile?.avatarRef() ?: ProfileAvatarRef.None,
+                            )
+                        }
+                        return@launch
+                    }
+                    is ApiResult.Error -> if (isLastAttempt) {
+                        _uiState.update {
+                            it.copy(
+                                userLoading = false,
+                                userError = r.message.ifBlank { "Failed to load user" },
+                            )
+                        }
+                    }
+                    is ApiResult.NetworkError -> if (isLastAttempt) {
+                        _uiState.update {
+                            it.copy(
+                                userLoading = false,
+                                userError = "Network error: ${r.exception.message ?: "unknown"}",
+                            )
+                        }
+                    }
+                }
+                if (!isLastAttempt) delay(UserLoadRetryDelayMs)
+            }
+        }
+    }
+
+    private fun loadSettings() {
+        viewModelScope.launch {
+            val activeServer = serverRegistry.activeEntry.value
+            val serverUrl = activeServer?.url ?: tokenManager.getServerUrl()
+            _uiState.update {
+                it.copy(
+                    serverUrl = serverUrl,
+                    serverName = activeServer?.fetchedName?.takeIf { it.isNotBlank() }
+                        ?: activeServer?.displayName
+                        ?: serverDisplayName(serverUrl),
+                )
+            }
+
+            // One-shot import of pre-server-sync TvPreferences values.
+            // Idempotent — sentinel-gated inside the migration.
+            legacyTvPrefsMigration.migrateIfNeeded()
+
+            // Pull effective device settings (cascade user → device → default).
+            // The store writes them to its DataStore; observePlayerSettings()
+            // mirrors them into _uiState.
+            playerSettingsStore.refreshFromServer()
+
+            // Idempotent — the nav-level ProvideCardPresentation usually got
+            // here first; this covers a cold open straight into Settings.
+            cardPresentationStore.hydrateIfNeeded()
+
+            loadProfileSettings()
+        }
+    }
+
+    /**
+     * Resolves the profile-scoped preferences through the canonical settings
+     * API. When the probe fails the values are left alone. Playback keeps
+     * running from the device-scoped store.
+     */
+    fun loadProfileSettings() {
+        viewModelScope.launch {
+            val result = profileSettings.load()
+            _uiState.update { state ->
+                val snapshot = result.snapshot ?: return@update state.copy(
+                    settingsAvailability = result.availability,
+                )
+                state.copy(
+                    settingsAvailability = result.availability,
+                    subtitleMode = SubtitleMode.fromWire(snapshot.subtitleMode),
+                    subtitleLanguage = snapshot.subtitleLanguage,
+                    metadataLanguage = snapshot.metadataLanguage,
+                    showForcedSubtitles = snapshot.showForcedSubtitles,
+                    audioLanguageSuggestions = snapshot.audioLanguageSuggestions,
+                    subtitleLanguageSuggestions = snapshot.subtitleLanguageSuggestions,
+                    metadataLanguageSuggestions = snapshot.metadataLanguageSuggestions,
+                )
+            }
+        }
+    }
+
+    /**
+     * Replaces the optimistic values with what the server actually resolves.
+     *
+     * A successful PUT stores the authored value; it does not make it
+     * effective. Policy can narrow it, and a device-scoped row for the same key
+     * outranks the profile row these setters write — so the screen would
+     * otherwise show a preference playback is not using. Skipped when a newer
+     * edit for the *same* field landed while the round trip was in flight,
+     * which the optimistic rollbacks guard the same way.
+     */
+    private fun applyResolved(
+        snapshot: ProfileSettingsController.Snapshot?,
+        edited: String,
+        fieldOf: (ProfileSettingsController.Snapshot) -> String,
+    ) {
+        if (snapshot == null) return
+        if (fieldOf(snapshot) == edited) {
+            _uiState.update {
+                it.copy(
+                    audioLanguageSuggestions = snapshot.audioLanguageSuggestions,
+                    subtitleLanguageSuggestions = snapshot.subtitleLanguageSuggestions,
+                    metadataLanguageSuggestions = snapshot.metadataLanguageSuggestions,
+                )
+            }
+            return
+        }
+        _uiState.update { state ->
+            state.copy(
+                subtitleMode = SubtitleMode.fromWire(snapshot.subtitleMode),
+                subtitleLanguage = snapshot.subtitleLanguage,
+                metadataLanguage = snapshot.metadataLanguage,
+                showForcedSubtitles = snapshot.showForcedSubtitles,
+                audioLanguageSuggestions = snapshot.audioLanguageSuggestions,
+                subtitleLanguageSuggestions = snapshot.subtitleLanguageSuggestions,
+                metadataLanguageSuggestions = snapshot.metadataLanguageSuggestions,
+            )
+        }
+    }
+
+    /**
+     * Mirror device-scoped flows into UI state. The store is the single
+     * source of truth — this just projects to the TV-specific UI types
+     * (the two quality axes, SubtitleSize).
+     */
+    private fun observePlayerSettings() {
+        viewModelScope.launch {
+            combine(
+                playerSettingsStore.preferredQualityFlow,
+                playerSettingsStore.maxBitrateKbpsFlow,
+                playerSettingsStore.autoPlayNextFlow,
+                playerSettingsStore.introSkipModeFlow,
+                playerSettingsStore.autoSkipCreditsFlow,
+                // The appearance in effect: edits start from what is on screen.
+                playerSettingsStore.subtitleAppearanceFlow,
+                playerSettingsStore.audioLanguageFlow,
+                playerSettingsStore.resumeRewindSecondsFlow,
+                playerSettingsStore.passOutThresholdFlow,
+            ) { values ->
+                @Suppress("UNCHECKED_CAST")
+                val quality = values[0] as String
+                val bitrate = values[1] as Int?
+                @Suppress("UNCHECKED_CAST")
+                val autoPlay = values[2] as Boolean
+                @Suppress("UNCHECKED_CAST")
+                val skipIntro = values[3] as IntroSkipMode
+                @Suppress("UNCHECKED_CAST")
+                val skipCredits = values[4] as Boolean
+                @Suppress("UNCHECKED_CAST")
+                val appearance = values[5] as SubtitleAppearance
+                @Suppress("UNCHECKED_CAST")
+                val audioLang = values[6] as String
+                val rewind = values[7] as Int
+                val threshold = values[8] as Int
+                Snapshot(
+                    quality, bitrate, autoPlay, skipIntro, skipCredits,
+                    appearance, audioLang, rewind, threshold,
+                )
+            }.collect { snap ->
+                _uiState.update {
+                    it.copy(
+                        qualityResolution = snap.quality,
+                        maxBitrateKbps = snap.maxBitrateKbps,
+                        autoPlayNext = snap.autoPlay,
+                        introSkipMode = snap.skipIntro,
+                        autoSkipCredits = snap.skipCredits,
+                        subtitleSize = snap.appearance.fontSize.toTvSubtitleSize(),
+                        subtitleAppearance = snap.appearance,
+                        audioLanguage = snap.audioLanguage,
+                        resumeRewindSeconds = snap.resumeRewindSeconds,
+                        passOutThreshold = snap.passOutThreshold,
+                    )
+                }
+            }
+        }
+        // Up-Next prompt timing lives outside the 8-arg combine above.
+        viewModelScope.launch {
+            playerSettingsStore.nextUpPromptSecondsFlow.collect { seconds ->
+                _uiState.update { it.copy(nextUpPromptSeconds = seconds) }
+            }
+        }
+        viewModelScope.launch {
+            playerSettingsStore.bufferingQualityModeFlow.collect { mode ->
+                _uiState.update { it.copy(bufferingQualityMode = mode) }
+            }
+        }
+        viewModelScope.launch {
+            playerSettingsStore.bufferingQualityModeSupportedFlow.collect { supported ->
+                _uiState.update { it.copy(bufferingQualityModeSupported = supported) }
+            }
+        }
+        viewModelScope.launch {
+            playerSettingsStore.deviceOverrideKeysFlow.collect { keys ->
+                _uiState.update { it.copy(deviceOverrides = keys) }
+            }
+        }
+        viewModelScope.launch {
+            playerSettingsStore.matchContentFrameRateFlow.collect { value ->
+                _uiState.update { it.copy(matchContentFrameRate = value) }
+            }
+        }
+        viewModelScope.launch {
+            playerSettingsStore.dolbyVisionEnabledFlow.collect { value ->
+                _uiState.update { it.copy(dolbyVisionEnabled = value) }
+            }
+        }
+        viewModelScope.launch {
+            tvLibraryScopeStore?.let { store ->
+                val value = runCatching { store.getShowAudiobooksTab() }.getOrDefault(false)
+                _uiState.update { it.copy(showAudiobooksTab = value) }
+            }
+        }
+        viewModelScope.launch {
+            playerSettingsStore.dvProfile7HDR10FallbackFlow.collect { value ->
+                _uiState.update { it.copy(dvProfile7HDR10Fallback = value) }
+            }
+        }
+        viewModelScope.launch {
+            playerSettingsStore.forceHdrPassthroughFlow.collect { value ->
+                _uiState.update { it.copy(forceHdrPassthrough = value) }
+            }
+        }
+        viewModelScope.launch {
+            playerSettingsStore.trueBlackBarsFlow.collect { value ->
+                _uiState.update { it.copy(trueBlackBars = value) }
+            }
+        }
+        viewModelScope.launch {
+            playerSettingsStore.subtitleMatchesDeviceFlow.collect { value ->
+                _uiState.update { it.copy(subtitleMatchesDevice = value) }
+            }
+        }
+        // Device-scoped subtitle-appearance override toggle (same source the
+        // player HUD reads); also kept out of the 8-arg combine.
+        viewModelScope.launch {
+            playerSettingsStore.subtitleUsesDeviceOverrideFlow.collect { enabled ->
+                _uiState.update { it.copy(subtitleUsesDeviceOverride = enabled) }
+            }
+        }
+        viewModelScope.launch {
+            playerSettingsStore.effectiveSubtitleAppearanceFlow.collect { appearance ->
+                _uiState.update { it.copy(effectiveSubtitleAppearance = appearance) }
+            }
+        }
+        viewModelScope.launch {
+            playerSettingsStore.subtitleTextOpacitySupportedFlow.collect { supported ->
+                _uiState.update { it.copy(subtitleTextOpacitySupported = supported) }
+            }
+        }
+    }
+
+    /** Mirror the spoiler store into UI state and re-read it from the server. */
+    private fun observeEpisodeSpoilers() {
+        val store = episodeSpoilerStore ?: return
+        viewModelScope.launch {
+            store.state.collect { spoilers -> _uiState.update { it.copy(episodeSpoilers = spoilers) } }
+        }
+        viewModelScope.launch {
+            store.saveError.collect { error -> _uiState.update { it.copy(episodeSpoilerSaveError = error) } }
+        }
+        viewModelScope.launch { store.refresh() }
+    }
+
+    /** Profile-wide; the store writes it optimistically and rolls back on failure. */
+    fun setHideUnwatchedEpisodeImages(enabled: Boolean) {
+        episodeSpoilerStore?.set(EpisodeSpoilerSetting.Images, enabled)
+    }
+
+    /** Profile-wide; the store writes it optimistically and rolls back on failure. */
+    fun setHideUnwatchedEpisodeOverviews(enabled: Boolean) {
+        episodeSpoilerStore?.set(EpisodeSpoilerSetting.Overviews, enabled)
+    }
+
+    /** Mirror the card-presentation store into UI state (single source of truth). */
+    private fun observeCardPresentation() {
+        viewModelScope.launch {
+            cardPresentationStore.state.collect { cardState ->
+                _uiState.update {
+                    it.copy(
+                        cardPresentation = cardState.presentation,
+                        cardPresentationSource = cardState.source,
+                        cardPresentationSupport = cardState.support,
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Apply a new card presentation. The store is optimistic (cards resize
+     * immediately through LocalCardPresentation) and rolls back on failure.
+     * While the "Only This Device" override is active the edit stays at
+     * `profile_device`; otherwise it roams at `profile_client`.
+     */
+    fun onCardPresentationSelected(presentation: CardPresentation) {
+        val deviceOnly =
+            _uiState.value.cardPresentationSource == CardPresentationSource.DeviceOverride
+        cardPresentationStore.set(presentation, deviceOnly = deviceOnly)
+    }
+
+    /**
+     * "Only This Device": ON copies the current value to `profile_device`;
+     * OFF deletes that row so resolution falls back to the family value.
+     */
+    fun onCardPresentationDeviceOnlyChanged(enabled: Boolean) {
+        if (enabled) {
+            cardPresentationStore.set(_uiState.value.cardPresentation, deviceOnly = true)
+        } else {
+            viewModelScope.launch { cardPresentationStore.clearDeviceOverride() }
+        }
+    }
+
+    /** Drop the `profile_client` value so this TV follows the profile default. */
+    fun onUseProfileCardDefault() {
+        viewModelScope.launch { cardPresentationStore.useProfileDefault() }
+    }
+
+    /**
+     * Friendly server name for the About group — the host of the configured
+     * URL (mirrors tvOS `serverDisplayName`, which collapses to the host when
+     * no nicer name is known). Falls back to the raw value if it can't be
+     * parsed.
+     */
+    private fun serverDisplayName(url: String): String {
+        if (url.isBlank()) return ""
+        return url
+            .substringAfter("://", url)
+            .substringBefore('/')
+            .ifBlank { url }
+    }
+
+    /** The resolution ceiling, independent of the bitrate. */
+    fun onResolutionSelected(resolution: String) {
+        viewModelScope.launch { playerSettingsStore.setPreferredQuality(resolution) }
+    }
+
+    /** The bitrate ceiling, independent of the resolution; null is no limit. */
+    fun onMaxBitrateSelected(kbps: Int?) {
+        viewModelScope.launch { playerSettingsStore.setMaxBitrateKbps(kbps) }
+    }
+
+    // The four profile preferences below are canonical settings written at
+    // scope=profile, one key per edit. They used to be named columns sent
+    // together on PUT /profiles/{id}, where one failed write reverted all
+    // three. Each applies optimistically and rolls back only if state still
+    // holds the value it wrote — a newer edit mid-request wins.
+
+    fun onSubtitleModeChanged(value: SubtitleMode) {
+        val previous = _uiState.value.subtitleMode
+        _uiState.update { it.copy(subtitleMode = value) }
+        viewModelScope.launch {
+            val result = profileSettings.setSubtitleMode(value.wireValue)
+            if (!result.succeeded) {
+                _uiState.update {
+                    if (it.subtitleMode == value) it.copy(subtitleMode = previous) else it
+                }
+            } else {
+                applyResolved(result.snapshot, edited = value.wireValue) { it.subtitleMode }
+            }
+        }
+    }
+
+    fun onMetadataLanguageChanged(value: String) {
+        val previous = _uiState.value.metadataLanguage
+        _uiState.update { it.copy(metadataLanguage = value) }
+        viewModelScope.launch {
+            val result = profileSettings.setMetadataLanguage(value)
+            if (!result.succeeded) {
+                _uiState.update { current ->
+                    if (current.metadataLanguage == value) current.copy(metadataLanguage = previous) else current
+                }
+            } else {
+                applyResolved(result.snapshot, edited = value) { it.metadataLanguage }
+            }
+        }
+    }
+
+    fun onSubtitleLanguageChanged(value: String) {
+        val previous = _uiState.value.subtitleLanguage
+        _uiState.update { it.copy(subtitleLanguage = value) }
+        viewModelScope.launch {
+            val result = profileSettings.setSubtitleLanguage(value)
+            if (!result.succeeded) {
+                _uiState.update {
+                    if (it.subtitleLanguage == value) it.copy(subtitleLanguage = previous) else it
+                }
+            } else {
+                applyResolved(result.snapshot, edited = value) { it.subtitleLanguage }
+            }
+        }
+    }
+
+    /**
+     * Default audio language — a LOCAL player setting (not a profile field),
+     * matching the phone. Writing the store emits on audioLanguageFlow which
+     * the combine above folds back into [UiState.audioLanguage].
+     */
+    fun onAudioLanguageChanged(value: String) {
+        viewModelScope.launch { playerSettingsStore.setAudioLanguage(value) }
+    }
+
+    fun onShowForcedSubtitlesChanged(enabled: Boolean) {
+        val previous = _uiState.value.showForcedSubtitles
+        _uiState.update { it.copy(showForcedSubtitles = enabled) }
+        viewModelScope.launch {
+            val result = profileSettings.setShowForcedSubtitles(enabled)
+            if (!result.succeeded) {
+                _uiState.update {
+                    if (it.showForcedSubtitles == enabled) it.copy(showForcedSubtitles = previous) else it
+                }
+            } else {
+                applyResolved(result.snapshot, edited = enabled.toString()) {
+                    it.showForcedSubtitles.toString()
+                }
+            }
+        }
+    }
+
+    fun onSubtitleSizeChanged(value: SubtitleSize) =
+        editAppearance { it.copy(fontSize = value.toFontSizePreset()) }
+
+    /**
+     * Commit a full subtitle-appearance value (the profile's, unless "Only on
+     * This Device" is on). The Appearance
+     * picker rows build [next] by copying the current appearance and changing
+     * one field, mirroring the tvOS bindings. The store debounces the server
+     * write and re-emits on [subtitleAppearanceFlow], which the combine folds
+     * back into [UiState.subtitleAppearance].
+     */
+    fun setSubtitleAppearance(next: SubtitleAppearance) {
+        viewModelScope.launch { playerSettingsStore.setSubtitleAppearance(next) }
+    }
+
+    /**
+     * Per-field appearance setters. Each applies its change atomically inside
+     * the store's own write transaction ([PlayerSettingsStore.updateSubtitleAppearance]),
+     * so a concurrent edit (e.g. a HUD change while a Settings picker is
+     * open) can't race on a snapshot read before either writes. Mirrors
+     * [onSubtitleSizeChanged].
+     */
+    private fun editAppearance(transform: (SubtitleAppearance) -> SubtitleAppearance) {
+        viewModelScope.launch {
+            playerSettingsStore.updateSubtitleAppearance(transform)
+            // The granular subtitle.* fields are client-local — the contract
+            // carries appearance as one object — so a per-field edit only
+            // reaches the server once it is projected into the composite.
+            playerSettingsStore.flushProjectedSubtitleAppearance()
+        }
+    }
+
+    fun setSubtitleFontSize(value: SubtitleFontSizePreset) = editAppearance { it.copy(fontSize = value) }
+
+    fun setSubtitleFontFamily(value: String) = editAppearance { it.copy(fontFamily = value) }
+
+    fun setSubtitleFontColor(value: String) = editAppearance { it.copy(fontColor = value) }
+
+    fun setSubtitleTextOpacity(value: Int) = editAppearance { it.copy(textOpacity = value) }
+
+    fun setSubtitleTextOutline(value: Boolean) = editAppearance { it.copy(textOutline = value) }
+
+    fun setSubtitleTextOutlineColor(value: String) = editAppearance { it.copy(textOutlineColor = value) }
+
+    fun setSubtitleBackgroundStyle(value: SubtitleBackgroundStylePreset) =
+        editAppearance { it.copy(backgroundStyle = value) }
+
+    fun setSubtitleBackgroundOpacity(value: Int) = editAppearance { it.copy(backgroundOpacity = value) }
+
+    fun setSubtitleBackgroundColor(value: String) = editAppearance { it.copy(backgroundColor = value) }
+
+    fun setSubtitlePosition(value: SubtitlePositionPreset) = editAppearance { it.copy(position = value) }
+
+    fun resetSubtitleAppearance() {
+        viewModelScope.launch {
+            playerSettingsStore.setSubtitleAppearance(SubtitleAppearance.DEFAULT)
+        }
+    }
+
+    /** "Only on This Device": keep this TV's own subtitle appearance and timing. */
+    fun setSubtitleDeviceOverrideEnabled(enabled: Boolean) {
+        viewModelScope.launch { playerSettingsStore.setSubtitleDeviceOverrideEnabled(enabled) }
+    }
+
+    fun onAutoPlayNextChanged(value: Boolean) {
+        viewModelScope.launch { playerSettingsStore.setAutoPlayNext(value) }
+    }
+
+    fun onMatchContentFrameRateChanged(value: Boolean) {
+        viewModelScope.launch { playerSettingsStore.setMatchContentFrameRate(value) }
+    }
+
+    /** tvOS navPrefs.showAudiobooks parity — opt-in Audiobooks top-menu tab. */
+    fun onShowAudiobooksTabChanged(value: Boolean) {
+        _uiState.update { it.copy(showAudiobooksTab = value) }
+        viewModelScope.launch {
+            runCatching { tvLibraryScopeStore?.setShowAudiobooksTab(value) }
+        }
+    }
+
+    /**
+     * Profile Selection takes effect the next time Silo starts or returns; it
+     * never ejects the current session (silo-apple design §4.5). Every Time
+     * empties the launcher's Watch Next row, and leaving it refills the row.
+     */
+    fun onProfileLaunchBehaviorChanged(behavior: ProfileLaunchBehavior) {
+        val preferences = profileLaunchPreferences ?: return
+        val previous = preferences.state.value.behavior
+        if (previous == behavior) return
+        preferences.setBehavior(behavior)
+        val seeder = watchNextSeeder ?: return
+        if (behavior == ProfileLaunchBehavior.EveryTime) {
+            seeder.clear()
+        } else if (previous == ProfileLaunchBehavior.EveryTime) {
+            viewModelScope.launch {
+                if (tokenManager.getProfileId().isNullOrBlank()) return@launch
+                // A later choice may have gone back to Every Time (which
+                // cleared the row) while this read was in flight.
+                if (preferences.state.value.behavior == ProfileLaunchBehavior.EveryTime) return@launch
+                seeder.seedNow()
+                seeder.enqueuePeriodic()
+            }
+        }
+    }
+
+    fun onSubtitleMatchesDeviceChanged(value: Boolean) {
+        viewModelScope.launch { playerSettingsStore.setSubtitleMatchesDevice(value) }
+    }
+
+    fun onDolbyVisionEnabledChanged(value: Boolean) {
+        viewModelScope.launch { playerSettingsStore.setDolbyVisionEnabled(value) }
+    }
+
+    fun onDvProfile7HDR10FallbackChanged(value: Boolean) {
+        viewModelScope.launch { playerSettingsStore.setDvProfile7HDR10Fallback(value) }
+    }
+
+    fun onForceHdrPassthroughChanged(value: Boolean) {
+        viewModelScope.launch { playerSettingsStore.setForceHdrPassthrough(value) }
+    }
+
+    fun onTrueBlackBarsChanged(value: Boolean) {
+        viewModelScope.launch { playerSettingsStore.setTrueBlackBars(value) }
+    }
+
+    fun onIntroSkipModeChanged(value: IntroSkipMode) {
+        viewModelScope.launch { playerSettingsStore.setIntroSkipMode(value) }
+    }
+
+    fun onBufferingQualityModeChanged(value: BufferingQualityMode) {
+        viewModelScope.launch { playerSettingsStore.setBufferingQualityMode(value) }
+    }
+
+    /**
+     * Forgets the learned limit, then reads the connection again so the row
+     * goes and the Connection group's Auto budget, which the limit capped,
+     * catches up.
+     */
+    fun onResetLearnedLimit() {
+        val repository = playbackConnection ?: return
+        if (learnedLimitResetInFlight) return
+        learnedLimitResetInFlight = true
+        _uiState.update { it.copy(learnedLimitResetFailed = false) }
+        viewModelScope.launch {
+            try {
+                if (repository.resetLearnedLimit() is ApiResult.Success) {
+                    connectionSpeed?.read()
+                } else {
+                    _uiState.update { it.copy(learnedLimitResetFailed = true) }
+                }
+            } finally {
+                learnedLimitResetInFlight = false
+            }
+        }
+    }
+
+    fun onAutoSkipCreditsChanged(value: Boolean) {
+        viewModelScope.launch { playerSettingsStore.setAutoSkipCredits(value) }
+    }
+
+    fun onResumeRewindSecondsChanged(value: Int) {
+        viewModelScope.launch { playerSettingsStore.setResumeRewindSeconds(value) }
+    }
+
+    fun onPassOutThresholdChanged(value: Int) {
+        viewModelScope.launch { playerSettingsStore.setPassOutThreshold(value) }
+    }
+
+    fun onNextUpPromptSecondsChanged(value: Int) {
+        viewModelScope.launch { playerSettingsStore.setNextUpPromptSeconds(value) }
+    }
+
+    /**
+     * "Use Profile Settings": clears every setting this device holds its own
+     * value for. Mirrors iOS tvOS "Reset Playback Overrides"
+     * (TVSettingsView.swift:137).
+     */
+    fun resetPlaybackOverrides() {
+        viewModelScope.launch {
+            val landed = playerSettingsStore.resetAllDeviceSettings()
+            _uiState.update { it.copy(playbackOverridesReset = landed) }
+        }
+    }
+
+    fun onPlaybackOverridesResetShown() {
+        _uiState.update { it.copy(playbackOverridesReset = null) }
+    }
+
+    /** Goes back to the profile's value for one setting's control on this device. */
+    fun onUseProfileSetting(key: String) {
+        viewModelScope.launch { playerSettingsStore.resetDeviceSetting(key) }
+    }
+
+    /** Lifecycle hook — call from MainTvActivity.onStop. */
+    fun flushPendingSettings() {
+        viewModelScope.launch { playerSettingsStore.flushPendingDeviceSettings() }
+    }
+
+    fun onSwitchProfile() {
+        viewModelScope.launch {
+            playerSettingsStore.flushPendingDeviceSettings()
+            _uiState.update { it.copy(navAction = NavAction.SWITCH_PROFILE) }
+        }
+    }
+
+    fun onNavActionConsumed() {
+        _uiState.update { it.copy(navAction = null) }
+    }
+
+    private fun SubtitleSize.toFontSizePreset(): SubtitleFontSizePreset = when (this) {
+        SubtitleSize.Small -> SubtitleFontSizePreset.Small
+        SubtitleSize.Medium -> SubtitleFontSizePreset.Medium
+        SubtitleSize.Large -> SubtitleFontSizePreset.Large
+    }
+
+    private fun SubtitleFontSizePreset.toTvSubtitleSize(): SubtitleSize = when (this) {
+        SubtitleFontSizePreset.Small -> SubtitleSize.Small
+        SubtitleFontSizePreset.Medium -> SubtitleSize.Medium
+        // Large / XLarge / XXLarge — collapse anything bigger than Medium
+        // back onto Large in the TV picker (the TV UI only exposes 3 sizes).
+        SubtitleFontSizePreset.Large,
+        SubtitleFontSizePreset.XLarge,
+        SubtitleFontSizePreset.XXLarge -> SubtitleSize.Large
+    }
+
+    private data class Snapshot(
+        val quality: String,
+        val maxBitrateKbps: Int?,
+        val autoPlay: Boolean,
+        val skipIntro: IntroSkipMode,
+        val skipCredits: Boolean,
+        val appearance: SubtitleAppearance,
+        val audioLanguage: String,
+        val resumeRewindSeconds: Int,
+        val passOutThreshold: Int,
+    )
+
+    private companion object {
+        // Retry the user load a few times before surfacing an error, so a
+        // flaky fetch doesn't blank the account header.
+        const val UserLoadMaxAttempts = 3
+
+        /** Gap between profile lookups while the profile is unresolved. */
+        const val ProfileResolveRetryMs = 400L
+        const val UserLoadRetryDelayMs = 400L
+    }
+}

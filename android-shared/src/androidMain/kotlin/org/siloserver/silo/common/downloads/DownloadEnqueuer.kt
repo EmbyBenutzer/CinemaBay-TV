@@ -1,0 +1,613 @@
+package org.siloserver.silo.common.downloads
+
+import android.content.Context
+import android.util.Log
+import org.siloserver.silo.common.R
+import androidx.work.WorkManager
+import org.siloserver.silo.common.i18n.LocaleFormat
+import org.siloserver.silo.common.player.PlaybackCapabilityDetector
+import org.siloserver.silo.common.settings.PlayerSettingsStore
+import org.siloserver.silo.common.settings.dolbyVisionPolicySnapshot
+import org.siloserver.silo.model.download.DownloadQuality
+import org.siloserver.silo.model.download.effectiveDefault
+import org.siloserver.silo.model.download.DownloadMediaType
+import org.siloserver.silo.model.download.DownloadRequest
+import org.siloserver.silo.model.download.DownloadSidecar
+import org.siloserver.silo.model.download.DownloadStatus
+import org.siloserver.silo.model.download.statusEnum
+import org.siloserver.silo.network.ApiResult
+import org.siloserver.silo.network.ServerRegistry
+import org.siloserver.silo.model.catalog.FileVersion
+import org.siloserver.silo.model.catalog.ItemDetail
+import org.siloserver.silo.repository.CatalogRepository
+import org.siloserver.silo.repository.DownloadsRepository
+import org.siloserver.silo.repository.ProfileRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
+
+/**
+ * Thin Android-side helper that combines the cross-platform
+ * [DownloadsRepository.create] call with the platform-specific
+ * [DownloadWorker.enqueue] handoff. Centralises the (serverId, accountId, profileId)
+ * resolution so ViewModels stay free of Android `Context` references.
+ *
+ * Also responsible for stashing the catalog metadata on disk at download
+ * start: we resolve the [ItemDetail] here (one network call) and write the
+ * initial [DownloadSidecar] before the worker even starts streaming bytes.
+ * This is the only place we have both the catalog row and the download
+ * record at the same time, so an offline app launch later doesn't need a
+ * network round-trip to render the row's title and poster.
+ */
+class DownloadEnqueuer(
+    private val context: Context,
+    private val repository: DownloadsRepository,
+    private val serverRegistry: ServerRegistry,
+    private val profileRepository: ProfileRepository,
+    private val playerSettingsStore: PlayerSettingsStore,
+    private val catalogRepository: CatalogRepository,
+    private val storage: DownloadStorage,
+    private val metadataStore: DownloadMetadataStore,
+    private val authorities: org.siloserver.silo.network.DurableLoginAuthorityProvider? = null,
+    private val transitions: org.siloserver.silo.network.IdentityTransitionBarrier? = null,
+    private val devices: org.siloserver.silo.network.DeviceMetadataProvider? = null,
+    /** Supplies the decode caps sent with each create; null sends none. */
+    private val capabilityDetector: PlaybackCapabilityDetector? = null,
+) {
+
+    /**
+     * Single-file download (movie or individual episode by fileId). Server
+     * creates the record, we stash the sidecar, then the [DownloadWorker]
+     * picks it up. On server failure, returns the [ApiResult.Error] /
+     * [ApiResult.NetworkError] unchanged so the caller can surface a toast.
+     */
+    suspend fun start(
+        contentId: String,
+        fileId: Int,
+        displayTitle: String,
+        downloadQualityOverride: DownloadQuality? = null,
+    ): ApiResult<Unit> {
+        val authority = authorities?.snapshotDurableLoginAuthority()
+        if (authorities != null && authority == null) return clientError(0, "identity_changed", R.string.downloads_error_needsLogin, "Downloads need a saved login.")
+        Log.i(TAG, "start: contentId=$contentId fileId=$fileId title=$displayTitle")
+        if (activeDownloadExists(fileId)) {
+            Log.i(TAG, "start: fileId=$fileId already queued/downloading — skipping duplicate")
+            return alreadyActive()
+        }
+        val record = when (val r = repository.create(
+            downloadRequest(
+                contentId = contentId,
+                fileId = fileId,
+                downloadQualityOverride = downloadQualityOverride,
+            ),
+            expectedAuthority = authority,
+        )) {
+            is ApiResult.Success -> r.data.also { Log.i(TAG, "start: server record id=${it.id} status=${it.status}") }
+            is ApiResult.Error -> { Log.w(TAG, "start: server error ${r.code} ${r.message}"); return r }
+            is ApiResult.NetworkError -> { Log.w(TAG, "start: network error", r.exception); return ApiResult.NetworkError(r.exception) }
+        }
+        val sidecar = buildInitialSidecar(record, contentId, displayTitle)
+        finalizeAndEnqueue(record, sidecar, displayTitle, authority)
+        return ApiResult.Success(Unit)
+    }
+
+    /**
+     * Single-episode download. Resolves the episode's catalog row for rich
+     * sidecar metadata (series title, S/E numbers, still image). The server
+     * registers the entry under `seriesContentId` with `episodeContentId` as
+     * its episode, and rejects an episode sent as the content id; the
+     * `fileId` chosen here is the user-preferred quality.
+     */
+    suspend fun startEpisode(
+        seriesContentId: String,
+        episodeContentId: String,
+        fileId: Int,
+        seriesTitle: String,
+        seasonNumber: Int?,
+        episodeNumber: Int?,
+        episodeTitle: String?,
+        posterUrl: String? = null,
+        posterIsEpisodeStill: Boolean? = null,
+        downloadQualityOverride: DownloadQuality? = null,
+    ): ApiResult<Unit> {
+        val authority = authorities?.snapshotDurableLoginAuthority()
+        if (authorities != null && authority == null) return clientError(0, "identity_changed", R.string.downloads_error_needsLogin, "Downloads need a saved login.")
+        Log.i(TAG, "startEpisode: series=$seriesContentId ep=$episodeContentId fileId=$fileId S${seasonNumber}E${episodeNumber}")
+        if (activeDownloadExists(fileId)) {
+            Log.i(TAG, "startEpisode: fileId=$fileId already queued/downloading — skipping duplicate")
+            return alreadyActive()
+        }
+        // Unknown numbers leave the S/E label out rather than print "S0E0".
+        val episodeCode = if (seasonNumber != null && episodeNumber != null) episodeTag(seasonNumber, episodeNumber) else null
+        val shownEpisodeTitle = episodeTitle?.takeIf { it.isNotBlank() }
+        val displayTitle = listOfNotNull(seriesTitle, episodeCode).joinToString(" ") +
+            (shownEpisodeTitle?.let { " · $it" } ?: "")
+        val record = when (val r = repository.create(
+            downloadRequest(
+                contentId = seriesContentId,
+                episodeId = episodeContentId,
+                fileId = fileId,
+                downloadQualityOverride = downloadQualityOverride,
+            ),
+            expectedAuthority = authority,
+        )) {
+            is ApiResult.Success -> r.data
+            is ApiResult.Error -> { Log.w(TAG, "startEpisode: server error ${r.code} ${r.message}"); return r }
+            is ApiResult.NetworkError -> { Log.w(TAG, "startEpisode: network error", r.exception); return ApiResult.NetworkError(r.exception) }
+        }
+        val episodeDetail = (catalogRepository.getItemDetail(episodeContentId) as? ApiResult.Success)?.data
+        val version = episodeDetail?.versionFor(record.mediaFileId)
+        val sidecar = DownloadSidecar(
+            record = record,
+            title = seriesTitle,
+            subtitle = listOfNotNull(episodeCode, shownEpisodeTitle).joinToString(" · ").ifEmpty { null },
+            posterUrl = posterUrl,
+            posterIsEpisodeStill = posterIsEpisodeStill,
+            episodeUserData = episodeDetail?.userData,
+            seriesTitle = seriesTitle,
+            seriesContentId = seriesContentId,
+            seasonNumber = seasonNumber,
+            episodeNumber = episodeNumber,
+            fileName = version?.fileName,
+            container = version?.container,
+            mediaType = DownloadMediaType.TvShow.wire,
+            updatedAtMs = System.currentTimeMillis(),
+        )
+        finalizeAndEnqueue(record, sidecar, displayTitle, authority)
+        return ApiResult.Success(Unit)
+    }
+
+    /**
+     * Whole-series download. One POST with `series=true` returns N records
+     * sharing a `batch_id`. We then look up the series detail + every
+     * episode's metadata to enrich each record's sidecar (so the Downloads
+     * tab can show "Severance · S01E03 · Defiant Jazz" rather than just a
+     * file id), and enqueue one worker per record.
+     *
+     * Best-effort metadata: if catalog calls fail mid-way through, the
+     * remaining sidecars get bare-bones titles instead of failing the
+     * whole batch.
+     */
+    suspend fun startSeries(
+        seriesContentId: String,
+        downloadQualityOverride: DownloadQuality? = null,
+    ): ApiResult<Unit> {
+        val authority = authorities?.snapshotDurableLoginAuthority()
+        if (authorities != null && authority == null) return clientError(0, "identity_changed", R.string.downloads_error_needsLogin, "Downloads need a saved login.")
+        Log.i(TAG, "startSeries: contentId=$seriesContentId")
+        val created = when (val r = repository.createBatch(
+            downloadRequest(
+                contentId = seriesContentId,
+                series = true,
+                // Batch (series/season) downloads are original-only: the server
+                // returns 501 bulk_quality_unavailable for any other quality
+                // (docs §5 + error table). Force Original regardless of the
+                // override the caller passed (issue #20 GAP 3).
+                downloadQualityOverride = DownloadQuality.Original,
+            ),
+            expectedAuthority = authority,
+        )) {
+            is ApiResult.Success -> r.data
+            is ApiResult.Error -> { Log.w(TAG, "startSeries: server error ${r.code} ${r.message}"); return r }
+            is ApiResult.NetworkError -> { Log.w(TAG, "startSeries: network error", r.exception); return ApiResult.NetworkError(r.exception) }
+        }
+        val records = created.downloads
+        if (records.isEmpty()) return batchOutcome(created.skipped)
+
+        val seriesDetail = (catalogRepository.getItemDetail(seriesContentId) as? ApiResult.Success)?.data
+        val episodeByFileId = buildEpisodeIndexByFileId(seriesContentId)
+        val seriesTitle = seriesDetail?.title ?: UNKNOWN_SERIES_TITLE
+        val posterUrl = seriesDetail?.posterUrl
+
+        for (record in records) {
+            // Same duplicate guard as start/startEpisode: a second worker for
+            // an already-active fileId would wipe the first one's partial.
+            if (activeDownloadExists(record.mediaFileId) || completedLocalExists(record, authority)) {
+                Log.i(TAG, "startSeries: fileId=${record.mediaFileId} already queued/downloading — skipping duplicate")
+                continue
+            }
+            val ep = episodeByFileId[record.mediaFileId]
+            val episodeDetail = ep?.let { (catalogRepository.getItemDetail(it.contentId) as? ApiResult.Success)?.data }
+            val version = episodeDetail?.versionFor(record.mediaFileId)
+            val sidecar = DownloadSidecar(
+                record = record,
+                title = seriesTitle,
+                subtitle = ep?.let {
+                    episodeTag(it.seasonNumber, it.episodeNumber) +
+                        (it.title?.takeIf { t -> t.isNotBlank() }?.let { t -> " · $t" } ?: "")
+                } ?: UNKNOWN_EPISODE_SUBTITLE,
+                posterUrl = posterUrl,
+                posterThumbhash = seriesDetail?.posterThumbhash,
+                posterIsEpisodeStill = false,
+                episodeUserData = episodeDetail?.userData,
+                seriesTitle = seriesTitle,
+                seriesContentId = seriesContentId,
+                seasonNumber = ep?.seasonNumber,
+                episodeNumber = ep?.episodeNumber,
+                fileName = version?.fileName,
+                container = version?.container ?: ep?.files?.firstOrNull { it.fileId == record.mediaFileId }?.container,
+                mediaType = DownloadMediaType.TvShow.wire,
+                updatedAtMs = System.currentTimeMillis(),
+            )
+            val displayTitle = "$seriesTitle ${ep?.let { episodeTag(it.seasonNumber, it.episodeNumber) } ?: ""}".trim()
+            finalizeAndEnqueue(record, sidecar, displayTitle, authority)
+        }
+        return batchOutcome(created.skipped)
+    }
+
+    /**
+     * Whole-season download. Server doesn't currently expose a season-batch
+     * endpoint, so we loop: one POST per episode (chosen file = best
+     * available). Sequential rather than parallel to avoid hammering the
+     * server with N concurrent record creations, and so a partial failure
+     * (mid-season network blip) leaves an obvious "downloaded N of K"
+     * state rather than scattered ghost records.
+     *
+     * Returns success if at least one episode was queued; on total failure
+     * returns the first error encountered.
+     */
+    suspend fun startSeason(
+        seriesContentId: String,
+        seasonNumber: Int,
+        downloadQualityOverride: DownloadQuality? = null,
+    ): ApiResult<Unit> {
+        val authority = authorities?.snapshotDurableLoginAuthority()
+        if (authorities != null && authority == null) return clientError(0, "identity_changed", R.string.downloads_error_needsLogin, "Downloads need a saved login.")
+        Log.i(TAG, "startSeason: series=$seriesContentId season=$seasonNumber")
+        val episodes = when (val r = catalogRepository.getEpisodes(seriesContentId, seasonNumber)) {
+            is ApiResult.Success -> r.data.episodes
+            is ApiResult.Error -> return r
+            is ApiResult.NetworkError -> return ApiResult.NetworkError(r.exception)
+        }
+        if (episodes.isEmpty()) return ApiResult.Success(Unit)
+
+        val seriesDetail = (catalogRepository.getItemDetail(seriesContentId) as? ApiResult.Success)?.data
+        val seriesTitle = seriesDetail?.title ?: UNKNOWN_SERIES_TITLE
+        val posterUrl = seriesDetail?.posterUrl
+
+        var firstError: ApiResult<Unit>? = null
+        var queued = 0
+        for (ep in episodes) {
+            if (authorities != null && authority != authorities.snapshotDurableLoginAuthority()) return clientError(0, "identity_changed", R.string.downloads_error_ownerChanged, "The download owner changed.")
+            // Pick the highest-resolution file (last entry after best-pick
+            // would be ideal, but the server already sorts; use first).
+            val fileId = ep.files.firstOrNull()?.fileId ?: continue
+            val result = startEpisode(
+                seriesContentId = seriesContentId,
+                episodeContentId = ep.contentId,
+                fileId = fileId,
+                seriesTitle = seriesTitle,
+                seasonNumber = ep.seasonNumber,
+                episodeNumber = ep.episodeNumber,
+                episodeTitle = ep.title,
+                posterUrl = posterUrl,
+                posterIsEpisodeStill = false,
+                // Season batch is original-only (server rejects a non-original
+                // batch with 501 bulk_quality_unavailable). Force Original even
+                // though startEpisode itself honors quality for single episodes.
+                downloadQualityOverride = DownloadQuality.Original,
+            )
+            // An episode that is already in flight counts as queued: the season
+            // is in the state the user asked for, so a re-tap must not report
+            // the whole season as failed.
+            if (result is ApiResult.Success || result.isAlreadyActive()) queued++
+            else if (firstError == null) firstError = result
+        }
+        Log.i(TAG, "startSeason: queued $queued of ${episodes.size}")
+        return if (queued > 0) ApiResult.Success(Unit) else (firstError ?: ApiResult.Success(Unit))
+    }
+
+    private fun batchOutcome(skipped: List<org.siloserver.silo.model.download.SkippedDownload>): ApiResult<Unit> =
+        if (skipped.isEmpty()) ApiResult.Success(Unit) else ApiResult.Error(0, "downloads_partially_skipped",
+            context.resources.getQuantityString(R.plurals.downloads_error_partiallySkipped, skipped.size, skipped.size, LocaleFormat.integer(skipped.size)),
+            "${skipped.size} episodes could not be downloaded. Available episodes were queued.")
+
+    private suspend fun completedLocalExists(
+        record: org.siloserver.silo.model.download.DownloadRecord,
+        authority: org.siloserver.silo.network.DurableLoginAuthority?,
+    ): Boolean {
+        val owner = authority ?: return false
+        if (owner != authorities?.snapshotDurableLoginAuthority()) return false
+        val profile = owner.scope.profileId ?: return false
+        val account = owner.scope.accountId.orEmpty()
+        val local = metadataStore.readSidecar(owner.scope.serverId, account, profile, record.mediaFileId) ?: return false
+        return local.record.id == record.id && local.record.statusEnum() == DownloadStatus.Completed &&
+            storage.exists(owner.scope.serverId, account, profile, record.mediaFileId)
+    }
+
+    /** Builds a fileId → EpisodeListItem map across every season of [seriesContentId].
+     *  Used by [startSeries] to enrich each batched sidecar with episode metadata. */
+    private suspend fun buildEpisodeIndexByFileId(
+        seriesContentId: String,
+    ): Map<Int, org.siloserver.silo.model.catalog.EpisodeListItem> {
+        val seasons = when (val r = catalogRepository.getSeasons(seriesContentId)) {
+            is ApiResult.Success -> r.data.seasons
+            else -> return emptyMap()
+        }
+        val map = HashMap<Int, org.siloserver.silo.model.catalog.EpisodeListItem>()
+        for (season in seasons) {
+            val eps = when (val r = catalogRepository.getEpisodes(seriesContentId, season.seasonNumber)) {
+                is ApiResult.Success -> r.data.episodes
+                else -> continue
+            }
+            for (ep in eps) {
+                for (f in ep.files) {
+                    map[f.fileId] = ep
+                }
+            }
+        }
+        return map
+    }
+
+    /**
+     * True when the active scope already has a queued/downloading record for
+     * [fileId]. Two workers for one fileId share the same on-disk target, and
+     * [DownloadStorage.prepareWrite] recreates that directory — so a duplicate
+     * enqueue lets the second worker wipe the first one's partial mid-stream.
+     * The sidecar store is the local source of truth for per-scope status —
+     * but only while a worker is actually alive for it: a row can outlive its
+     * work (cancel, process death mid-stream, WorkManager pruning), and a
+     * stale Queued/Downloading row would otherwise block every future enqueue
+     * for that file forever. So a row with no live work is dropped, not honoured.
+     */
+    private suspend fun activeDownloadExists(fileId: Int): Boolean {
+        val serverId = serverRegistry.activeServerId.value ?: DEFAULT_SERVER_ID
+        val accountId = serverRegistry.activeAccountId.value.orEmpty()
+        val profileId = profileRepository.getActiveProfileId() ?: DEFAULT_PROFILE_ID
+        val existing = runCatching { metadataStore.readSidecar(serverId, accountId, profileId, fileId) }.getOrNull()
+            ?: return false
+        val claimsActive = when (existing.record.statusEnum()) {
+            DownloadStatus.Queued, DownloadStatus.Downloading -> true
+            else -> false
+        }
+        if (!claimsActive) return false
+        // WorkManager commits an enqueue on its own executor, so a just-written
+        // row can briefly have no visible work. Trust the row inside that window
+        // rather than racing a double-tap into a second worker.
+        if (System.currentTimeMillis() - existing.updatedAtMs < WORK_VISIBILITY_GRACE_MS) return true
+        if (hasLiveWork(existing.record.id)) return true
+        Log.i(TAG, "activeDownloadExists: fileId=$fileId sidecar is stale (no live work) — dropping")
+        runCatching { metadataStore.deleteSidecar(serverId, accountId, profileId, fileId) }
+            .onFailure { Log.w(TAG, "activeDownloadExists: stale deleteSidecar failed for fileId=$fileId", it) }
+        return false
+    }
+
+    /** True when WorkManager still holds a non-terminal worker for [downloadId].
+     *  Unknown (query threw) is reported as live so an unreadable WorkManager
+     *  can't turn the duplicate guard into a partial-wiping double enqueue. */
+    private suspend fun hasLiveWork(downloadId: String): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            WorkManager.getInstance(context)
+                .getWorkInfosForUniqueWork(DownloadWorker.tagFor(downloadId))
+                .get()
+                .any { !it.state.isFinished }
+        }.getOrElse {
+            Log.w(TAG, "hasLiveWork: WorkManager query failed for id=$downloadId", it)
+            true
+        }
+    }
+
+    private suspend fun downloadRequest(
+        contentId: String,
+        fileId: Int? = null,
+        episodeId: String? = null,
+        series: Boolean = false,
+        downloadQualityOverride: DownloadQuality? = null,
+    ): DownloadRequest {
+        val quality = downloadQualityOverride
+            ?: repository.capability.value.effectiveDefault(
+                DownloadQuality.fromWire(playerSettingsStore.defaultDownloadQualityFlow.first()),
+            )
+        return DownloadRequest(
+            contentId = contentId,
+            episodeId = episodeId,
+            fileId = fileId,
+            series = series,
+            quality = quality.wire,
+            targetBitrateKbps = quality.targetBitrateKbps,
+            // A failed probe must not block the download; the server then
+            // treats the device as able to play the original.
+            caps = capabilityDetector?.let { detector ->
+                withContext(Dispatchers.Default) {
+                    runCatching { detector.downloadCaps(dolbyVision = playerSettingsStore.dolbyVisionPolicySnapshot()) }
+                        .onFailure { Log.w(TAG, "download caps probe failed", it) }
+                        .getOrNull()
+                }
+            },
+        )
+    }
+
+    /**
+     * Common tail: persists the sidecar and kicks off the
+     * [DownloadWorker]. Pulls (serverId, accountId, profileId, wifiOnly) here once so
+     * each entry point doesn't repeat the lookup.
+     */
+    private suspend fun finalizeAndEnqueue(
+        record: org.siloserver.silo.model.download.DownloadRecord,
+        sidecar: DownloadSidecar,
+        displayTitle: String,
+        authority: org.siloserver.silo.network.DurableLoginAuthority?,
+    ) {
+        check(authorities == null || authority == authorities.snapshotDurableLoginAuthority()) { "The download owner changed" }
+        val serverId = serverRegistry.activeServerId.value ?: DEFAULT_SERVER_ID
+        // The owner's account when there is one: the download is filed under
+        // the account whose credentials created it.
+        val accountId = authority?.scope?.accountId ?: serverRegistry.activeAccountId.value.orEmpty()
+        val profileId = profileRepository.getActiveProfileId() ?: DEFAULT_PROFILE_ID
+        val wifiOnly = playerSettingsStore.downloadsWifiOnlyFlow.first()
+        val deviceId = devices?.current()?.id
+        check(authority == null || !deviceId.isNullOrBlank()) { "The download device is unavailable" }
+        // The Room metadata row is what makes the download visible in the
+        // Downloads tab (it's the source of truth there). A write failure would
+        // create an invisible download — log loudly. (Recovery: the worker
+        // re-asserts the row on status transitions; full create-if-missing is a
+        // tracked follow-up.)
+        suspend fun persistAndEnqueue() {
+        metadataStore.writeSidecar(serverId, accountId, profileId, sidecar)
+        DownloadWorker.enqueue(
+            context = context,
+            downloadId = record.id,
+            fileId = record.mediaFileId,
+            serverId = serverId,
+            accountId = accountId,
+            profileId = profileId,
+            fileName = sidecar.fileName,
+            container = sidecar.container,
+            mediaType = sidecar.mediaType,
+            displayTitle = displayTitle,
+            wifiOnly = wifiOnly,
+            deviceId = deviceId,
+            loginId = authority?.loginId,
+            origin = authority?.scope?.serverUrl,
+            revision = record.revision,
+        )
+        }
+        if (authority == null) persistAndEnqueue()
+        else check(transitions?.withCurrentGeneration(authority.scope.identityGeneration) {
+            persistAndEnqueue(); true
+        } == true) { "The download owner changed" }
+    }
+
+    private suspend fun buildInitialSidecar(
+        record: org.siloserver.silo.model.download.DownloadRecord,
+        contentId: String,
+        fallbackTitle: String,
+    ): DownloadSidecar {
+        val detail = when (val r = catalogRepository.getItemDetail(contentId)) {
+            is ApiResult.Success -> r.data
+            else -> null
+        }
+        val version = detail?.versionFor(record.mediaFileId)
+        return DownloadSidecar(
+            record = record,
+            title = detail?.title ?: fallbackTitle,
+            posterUrl = detail?.posterUrl,
+            posterThumbhash = detail?.posterThumbhash,
+            posterIsEpisodeStill = detail?.posterIsEpisodeStill,
+            episodeUserData = detail?.userData.takeIf { detail?.type == "episode" },
+            year = detail?.year?.takeIf { it > 0 },
+            seriesTitle = detail?.seriesTitle,
+            // Stable TV grouping key — present for episode detail downloads via the
+            // main detail button (this path), so they group like startEpisode's.
+            seriesContentId = detail?.seriesId,
+            seasonNumber = detail?.seasonNumber,
+            episodeNumber = detail?.episodeNumber,
+            subtitle = detail?.let { d ->
+                when {
+                    d.seriesTitle != null && d.seasonNumber != null && d.episodeNumber != null ->
+                        "${d.seriesTitle} · ${episodeTag(d.seasonNumber, d.episodeNumber)}"
+                    d.year > 0 -> "${d.year}"
+                    else -> null
+                }
+            },
+            fileName = version?.fileName,
+            container = version?.container,
+            mediaType = DownloadMediaType.fromCatalogType(detail?.type).wire,
+            overview = detail?.overview,
+            // Author drives the Downloads-tab books tiering (author → book) — capture
+            // it for ebooks too, not just audiobooks.
+            author = detail?.audiobook?.authorNames ?: detail?.ebook?.authorNames,
+            narrator = detail?.audiobook?.narratorNames,
+            // Truthful PER-FILE duration: a download is one file, and for a
+            // multi-part audiobook the offline player treats this as the
+            // stream's length — the whole-book total would run the slider and
+            // resume in whole-book space against a single part's bytes. Fall
+            // back to the audiobook total only when the file has no probed
+            // duration.
+            durationSeconds = version?.duration?.takeIf { it > 0.0 }
+                ?: detail?.audiobook?.totalDurationSeconds?.toDouble(),
+            chapters = version?.chapters,
+            updatedAtMs = System.currentTimeMillis(),
+        )
+    }
+
+    private fun ItemDetail.versionFor(fileId: Int): FileVersion? =
+        versions.firstOrNull { it.fileId == fileId }
+
+    /** Cancel a queued / in-flight download by record id (worker-tag).
+     *  Callers that own the local metadata (Downloads tab) clean the sidecar up
+     *  themselves; everyone else should use the [fileId] overload. */
+    suspend fun cancel(downloadId: String) {
+        Log.i(TAG, "cancel: downloadId=$downloadId")
+        DownloadWorker.cancelAndAwait(context, downloadId)
+    }
+
+    data class CancelScope(
+        val serverId: String,
+        val profileId: String,
+        val accountId: String = "",
+    )
+
+    /** Capture identity synchronously with the UI record being acted on. */
+    fun captureCancelScope(): CancelScope {
+        val active = serverRegistry.activeEntry.value
+        return CancelScope(
+            serverId = active?.id ?: DEFAULT_SERVER_ID,
+            profileId = active?.profileId ?: DEFAULT_PROFILE_ID,
+            accountId = active?.accountId.orEmpty(),
+        )
+    }
+
+    /**
+     * Cancel and forget in the explicitly captured identity scope. Leaving the
+     * row behind made a cancelled download un-restartable; resolving scope
+     * after a coroutine dispatch could instead delete the next profile's row.
+     */
+    suspend fun cancel(
+        downloadId: String,
+        fileId: Int,
+        scope: CancelScope,
+    ) {
+        cancel(downloadId)
+        // A worker stopped by the system keeps its partial for the retry; a
+        // cancel while that retry waits runs no worker cleanup, and the row
+        // removed below is the only pointer to those bytes.
+        runCatching { storage.delete(scope.serverId, scope.accountId, scope.profileId, fileId) }
+            .onFailure { Log.w(TAG, "cancel: partial delete failed for fileId=$fileId", it) }
+        runCatching { metadataStore.deleteSidecar(scope.serverId, scope.accountId, scope.profileId, fileId) }
+            .onFailure { Log.w(TAG, "cancel: deleteSidecar failed for fileId=$fileId", it) }
+    }
+
+    /** The duplicate-guard skip result. Deliberately not [ApiResult.Success]:
+     *  nothing was enqueued, and callers key their "download started" feedback
+     *  off success. */
+    private fun alreadyActive(): ApiResult<Unit> =
+        clientError(409, ALREADY_ACTIVE_ERROR, R.string.downloads_error_alreadyActive, "Already downloading")
+
+    /**
+     * The compact "S2E5" tag. It is stored with the download (title, subtitle,
+     * worker input), so it stays English like the rest of the stored text.
+     */
+    private fun episodeTag(season: Int?, episode: Int?): String = "S${season}E${episode}"
+
+    /**
+     * An error this class writes: [message] in the app language for the screen
+     * that shows it, [english] as the detail that a monitored download stores.
+     */
+    private fun clientError(code: Int, error: String, @androidx.annotation.StringRes message: Int, english: String) =
+        ApiResult.Error(code, error, context.getString(message), detail = english)
+
+    private fun ApiResult<Unit>.isAlreadyActive(): Boolean =
+        this is ApiResult.Error && error == ALREADY_ACTIVE_ERROR
+
+    companion object {
+        private const val TAG = "DownloadEnqueuer"
+        const val DEFAULT_SERVER_ID = "default"
+        const val DEFAULT_PROFILE_ID = "default"
+
+        /** Local-only error code: this file already has a live download worker. */
+        const val ALREADY_ACTIVE_ERROR = "download_already_active"
+
+        /**
+         * Saved as a download's series title when the series' own title is
+         * unknown. Stored data, so it stays English; Downloads shows the
+         * catalog's word in its place.
+         */
+        const val UNKNOWN_SERIES_TITLE = "Series"
+
+        /** Saved as an episode's subtitle when its numbers are unknown; shown like [UNKNOWN_SERIES_TITLE]. */
+        const val UNKNOWN_EPISODE_SUBTITLE = "Series episode"
+
+        private const val WORK_VISIBILITY_GRACE_MS = 5_000L
+    }
+}

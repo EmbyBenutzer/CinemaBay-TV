@@ -1,0 +1,65 @@
+# Gradle / Kotlin
+.gradle/
+.kotlin/
+**/build/
+
+# Android
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Generated and binary outputs
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+*.war
+*.nar
+*.ear
+*.apk
+*.aab
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+google-services.json
+*.jks
+*.keystore
+
+# Local agent/tooling state
+/.agents/
+/.claude/
+.codex/
+.cursor/
+.worktrees/
+.playwright-mcp/
+.playwright-cli/
+
+# Logs and OS files
+*.log
+logs/
+output/
+.DS_Store
+Thumbs.db
+
+# Local media pipeline fixtures
+media-fixtures/*
+!media-fixtures/README.md
+!media-fixtures/manifest.md
+
+# Local review notes (not for publishing)
+docs/reviews/
+ui-validation/
+
+# Ruby / Fastlane
+vendor/bundle/
+fastlane/report.xml
+fastlane/README.md
+fastlane/metadata/

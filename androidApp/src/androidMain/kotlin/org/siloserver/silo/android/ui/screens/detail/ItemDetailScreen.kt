@@ -1,0 +1,1253 @@
+package org.siloserver.silo.android.ui.screens.detail
+
+import org.siloserver.silo.common.i18n.localizedResources
+import org.siloserver.silo.common.i18n.text
+import androidx.compose.ui.res.stringResource
+import org.siloserver.silo.common.R as CommonR
+import org.siloserver.silo.model.catalog.parentPoster
+import org.siloserver.silo.android.ui.components.SiloDropdownMenuItem
+import org.siloserver.silo.android.ui.components.SiloDropdownMenu
+import org.siloserver.silo.android.ui.components.SiloConfirmDialog
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.CompositionLocalProvider
+import org.siloserver.silo.android.ui.theme.SiloPageBackground
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.outlined.SettingsRemote
+import androidx.compose.material3.Icon
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import org.siloserver.silo.android.downloads.LEGACY_PUBLIC_DOWNLOAD_PERMISSION
+import org.siloserver.silo.android.downloads.hasLegacyPublicDownloadPermission
+import org.siloserver.silo.android.ui.components.ErrorView
+import org.siloserver.silo.android.ui.theme.SiloOverlayPillSurface
+import org.siloserver.silo.android.ui.theme.SiloNavPillSurface
+import org.siloserver.silo.android.ui.theme.SiloNavPillBorder
+import org.siloserver.silo.android.cast.SiloCastController
+import org.siloserver.silo.android.ui.screens.cast.SiloCastTargetPickerSheet
+import org.siloserver.silo.android.ui.screens.downloads.openDownloadTargetInExternalApp
+import org.siloserver.silo.android.ui.screens.watchparty.WatchPartySoloGuardDialog
+import org.siloserver.silo.android.ui.screens.watchparty.rememberWatchPartyDetailActions
+import org.siloserver.silo.android.ui.screens.watchparty.rememberWatchPartySoloGuard
+import org.siloserver.silo.model.watchtogether.RoomSnapshot
+import org.siloserver.silo.viewmodel.WatchPartyItem
+import org.siloserver.silo.model.settings.EpisodeSpoilers
+import org.siloserver.silo.viewmodel.WatchPartySpoilers
+import org.siloserver.silo.android.ui.util.playbackResumePosition
+import org.siloserver.silo.common.downloads.DownloadEnqueuer
+import org.siloserver.silo.common.downloads.DownloadOpenTarget
+import org.siloserver.silo.common.downloads.DownloadStorage
+import org.siloserver.silo.model.catalog.FileVersion
+import org.siloserver.silo.model.catalog.ItemDetail
+import org.siloserver.silo.model.catalog.isAudiobookItemType
+import org.siloserver.silo.model.catalog.isBookLikeItemType
+import org.siloserver.silo.model.ebook.chooseEbookVersion
+import org.siloserver.silo.model.ebook.isInAppReadableEbookVersion
+import org.siloserver.silo.model.ebook.isSupportedEbookVersion
+import org.siloserver.silo.model.download.DownloadQuality
+import org.siloserver.silo.model.download.labelFor
+import org.siloserver.silo.common.settings.PlayerSettingsStore
+import org.siloserver.silo.network.ServerRegistry
+import org.koin.compose.koinInject
+import org.siloserver.silo.common.ui.OnViewerAccessChanged
+import org.siloserver.silo.network.AccessChangeSignals
+import org.siloserver.silo.metadata.DescriptionTranslationPhase
+import org.siloserver.silo.model.feature.MetadataAiFeatureStore
+import org.siloserver.silo.model.metadata.MetadataAiOnView
+import org.siloserver.silo.common.thememusic.DetailThemeMusic
+import org.siloserver.silo.common.thememusic.ThemeMusicService
+import org.siloserver.silo.model.catalog.ThemeSelection
+import org.siloserver.silo.model.catalog.hasMachineTranslatedOverview
+import org.siloserver.silo.model.catalog.pendingEpisodeTranslationLanguage
+
+internal data class SeriesDetailRedirect(
+    val seriesContentId: String,
+    val seasonNumber: Int,
+    val episodeContentId: String?,
+)
+
+internal fun seriesDetailRedirect(detail: ItemDetail): SeriesDetailRedirect? {
+    val type = detail.type.trim().lowercase()
+    if (type != "season" && type != "episode") return null
+    val seriesId = detail.seriesId?.trim()
+        ?.takeIf { it.isNotEmpty() && it != detail.contentId } ?: return null
+    val seasonNumber = detail.seasonNumber ?: return null
+    return SeriesDetailRedirect(seriesId, seasonNumber, detail.contentId.takeIf { type == "episode" })
+}
+
+/**
+ * The theme set this page plays. An episode open on its series page plays the
+ * set it resolves to (its season's, else its series'), as the episode's own
+ * page would. While another season's episodes or a newly selected episode
+ * load, the set already playing stands, so switching seasons or episodes
+ * never plays the series' set in between or fades the theme out and back in.
+ */
+@Composable
+private fun rememberDetailThemes(state: ItemDetailUiState): ThemeSelection? {
+    val last = remember { arrayOfNulls<ThemeSelection>(1) }
+    val episode = state.selectedEpisodeDetail
+    val loading = if (state.selectedEpisodeContentId == null) state.isLoadingEpisodes else episode == null
+    val themes = when {
+        episode != null -> episode.themes ?: state.detail?.themes
+        loading -> last[0] ?: state.detail?.themes
+        else -> state.detail?.themes
+    }
+    SideEffect { last[0] = themes }
+    return themes
+}
+
+/**
+ * Item detail dispatcher. Routes to [MovieDetailContent] or
+ * [SeriesDetailContent] based on the item type, with the back button
+ * floating over the hero so the artwork extends edge-to-edge.
+ *
+ * Mirrors `ItemDetailView.swift`'s phone path:
+ *   - hero ignores top safe area
+ *   - transparent back button overlay tinted onto the artwork
+ *   - loading / error / content states
+ */
+@Composable
+fun ItemDetailScreen(
+    openingArtworkUrl: String? = null,
+    openingArtworkThumbhash: String? = null,
+    onBackClick: () -> Unit,
+    /** Content, file, whether the viewer picked that file's version, audio, subtitle, resume position. */
+    onPlayClick: (String, Int?, Boolean, Int?, Int?, Double?) -> Unit,
+    /** A title picked from the "More like this" rail. */
+    onSimilarItemClick: (String) -> Unit,
+    onEpisodeDetailClick: (String) -> Unit,
+    onPersonClick: (String) -> Unit,
+    onSeriesClick: (String) -> Unit,
+    onSeriesDetailReplace: (String, Int, String?) -> Unit,
+    /** A series opened for this episode cannot load; show the episode instead. */
+    onEpisodeFallback: (String) -> Unit = {},
+    /** False once this page fell back from its series, so it does not redirect there again. */
+    allowSeriesRedirect: Boolean = true,
+    onAudiobookPlayClick: (contentId: String, fileId: Int?, fromStart: Boolean, startPosition: Double?) -> Unit = { _, _, _, _ -> },
+    onBookReadClick: (String, Int?) -> Unit = { _, _ -> },
+    /** The route's library, staged with a Watch Party item. */
+    libraryId: Int? = null,
+    /** Host a Watch Party with this item (opens the hub). */
+    onWatchParty: (WatchPartyItem) -> Unit = {},
+    /** The host switched a playing party to an item from this page. */
+    onPartySelected: (RoomSnapshot) -> Unit = {},
+    // Auto-presents the cast remote after "Play on device" launches, mirroring
+    // Apple's playOnTV: the connect/handoff handshake renders in the remote.
+    onOpenCastRemote: () -> Unit = {},
+    // Plays the first pick of a shuffle started from the series overflow menu.
+    onShuffleStarted: (org.siloserver.silo.model.shuffle.Shuffle) -> Unit = {},
+    /** Opens a box set's page from a movie's box set row. */
+    onBoxSetClick: (boxSetId: String, libraryId: String) -> Unit = { _, _ -> },
+    /** Opens a movie from a box set row, scoped to the box set's library. */
+    onBoxSetMovieClick: (contentId: String, libraryId: String) -> Unit,
+    viewModel: ItemDetailViewModel,
+    modifier: Modifier = Modifier,
+) {
+    val state by viewModel.uiState.collectAsState()
+    DetailThemeMusic(koinInject<ThemeMusicService>(), rememberDetailThemes(state))
+    val shuffleLauncher = org.siloserver.silo.android.ui.screens.shuffle.rememberShuffleLauncher(onShuffleStarted)
+    val seriesRedirect = remember(state.detail, allowSeriesRedirect) {
+        state.detail?.takeIf { allowSeriesRedirect }?.let(::seriesDetailRedirect)
+    }
+    var seriesRedirectFailed by rememberSaveable(state.detail?.contentId) { mutableStateOf(false) }
+    LaunchedEffect(seriesRedirect) {
+        val redirect = seriesRedirect ?: return@LaunchedEffect
+        if (seriesRedirectFailed) return@LaunchedEffect
+        if (viewModel.hasSeriesDetailForRedirect(redirect.seriesContentId)) {
+            onSeriesDetailReplace(redirect.seriesContentId, redirect.seasonNumber, redirect.episodeContentId)
+        } else {
+            // Keep the original detail usable if its parent cannot be opened.
+            seriesRedirectFailed = true
+        }
+    }
+    LaunchedEffect(state.episodeFallbackContentId) {
+        state.episodeFallbackContentId?.let(onEpisodeFallback)
+    }
+    val siloCastController: SiloCastController = koinInject()
+    val siloCastState by siloCastController.state.collectAsState()
+    var showRemoteTargetPicker by remember { mutableStateOf(false) }
+    var remoteMenuExpanded by remember { mutableStateOf(false) }
+
+    LaunchedEffect(state.selectedEpisodeContentId) {
+        if (state.selectedEpisodeContentId != null) viewModel.ensureSelectedEpisodeDetailLoaded()
+    }
+    val context = LocalContext.current
+    // D5: while this device is in a Watch Party, detail Play, extras, and
+    // audiobook play ask to leave the party first (the player is shared).
+    val soloGuard = rememberWatchPartySoloGuard()
+    val guardedPlay: (String, Int?, Boolean, Int?, Int?, Double?) -> Unit =
+        { contentId, fileId, versionChosen, audio, subtitle, resume ->
+            soloGuard.run { onPlayClick(contentId, fileId, versionChosen, audio, subtitle, resume) }
+        }
+    val guardedAudiobookPlay: (String, Int?, Boolean, Double?) -> Unit = { contentId, fileId, fromStart, start ->
+        soloGuard.run { onAudiobookPlayClick(contentId, fileId, fromStart, start) }
+    }
+    val (partyActions, partyDialogs) = rememberWatchPartyDetailActions(
+        onHost = onWatchParty,
+        onSelectedWhilePlaying = onPartySelected,
+    )
+
+    // Refresh on return (e.g. backing out of the player): the ViewModel loads
+    // once in init, so without this the Play button keeps the resume label
+    // computed before playback. Fires on every ON_RESUME; no first-entry
+    // guard — the composable is recreated on back-stack pop, so any
+    // effect-local "skip the first" flag would reset and swallow exactly the
+    // resume we care about. refreshOnReturn() no-ops while detail is still
+    // null, which covers the initial load.
+    // The same quiet refresh when the server reports an access change, so
+    // availability, versions, and quality limits follow the new policy; a
+    // title the viewer can no longer see shows the unavailable state.
+    OnViewerAccessChanged(koinInject<AccessChangeSignals>(), viewModel.accessChanges) { viewModel.refreshAfterAccessChange() }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> viewModel.onRouteResumed()
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> viewModel.onRoutePaused()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // iOS parity haptic: success/error sensory feedback when a download
+    // starts or fails to register (the only haptic iOS mobile has).
+    val hapticView = androidx.compose.ui.platform.LocalView.current
+    LaunchedEffect(Unit) {
+        viewModel.downloadStartEvents.collect { started ->
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                hapticView.performHapticFeedback(
+                    if (started) {
+                        android.view.HapticFeedbackConstants.CONFIRM
+                    } else {
+                        android.view.HapticFeedbackConstants.REJECT
+                    },
+                )
+            } else {
+                hapticView.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+            }
+        }
+    }
+    LaunchedEffect(Unit) {
+        viewModel.downloadFailureMessages.collect { failure ->
+            Toast.makeText(context, failure.text(context), Toast.LENGTH_LONG).show()
+        }
+    }
+
+    val downloadStorage: DownloadStorage = koinInject()
+    val serverRegistry: ServerRegistry = koinInject()
+    // The auto-version PREVIEW must name the version playback will actually
+    // pick, which depends on the user's preferred quality (see
+    // MobileVideoPlaybackStarter). Read it so the Video/Audio/Subtitle rows
+    // describe the real file rather than defaulting to versions[0].
+    val playerSettingsStore: PlayerSettingsStore = koinInject()
+    val preferredQuality by playerSettingsStore.preferredQualityFlow.collectAsState(initial = null)
+    // Server capability gates which quality presets the picker may offer
+    // (issue #20 GAP 4). Until it loads (or if the fetch fails) we optimistically
+    // offer every preset; the server still rejects a disallowed quality.
+    val downloadCapability by viewModel.downloadCapability.collectAsState()
+    val allowedVideoQualities = downloadCapability?.allowedQualities()
+        ?: DownloadQuality.entries.toList()
+    var pendingDownloadAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var pendingCancelDownloadAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var pendingDownloadQualityAction by remember { mutableStateOf<((DownloadQuality) -> Unit)?>(null) }
+    // Presets the currently-open picker should show (video → capability-gated;
+    // books → Original only). Set when a quality action is armed.
+    var pendingDownloadAllowedQualities by remember {
+        mutableStateOf<List<DownloadQuality>>(emptyList())
+    }
+    var pendingDownloadEstimate by remember {
+        mutableStateOf<org.siloserver.silo.model.download.DownloadSizeEstimate?>(null)
+    }
+    var showDownloadQualityPicker by remember { mutableStateOf(false) }
+    val legacyStoragePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        val action = pendingDownloadAction
+        pendingDownloadAction = null
+        if (granted) {
+            action?.invoke()
+        } else {
+            Toast.makeText(
+                context,
+                context.getString(CommonR.string.detail_storagePermissionRequired),
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+
+    fun runDownloadAction(requirePermission: Boolean = true, action: () -> Unit) {
+        if (!requirePermission || hasLegacyPublicDownloadPermission(context)) {
+            action()
+            return
+        }
+        pendingDownloadAction = action
+        legacyStoragePermissionLauncher.launch(LEGACY_PUBLIC_DOWNLOAD_PERMISSION)
+    }
+
+    fun runDownloadQualityAction(
+        requirePermission: Boolean = true,
+        estimate: org.siloserver.silo.model.download.DownloadSizeEstimate? = null,
+        allowedQualities: List<DownloadQuality> = allowedVideoQualities,
+        action: (DownloadQuality) -> Unit,
+    ) {
+        runDownloadAction(requirePermission = requirePermission) {
+            val presets = allowedQualities.ifEmpty { listOf(DownloadQuality.Original) }
+            if (presets.size <= 1) {
+                // A single choice (books, or a transcode-disabled account) needs
+                // no picker — download it directly at the only allowed quality.
+                action(presets.first())
+            } else {
+                pendingDownloadQualityAction = action
+                pendingDownloadEstimate = estimate
+                pendingDownloadAllowedQualities = presets
+                showDownloadQualityPicker = true
+            }
+        }
+    }
+
+    fun runDownloadTap(
+        downloadState: DetailDownloadState,
+        directAction: () -> Unit,
+        qualityAction: (DownloadQuality) -> Unit,
+        estimate: org.siloserver.silo.model.download.DownloadSizeEstimate? = null,
+        allowedQualities: List<DownloadQuality> = allowedVideoQualities,
+    ) {
+        when {
+            !downloadState.isDownloaded && downloadState.progress == null -> {
+                runDownloadQualityAction(
+                    requirePermission = true,
+                    estimate = estimate,
+                    allowedQualities = allowedQualities,
+                    action = qualityAction,
+                )
+            }
+            // In flight — the tap cancels, so confirm before discarding
+            // the partial download (iOS parity).
+            !downloadState.isDownloaded -> {
+                pendingCancelDownloadAction = {
+                    runDownloadAction(requirePermission = false, action = directAction)
+                }
+            }
+            else -> runDownloadAction(requirePermission = false, action = directAction)
+        }
+    }
+
+    fun localDownloadFor(fileId: Int) =
+        downloadStorage.locateLocalMedia(
+            serverId = serverRegistry.activeServerId.value ?: DownloadEnqueuer.DEFAULT_SERVER_ID,
+            accountId = serverRegistry.activeAccountId.value.orEmpty(),
+            profileId = serverRegistry.activeEntry.value?.profileId ?: DownloadEnqueuer.DEFAULT_PROFILE_ID,
+            fileId = fileId,
+        )
+
+    fun openExternalDownload(version: FileVersion, displayTitle: String) {
+        val local = localDownloadFor(version.fileId)
+        val target = DownloadOpenTarget.from(
+            isComplete = local != null,
+            localUri = local?.uriString,
+            displayName = local?.displayName ?: version.fileName ?: displayTitle,
+            container = version.container,
+        )
+        if (target == null || !openDownloadTargetInExternalApp(context, target)) {
+            Toast.makeText(context, context.getString(CommonR.string.detail_noAppToOpenFile), Toast.LENGTH_LONG).show()
+        }
+    }
+
+    val detailScroll = remember { DetailScrollState() }
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            // A full-screen page, not a card: the hero runs edge to edge under
+            // the status bar. This used to be inset below the safe area with
+            // rounded top corners, a drop shadow, and its own swipe-back and
+            // pull-down dismissals. Back is the platform's job now — the
+            // manifest opts into predictive back, so the system draws the page
+            // behind while the user drags the edge gesture.
+            .background(MaterialTheme.colorScheme.background),
+    ) {
+        CompositionLocalProvider(LocalDetailScrollState provides detailScroll) {
+        // Only the initial branch change dissolves; metadata refreshes keep
+        // the current detail mounted. Loading shares the loaded hero frame.
+        val loadedBranch = when {
+            // A pending series redirect is about to replace this page's content
+            // with the parent series. Hold the skeleton rather than dissolving
+            // into a season or episode detail that is on its way out.
+            seriesRedirect != null && !seriesRedirectFailed -> "loading"
+            // Likewise while a series that cannot load hands over to its episode.
+            state.episodeFallbackContentId != null -> "loading"
+            state.detail != null -> "detail"
+            state.error != null -> "error"
+            else -> "loading"
+        }
+        Crossfade(
+            targetState = loadedBranch,
+            animationSpec = tween(durationMillis = 180),
+            label = "detailBranch",
+        ) { branch ->
+        when {
+            branch == "loading" -> {
+                DetailLoadingSkeleton(
+                    artworkUrl = openingArtworkUrl,
+                    artworkThumbhash = openingArtworkThumbhash,
+                )
+            }
+
+            branch == "error" -> {
+                ErrorView(
+                    message = state.error?.text() ?: stringResource(CommonR.string.status_errorGeneric),
+                    onRetry = { viewModel.loadDetail() },
+                )
+            }
+
+            else -> {
+                val detail = state.detail ?: return@Crossfade
+                val resources = localizedResources()
+                val metadataAiStore: MetadataAiFeatureStore = koinInject()
+                val metadataAiStatus by metadataAiStore.status.collectAsState()
+                val translationPhase by viewModel.translationPhase.collectAsState()
+                val translatingSeasonContentId by viewModel.translatingSeasonContentId.collectAsState()
+                val translationEligible = metadataAiStatus.onView != MetadataAiOnView.Off &&
+                    detail.pendingTranslationLanguage != null
+                // `auto` on-view mode fires once per (content, language); the
+                // controller latches so recompositions can't re-queue jobs.
+                LaunchedEffect(detail.contentId, detail.pendingTranslationLanguage, metadataAiStatus.onView) {
+                    if (metadataAiStatus.onView == MetadataAiOnView.Auto &&
+                        detail.pendingTranslationLanguage != null
+                    ) {
+                        viewModel.translateDescription(auto = true)
+                    }
+                }
+                // The series page lists the selected season's episodes inline;
+                // the season's job fills any episode description still missing.
+                val pendingEpisodeLanguage = state.episodes
+                    .filter { it.seasonNumber == state.selectedSeasonNumber }
+                    .pendingEpisodeTranslationLanguage()
+                LaunchedEffect(
+                    detail.contentId,
+                    state.selectedSeasonNumber,
+                    state.seasons.isNotEmpty(),
+                    pendingEpisodeLanguage,
+                    metadataAiStatus.onView,
+                ) {
+                    if (metadataAiStatus.onView == MetadataAiOnView.Auto && pendingEpisodeLanguage != null) {
+                        viewModel.translateShownSeasonEpisodes()
+                    }
+                }
+                val translationSlot: (@Composable () -> Unit)? = if (translationEligible &&
+                    (metadataAiStatus.onView == MetadataAiOnView.Button ||
+                        translationPhase != DescriptionTranslationPhase.Idle)
+                ) {
+                    {
+                        DescriptionTranslationSection(
+                            phase = translationPhase,
+                            onTranslate = { viewModel.translateDescription() },
+                        )
+                    }
+                } else if (hasMachineTranslatedOverview(detail.machineTranslatedFields) &&
+                    !detail.overview.isNullOrBlank()
+                ) {
+                    { DetailMachineTranslatedLabel() }
+                } else {
+                    null
+                }
+                val effectiveSelectedVersionIndex = if (state.hasExplicitVersionSelection) {
+                    state.selectedVersionIndex
+                } else {
+                    detail.userData?.lastFileId
+                        ?.let { lastFileId ->
+                            detail.versions.indexOfFirst { it.fileId == lastFileId }
+                                .takeIf { it >= 0 }
+                        }
+                        ?: state.selectedVersionIndex
+                }
+                val explicitFileId = detail.versions
+                    .getOrNull(effectiveSelectedVersionIndex)
+                    ?.fileId
+                    ?.takeIf { state.hasExplicitVersionSelection }
+                val explicitAudioIndex = state.selectedAudioIndex
+                    .takeIf { state.hasExplicitAudioSelection }
+                val explicitSubtitleIndex = state.selectedSubtitleIndex
+                    .takeIf { state.hasExplicitSubtitleSelection }
+                val playbackFileId = explicitFileId ?: detail.versions
+                    .getOrNull(effectiveSelectedVersionIndex)
+                    ?.fileId
+                    ?.takeIf { state.hasExplicitAudioSelection || state.hasExplicitSubtitleSelection }
+                val effectiveAudiobookFileId = detail.versions
+                    .getOrNull(effectiveSelectedVersionIndex)
+                    ?.fileId
+
+                when {
+                    isAudiobookItemType(detail.type) -> {
+                        val downloadRecords by viewModel.downloads.collectAsState()
+                        val audiobookVersion = effectiveAudiobookFileId
+                            ?.let { fileId -> detail.versions.firstOrNull { it.fileId == fileId } }
+                            ?: detail.versions.firstOrNull()
+                        val audiobookLocalDownload = audiobookVersion?.let { version ->
+                            localDownloadFor(version.fileId)
+                        }
+                        val downloadState = detailDownloadStateFor(
+                            version = audiobookVersion,
+                            records = downloadRecords,
+                            hasLocalMedia = audiobookVersion?.let { audiobookLocalDownload != null },
+                        )
+
+                        org.siloserver.silo.android.ui.screens.audiobook.AudiobookDetailContent(
+                            detail = detail,
+                            isFavorite = state.isFavorite,
+                            isInWatchlist = state.isInWatchlist,
+                            selectedFileId = effectiveAudiobookFileId,
+                            isDownloaded = downloadState.isDownloaded,
+                            downloadProgress = downloadState.progress,
+                            // Resume/Play: no fileId — the player VM resolves
+                            // the part from the stored whole-book position.
+                            onPlayClick = {
+                                guardedAudiobookPlay(detail.contentId, null, false, null)
+                            },
+                            onPlayFromStartClick = {
+                                guardedAudiobookPlay(detail.contentId, null, true, null)
+                            },
+                            // Parts play from a whole-book (global) offset.
+                            onPlayFromPositionClick = { startPosition ->
+                                guardedAudiobookPlay(detail.contentId, null, false, startPosition)
+                            },
+                            // Chapters jump to their global start offset.
+                            onChapterClick = { chapter ->
+                                guardedAudiobookPlay(detail.contentId, null, false, chapter.startSeconds)
+                            },
+                            onFavoriteClick = { viewModel.toggleFavorite() },
+                            onWatchlistClick = { viewModel.toggleWatchlist() },
+                            onDownloadClick = audiobookVersion?.let { version ->
+                                {
+                                    runDownloadTap(
+                                        downloadState = downloadState,
+                                        directAction = {
+                                            viewModel.onDownloadTapped(
+                                                version,
+                                                detail.title,
+                                                forceRedownloadMissingLocal = downloadState.needsLocalRecovery,
+                                            )
+                                        },
+                                        qualityAction = { quality ->
+                                            viewModel.onDownloadTapped(
+                                                version,
+                                                detail.title,
+                                                forceRedownloadMissingLocal = downloadState.needsLocalRecovery,
+                                                downloadQuality = quality,
+                                            )
+                                        },
+                                        estimate = org.siloserver.silo.model.download.DownloadSizeEstimate
+                                            .estimate(versions = listOf(version), fileId = version.fileId),
+                                        // Bitrate presets are video-only; audiobooks
+                                        // download at Original (no picker). GAP 4.
+                                        allowedQualities = listOf(DownloadQuality.Original),
+                                    )
+                                }
+                            },
+                        )
+                    }
+
+                    isBookLikeItemType(detail.type) -> {
+                        val selectedBookVersion = if (state.hasExplicitVersionSelection) {
+                            detail.versions.getOrNull(state.selectedVersionIndex)
+                        } else {
+                            chooseEbookVersion(detail.versions, requestedFileId = detail.userData?.lastFileId)
+                                ?: detail.versions.firstOrNull { it.isSupportedEbookVersion() }
+                                ?: detail.versions.firstOrNull()
+                        }
+                        val selectedBookVersionIndex = selectedBookVersion
+                            ?.let { version -> detail.versions.indexOfFirst { it.fileId == version.fileId } }
+                            ?.takeIf { it >= 0 }
+                            ?: 0
+                        val selectedBookLocalDownload = selectedBookVersion?.let { version ->
+                            localDownloadFor(version.fileId)
+                        }
+                        val downloadRecords by viewModel.downloads.collectAsState()
+                        val downloadState = detailDownloadStateFor(
+                            version = selectedBookVersion,
+                            records = downloadRecords,
+                            hasLocalMedia = selectedBookVersion?.let { selectedBookLocalDownload != null },
+                        )
+
+                        org.siloserver.silo.android.ui.screens.book.BookDetailContent(
+                            detail = detail,
+                            isFavorite = state.isFavorite,
+                            isInWatchlist = state.isInWatchlist,
+                            selectedVersionIndex = selectedBookVersionIndex,
+                            onVersionSelected = { viewModel.selectVersion(it) },
+                            canReadSelectedVersion = selectedBookVersion
+                                ?.isInAppReadableEbookVersion(state.kindleConversionAvailable) == true,
+                            isDownloaded = downloadState.isDownloaded,
+                            downloadProgress = downloadState.progress,
+                            onReadClick = { fileId -> onBookReadClick(detail.contentId, fileId) },
+                            onFavoriteClick = { viewModel.toggleFavorite() },
+                            onWatchlistClick = { viewModel.toggleWatchlist() },
+                            onDownloadClick = selectedBookVersion?.takeIf { it.isSupportedEbookVersion() }?.let { version ->
+                                {
+                                    runDownloadTap(
+                                        downloadState = downloadState,
+                                        directAction = {
+                                            viewModel.onDownloadTapped(
+                                                version,
+                                                detail.title,
+                                                forceRedownloadMissingLocal = downloadState.needsLocalRecovery,
+                                            )
+                                        },
+                                        qualityAction = { quality ->
+                                            viewModel.onDownloadTapped(
+                                                version,
+                                                detail.title,
+                                                forceRedownloadMissingLocal = downloadState.needsLocalRecovery,
+                                                downloadQuality = quality,
+                                            )
+                                        },
+                                        estimate = org.siloserver.silo.model.download.DownloadSizeEstimate
+                                            .estimate(versions = listOf(version), fileId = version.fileId),
+                                        // eBooks have no bitrate variants — download
+                                        // at Original with no picker. GAP 4.
+                                        allowedQualities = listOf(DownloadQuality.Original),
+                                    )
+                                }
+                            },
+                            onOpenExternalClick = selectedBookVersion
+                                ?.takeIf {
+                                    !it.isInAppReadableEbookVersion(state.kindleConversionAvailable) &&
+                                        downloadState.isDownloaded &&
+                                        selectedBookLocalDownload != null
+                                }
+                                ?.let { version ->
+                                    { openExternalDownload(version, detail.title) }
+                                },
+                        )
+                    }
+
+                    detail.type == "series" -> {
+                        val nextEpisode = state.episodes.firstOrNull { ep ->
+                            ep.userData?.played != true
+                        } ?: state.episodes.firstOrNull()
+                        val nextEpisodeLabel = nextEpisode?.let { ep ->
+                            episodeCode(resources, ep.seasonNumber, ep.episodeNumber)
+                        }
+                        val episodeDownloadRecords by viewModel.downloads.collectAsState()
+                        // Series-level roll-up across ALL seasons (state.allEpisodeFileIds
+                        // is loaded in the background): ✓ only when every episode is
+                        // downloaded; a partial fraction otherwise.
+                        val seriesDownloadState = remember(
+                            episodeDownloadRecords,
+                            state.allEpisodeFileIds,
+                            state.allEpisodeIdsComplete,
+                        ) {
+                            val ids = state.allEpisodeFileIds
+                            if (ids.isEmpty()) {
+                                DetailDownloadState()
+                            } else {
+                                val downloaded = ids.count {
+                                    detailDownloadStateForFile(it, episodeDownloadRecords).isDownloaded
+                                }
+                                // ✓ only when every season loaded AND every episode is
+                                // downloaded; otherwise show a partial fraction.
+                                val allDone = state.allEpisodeIdsComplete && downloaded == ids.size
+                                DetailDownloadState(
+                                    isDownloaded = allDone,
+                                    progress = if (!allDone && downloaded > 0) {
+                                        downloaded.toFloat() / ids.size
+                                    } else {
+                                        null
+                                    },
+                                )
+                            }
+                        }
+
+                        // Key the dialog off the SAME source the Resume action uses
+                        // below: whenever nextEpisode exists, Resume launches it with
+                        // its own progress. Don't fall back to series-level progress
+                        // when nextEpisode has none, or the dialog would show a
+                        // "stopped at" time that Resume won't honor (both buttons
+                        // would start the episode at 0).
+                        val seriesResume = if (nextEpisode != null) {
+                            playbackResumePosition(nextEpisode)
+                        } else {
+                            playbackResumePosition(detail.userData)
+                        }
+                        val selectedEpisode = state.episodes.firstOrNull {
+                            it.contentId == state.selectedEpisodeContentId
+                        }
+                        val selectedEpisodeDetail = state.selectedEpisodeDetail
+                        // Auto resolves like the movie page and playback, so
+                        // the version shown is the one Play and Download use.
+                        val selectedEpisodeVersions = selectedEpisodeDetail?.versions.orEmpty()
+                        val selectedEpisodeVersionIndex = detailDisplayVersionIndex(
+                            versions = selectedEpisodeVersions,
+                            explicitIndex = state.selectedVersionIndex
+                                .coerceIn(0, selectedEpisodeVersions.lastIndex.coerceAtLeast(0))
+                                .takeIf { state.hasExplicitVersionSelection },
+                            lastFileId = selectedEpisodeDetail?.userData?.lastFileId,
+                            preferredQuality = preferredQuality,
+                            fallbackIndex = 0,
+                        )
+                        val selectedEpisodeFileId = selectedEpisodeDetail?.versions
+                            ?.getOrNull(selectedEpisodeVersionIndex)
+                            ?.fileId
+                            ?.takeIf {
+                                state.hasExplicitVersionSelection ||
+                                    state.hasExplicitAudioSelection ||
+                                    state.hasExplicitSubtitleSelection
+                            }
+                        val selectedEpisodeVersion = selectedEpisodeDetail?.versions
+                            ?.getOrNull(selectedEpisodeVersionIndex)
+                        val episodeDownloadState = detailDownloadStateFor(
+                            version = selectedEpisodeVersion,
+                            records = episodeDownloadRecords,
+                            hasLocalMedia = selectedEpisodeVersion?.let { localDownloadFor(it.fileId) != null },
+                        )
+                        val selectedEpisodeResume = selectedEpisode?.let(::playbackResumePosition)
+                        val activeSeriesResume = if (selectedEpisode != null) {
+                            selectedEpisodeResume
+                        } else {
+                            seriesResume
+                        }
+                        SeriesDetailContent(
+                            translatingSeasonContentId = translatingSeasonContentId,
+                            translation = translationSlot,
+                            detail = detail,
+                            similarItems = state.similarItems,
+                            seasons = state.seasons,
+                            selectedSeasonNumber = state.selectedSeasonNumber,
+                            episodes = state.episodes,
+                            episodesBySeason = state.episodesBySeason,
+                            isLoadingEpisodes = state.isLoadingEpisodes,
+                            isFavorite = state.isFavorite,
+                            isInWatchlist = state.isInWatchlist,
+                            nextEpisodeLabel = nextEpisodeLabel,
+                            selectedEpisodeContentId = state.selectedEpisodeContentId,
+                            selectedEpisodeDetail = selectedEpisodeDetail?.let(state::withPickedSeriesChoices),
+                            isLoadingSelectedEpisodeDetail = state.isLoadingSelectedEpisodeDetail,
+                            selectedVersionIndex = selectedEpisodeVersionIndex,
+                            isAutoVersion = !state.hasExplicitVersionSelection,
+                            selectedAudioIndex = state.selectedAudioIndex.takeIf { state.hasExplicitAudioSelection },
+                            selectedSubtitleIndex = state.selectedSubtitleIndex.takeIf { state.hasExplicitSubtitleSelection },
+                            onVersionSelected = { index ->
+                                if (index == null) viewModel.selectAutoVersion() else viewModel.selectVersion(index)
+                            },
+                            onAudioSelected = { index ->
+                                if (index == null) {
+                                    viewModel.selectAutoAudioTrack()
+                                } else {
+                                    viewModel.selectAudioTrack(index, selectedEpisodeVersion)
+                                }
+                            },
+                            onSubtitleSelected = { index ->
+                                if (index == null) {
+                                    viewModel.selectAutoSubtitle()
+                                } else {
+                                    viewModel.selectSubtitle(index, selectedEpisodeVersion)
+                                }
+                            },
+                            onPlayClick = {
+                                selectedEpisode?.let {
+                                    guardedPlay(
+                                        it.contentId,
+                                        selectedEpisodeFileId,
+                                        state.hasExplicitVersionSelection,
+                                        state.selectedAudioIndex.takeIf { state.hasExplicitAudioSelection },
+                                        state.selectedSubtitleIndex.takeIf { state.hasExplicitSubtitleSelection },
+                                        selectedEpisodeResume,
+                                    )
+                                } ?: nextEpisode?.let {
+                                    guardedPlay(it.contentId, null, false, null, null, playbackResumePosition(it))
+                                } ?: guardedPlay(
+                                    detail.contentId,
+                                    null,
+                                    false,
+                                    null,
+                                    null,
+                                    playbackResumePosition(detail.userData),
+                                )
+                            },
+                            onPlayFromBeginning = activeSeriesResume?.let {
+                                {
+                                    selectedEpisode?.let { ep ->
+                                        guardedPlay(
+                                            ep.contentId,
+                                            selectedEpisodeFileId,
+                                            state.hasExplicitVersionSelection,
+                                            state.selectedAudioIndex.takeIf { state.hasExplicitAudioSelection },
+                                            state.selectedSubtitleIndex.takeIf { state.hasExplicitSubtitleSelection },
+                                            0.0,
+                                        )
+                                    } ?: nextEpisode?.let { ep ->
+                                        guardedPlay(ep.contentId, null, false, null, null, 0.0)
+                                    } ?: guardedPlay(detail.contentId, null, false, null, null, 0.0)
+                                }
+                            },
+                            resumeStoppedAtLabel = activeSeriesResume?.let { formatResumeStoppedAt(it) },
+                            onEpisodePlayClick = { contentId, resumePositionSeconds ->
+                                guardedPlay(contentId, null, false, null, null, resumePositionSeconds)
+                            },
+                            onEpisodeDetailClick = { viewModel.selectSeriesEpisode(it) },
+                            onEpisodeWatchedChange = { episodeContentId, watched ->
+                                viewModel.setEpisodeWatched(episodeContentId, watched)
+                            },
+                            onSeasonSelected = { viewModel.selectSeason(it) },
+                            onSeasonWatchedChange = { season, watched ->
+                                viewModel.setSeasonWatched(season, watched)
+                            },
+                            onShuffleSeries = if (
+                                shuffleLauncher.supports(org.siloserver.silo.model.shuffle.ShuffleScopeKind.SERIES)
+                            ) {
+                                {
+                                    shuffleLauncher.start(
+                                        org.siloserver.silo.model.shuffle.ShuffleScopeKind.SERIES,
+                                        detail.contentId,
+                                    )
+                                }
+                            } else {
+                                null
+                            },
+                            onShuffleSeason = if (
+                                shuffleLauncher.supports(org.siloserver.silo.model.shuffle.ShuffleScopeKind.SEASON)
+                            ) {
+                                { season ->
+                                    shuffleLauncher.start(
+                                        org.siloserver.silo.model.shuffle.ShuffleScopeKind.SEASON,
+                                        season.contentId,
+                                    )
+                                }
+                            } else {
+                                null
+                            },
+                            onFavoriteClick = { viewModel.toggleFavorite() },
+                            onWatchlistClick = { viewModel.toggleWatchlist() },
+                            onToggleWatched = { viewModel.toggleWatched() },
+                            onPersonClick = onPersonClick,
+                            onSimilarItemClick = onSimilarItemClick,
+                            onPlayExtra = { extra ->
+                                guardedPlay(extra.contentId, extra.fileId, false, null, null, 0.0)
+                            },
+                            onSeriesDownloadClick = {
+                                // Series/season batches are Original-only server-side
+                                // (501 bulk_quality_unavailable otherwise), so no
+                                // quality picker — just start the batch. GAP 3.
+                                if (seriesDownloadState.isDownloaded) {
+                                    runDownloadAction(requirePermission = false) {
+                                        viewModel.onSeriesDownloadTapped()
+                                    }
+                                } else {
+                                    runDownloadAction {
+                                        viewModel.onSeriesDownloadTapped()
+                                    }
+                                }
+                            },
+                            seriesDownloadState = seriesDownloadState,
+                            episodeDownloadState = episodeDownloadState,
+                            onEpisodeDownloadClick = selectedEpisodeVersion?.let { version ->
+                                selectedEpisodeDetail?.let { episode ->
+                                    {
+                                        runDownloadTap(
+                                            downloadState = episodeDownloadState,
+                                            directAction = {
+                                                viewModel.onDownloadTapped(
+                                                    version, episode.title,
+                                                    forceRedownloadMissingLocal = episodeDownloadState.needsLocalRecovery,
+                                                    episode = episode,
+                                                )
+                                            },
+                                            qualityAction = { quality ->
+                                                viewModel.onDownloadTapped(
+                                                    version, episode.title,
+                                                    forceRedownloadMissingLocal = episodeDownloadState.needsLocalRecovery,
+                                                    downloadQuality = quality,
+                                                    episode = episode,
+                                                )
+                                            },
+                                            estimate = org.siloserver.silo.model.download.DownloadSizeEstimate
+                                                .estimate(versions = listOf(version), fileId = version.fileId),
+                                        )
+                                    }
+                                }
+                            },
+                            // A series enters a party through the episode Play
+                            // would start: the selected one, else next up.
+                            partyAction = partyActions.actionFor(
+                                (selectedEpisode ?: nextEpisode)?.let { episode ->
+                                    WatchPartyItem(
+                                        contentId = episode.contentId,
+                                        contentType = "episode",
+                                        // The party item is sent to the server and shown to
+                                        // every member, so its fallback text stays English data.
+                                        title = episode.title?.takeIf { it.isNotBlank() }
+                                            ?: "Episode ${episode.episodeNumber}",
+                                        subtitle = "${detail.title} · S${episode.seasonNumber}·E${episode.episodeNumber}",
+                                        posterUrl = detail.posterUrl,
+                                        fileId = selectedEpisodeVersion?.fileId
+                                            ?.takeIf { episode.contentId == selectedEpisode?.contentId },
+                                        libraryId = libraryId,
+                                        // The series poster stands in for the episode.
+                                        spoilers = WatchPartySpoilers(
+                                            unwatchedEpisode = EpisodeSpoilers.isUnwatched(episode.userData),
+                                            posterIsEpisodeStill = false,
+                                            backdropIsEpisodeStill = false,
+                                        ),
+                                    )
+                                },
+                            ),
+                        )
+                    }
+
+                    else -> {
+                        val seriesId = detail.seriesId
+                        val seasonNumber = detail.seasonNumber
+                        val episodeSeason = if (detail.type == "episode") {
+                            state.seasons.firstOrNull { it.seasonNumber == seasonNumber }
+                        } else {
+                            null
+                        }
+                        val seasonPosterUrl = episodeSeason?.posterUrl?.takeIf { it.isNotBlank() }
+                        // The episode's own season/series poster, when the server sends it.
+                        val parentPoster = detail.parentPoster()
+                        val portraitArtwork = if (detail.type == "episode") {
+                            DetailPortraitArtwork(
+                                url = seasonPosterUrl ?: parentPoster?.url ?: state.episodeSeriesPosterUrl,
+                                thumbhash = when {
+                                    seasonPosterUrl != null -> episodeSeason?.posterThumbhash
+                                    parentPoster != null -> parentPoster.thumbhash
+                                    else -> state.episodeSeriesPosterThumbhash
+                                },
+                                reserveSpace = true,
+                                isResolved = seasonPosterUrl != null || parentPoster != null ||
+                                    state.episodeSeriesPosterResolved,
+                            )
+                        } else {
+                            DetailPortraitArtwork(
+                                url = detail.posterUrl,
+                                thumbhash = detail.posterThumbhash,
+                            )
+                        }
+                        // Derive download state for the currently-selected
+                        // version. Re-reads on every UI emission so the
+                        // worker's upsertLocal progress + status transitions
+                        // flow through to the DownloadButton.
+                        val downloadRecords by viewModel.downloads.collectAsState()
+                        // Auto preview must resolve through the SAME shared
+                        // selector as playback, not just lastFileId-else-[0] —
+                        // otherwise the previewed version (and the audio/subtitle
+                        // lists derived from it) can describe a file playback
+                        // won't use. TV parity: selectTvDetailDisplayVersion
+                        // does the same.
+                        val videoDisplayVersionIndex = detailDisplayVersionIndex(
+                            versions = detail.versions,
+                            explicitIndex = effectiveSelectedVersionIndex.takeIf { state.hasExplicitVersionSelection },
+                            lastFileId = detail.userData?.lastFileId,
+                            preferredQuality = preferredQuality,
+                            fallbackIndex = effectiveSelectedVersionIndex,
+                        )
+                        val selectedVersion = detail.versions.getOrNull(videoDisplayVersionIndex)
+                        val selectedLocalDownload = selectedVersion?.let { version ->
+                            localDownloadFor(version.fileId)
+                        }
+                        val downloadState = detailDownloadStateFor(
+                            version = selectedVersion,
+                            records = downloadRecords,
+                            hasLocalMedia = selectedVersion?.let { selectedLocalDownload != null },
+                        )
+
+                        val movieResume = playbackResumePosition(detail.userData)
+                        MovieDetailContent(
+                            translation = translationSlot,
+                            detail = state.withPickedSeriesChoices(detail),
+                            similarItems = state.similarItems,
+                            boxSet = state.boxSet,
+                            onOpenBoxSet = { boxSet -> onBoxSetClick(boxSet.id, boxSet.libraryId) },
+                            onBoxSetMovieClick = onBoxSetMovieClick,
+                            portraitArtwork = portraitArtwork,
+                            isFavorite = state.isFavorite,
+                            isInWatchlist = state.isInWatchlist,
+                            selectedVersionIndex = videoDisplayVersionIndex,
+                            isAutoVersion = !state.hasExplicitVersionSelection,
+                            selectedAudioIndex = explicitAudioIndex,
+                            selectedSubtitleIndex = explicitSubtitleIndex,
+                            onPlayClick = {
+                                guardedPlay(
+                                    detail.contentId,
+                                    playbackFileId,
+                                    explicitFileId != null,
+                                    explicitAudioIndex,
+                                    explicitSubtitleIndex,
+                                    movieResume,
+                                )
+                            },
+                            onPlayFromBeginning = movieResume?.let {
+                                {
+                                    guardedPlay(
+                                        detail.contentId,
+                                        playbackFileId,
+                                        explicitFileId != null,
+                                        explicitAudioIndex,
+                                        explicitSubtitleIndex,
+                                        0.0,
+                                    )
+                                }
+                            },
+                            resumeStoppedAtLabel = movieResume?.let { formatResumeStoppedAt(it) },
+                            onFavoriteClick = { viewModel.toggleFavorite() },
+                            onWatchlistClick = { viewModel.toggleWatchlist() },
+                            onToggleWatched = { viewModel.toggleWatched() },
+                            onVersionSelected = { index ->
+                                if (index != null) viewModel.selectVersion(index) else viewModel.selectAutoVersion()
+                            },
+                            onAudioSelected = { index ->
+                                if (index != null) {
+                                    viewModel.selectAudioTrack(index, selectedVersion)
+                                } else {
+                                    viewModel.selectAutoAudioTrack()
+                                }
+                            },
+                            onSubtitleSelected = { index ->
+                                if (index != null) {
+                                    viewModel.selectSubtitle(index, selectedVersion)
+                                } else {
+                                    viewModel.selectAutoSubtitle()
+                                }
+                            },
+                            onPersonClick = onPersonClick,
+                            onSimilarItemClick = onSimilarItemClick,
+                            onPlayExtra = { extra ->
+                                guardedPlay(extra.contentId, extra.fileId, false, null, null, 0.0)
+                            },
+                            onSeriesClick = seriesId?.let { resolvedSeriesId ->
+                                { onSeriesClick(resolvedSeriesId) }
+                            },
+                            seasons = state.seasons,
+                            selectedSeasonNumber = state.selectedSeasonNumber,
+                            episodes = state.episodes,
+                            episodesBySeason = state.episodesBySeason,
+                            isLoadingEpisodes = state.isLoadingEpisodes,
+                            onSeasonSelected = { viewModel.selectSeason(it) },
+                            onEpisodeDetailClick = onEpisodeDetailClick,
+                            onEpisodeWatchedChange = { episodeContentId, watched ->
+                                viewModel.setEpisodeWatched(episodeContentId, watched)
+                            },
+                            isDownloaded = downloadState.isDownloaded,
+                            downloadProgress = downloadState.progress,
+                            onDownloadTapped = selectedVersion?.let { v ->
+                                {
+                                    runDownloadTap(
+                                        downloadState = downloadState,
+                                        directAction = {
+                                            viewModel.onDownloadTapped(
+                                                v,
+                                                detail.title,
+                                                forceRedownloadMissingLocal = downloadState.needsLocalRecovery,
+                                            )
+                                        },
+                                        qualityAction = { quality ->
+                                            viewModel.onDownloadTapped(
+                                                v,
+                                                detail.title,
+                                                forceRedownloadMissingLocal = downloadState.needsLocalRecovery,
+                                                downloadQuality = quality,
+                                            )
+                                        },
+                                        estimate = org.siloserver.silo.model.download.DownloadSizeEstimate
+                                            .estimate(versions = listOf(v), fileId = v.fileId),
+                                    )
+                                }
+                            },
+                            // Movies and episodes stage the displayed edition.
+                            partyAction = partyActions.actionFor(
+                                detail.takeIf { it.type == "movie" || it.type == "episode" }?.let {
+                                    WatchPartyItem(
+                                        contentId = detail.contentId,
+                                        contentType = detail.type,
+                                        title = detail.title,
+                                        subtitle = if (detail.type == "episode") {
+                                            listOfNotNull(
+                                                detail.seriesTitle?.takeIf { value -> value.isNotBlank() },
+                                                detail.seasonNumber?.let { season ->
+                                                    // Sent to the server for the party: English data.
+                                                    detail.episodeNumber?.let { episode -> "S$season·E$episode" }
+                                                },
+                                            ).joinToString(" · ").ifBlank { null }
+                                        } else {
+                                            detail.year.takeIf { year -> year > 0 }?.toString()
+                                        },
+                                        posterUrl = portraitArtwork.url ?: detail.posterUrl,
+                                        fileId = selectedVersion?.fileId,
+                                        libraryId = libraryId,
+                                        spoilers = WatchPartySpoilers.of(detail).let { spoilers ->
+                                            // A season or series poster stands in for an episode's still.
+                                            if (portraitArtwork.url != null) spoilers.copy(posterIsEpisodeStill = false) else spoilers
+                                        },
+                                    )
+                                },
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+
+        if (showDownloadQualityPicker) {
+            DownloadQualityPickerSheet(
+                onQualitySelected = { quality ->
+                    pendingDownloadQualityAction?.let { action ->
+                        val runSelectedQuality: (DownloadQuality) -> Unit = { quality -> action(quality) }
+                        runSelectedQuality(quality)
+                    }
+                    pendingDownloadQualityAction = null
+                    pendingDownloadEstimate = null
+                    pendingDownloadAllowedQualities = emptyList()
+                    showDownloadQualityPicker = false
+                },
+                onDismiss = {
+                    pendingDownloadQualityAction = null
+                    pendingDownloadEstimate = null
+                    pendingDownloadAllowedQualities = emptyList()
+                    showDownloadQualityPicker = false
+                },
+                estimate = pendingDownloadEstimate,
+                availableBytes = remember { downloadStorage.usableSpaceBytes() },
+                allowedQualities = pendingDownloadAllowedQualities,
+                qualityLabel = { quality -> downloadCapability.labelFor(quality) },
+            )
+        }
+
+        WatchPartySoloGuardDialog(soloGuard)
+        partyDialogs()
+
+        if (showRemoteTargetPicker) {
+            SiloCastTargetPickerSheet(
+                onDismiss = { showRemoteTargetPicker = false },
+                controller = siloCastController,
+            )
+        }
+
+        pendingCancelDownloadAction?.let { confirmAction ->
+            SiloConfirmDialog(
+                title = stringResource(CommonR.string.detail_cancelDownload_title),
+                body = stringResource(CommonR.string.detail_cancelDownload_body),
+                confirmLabel = stringResource(CommonR.string.detail_cancelDownload_discard),
+                dismissLabel = stringResource(CommonR.string.detail_cancelDownload_keep),
+                onConfirm = {
+                    pendingCancelDownloadAction = null
+                    confirmAction()
+                },
+                onDismiss = { pendingCancelDownloadAction = null },
+            )
+        }
+
+        }
+        }
+
+        DetailTopChrome(
+            title = state.detail?.title.orEmpty(),
+            scroll = detailScroll,
+            onBackClick = onBackClick,
+            trailing = {
+                IconButton(
+                    onClick = {
+                        if (siloCastState.hasActiveSession) {
+                            remoteMenuExpanded = true
+                        } else {
+                            showRemoteTargetPicker = true
+                        }
+                    },
+                    // Solid pill while a cast session is live, translucent at
+                    // rest, so the fill still reports state.
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (siloCastState.hasActiveSession) {
+                                SiloNavPillSurface
+                            } else {
+                                SiloOverlayPillSurface
+                            },
+                        )
+                        .border(1.dp, SiloNavPillBorder, CircleShape),
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.SettingsRemote,
+                        contentDescription = stringResource(CommonR.string.detail_remoteControl),
+                        tint = Color.White,
+                    )
+                }
+                SiloDropdownMenu(
+                    expanded = remoteMenuExpanded,
+                    onDismissRequest = { remoteMenuExpanded = false },
+                ) {
+                    SiloDropdownMenuItem(
+                        text = { Text(stringResource(CommonR.string.detail_remoteControl)) },
+                        onClick = {
+                            remoteMenuExpanded = false
+                            onOpenCastRemote()
+                        },
+                    )
+                    SiloDropdownMenuItem(
+                        text = { Text(stringResource(CommonR.string.detail_chooseTv)) },
+                        onClick = {
+                            remoteMenuExpanded = false
+                            showRemoteTargetPicker = true
+                        },
+                    )
+                    HorizontalDivider()
+                    SiloDropdownMenuItem(
+                        text = {
+                            Text(stringResource(CommonR.string.detail_turnOffControlMode), color = MaterialTheme.colorScheme.error)
+                        },
+                        onClick = {
+                            remoteMenuExpanded = false
+                            siloCastController.disconnect()
+                        },
+                    )
+                }
+            },
+        )
+    }
+}

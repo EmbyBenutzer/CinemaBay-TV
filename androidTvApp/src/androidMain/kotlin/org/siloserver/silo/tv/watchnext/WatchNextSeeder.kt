@@ -1,0 +1,184 @@
+package org.siloserver.silo.tv.watchnext
+
+import android.app.AlarmManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import androidx.work.Constraints
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.workDataOf
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import java.util.concurrent.TimeUnit
+
+/**
+ * Owns the WorkManager surface for the Watch Next channel.
+ *
+ * - [seedNow] enqueues an expedited one-shot sync — call right after
+ *   auth-success and profile-select so the launcher row reflects the
+ *   user's actual continue-watching / next-up immediately.
+ * - [enqueuePeriodic] keeps a 1h cadence refresh in place; uses KEEP so
+ *   repeated calls don't reset the interval.
+ * - [clear] wipes our rows from the WatchNextPrograms provider and
+ *   cancels the periodic work — call on profile switch and sign-out so
+ *   the previous user's progress doesn't linger on the launcher.
+ */
+class WatchNextSeeder(
+    private val context: Context,
+    private val repository: WatchNextRepository,
+) {
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    // The most recent [clear]'s in-flight provider wipe. [seedNow] joins it so
+    // a clear() → seedNow() sequence (server switch, profile select) can't run
+    // the seed worker while the wipe is still deleting — the wipe would land
+    // AFTER the seed and erase the fresh rows it just inserted.
+    private var clearJob: Job? = null
+
+    private val protectionPrefs = context.getSharedPreferences("silo_watch_next_protection", Context.MODE_PRIVATE)
+
+    // Bumped by every [updateImageProtection] under the prefs lock; a wipe
+    // that finishes after a newer call must not record its older setting.
+    private var protectionGeneration = 0
+
+    /** Clear exposed tiles only when known image protection changes from off to on. */
+    fun updateImageProtection(enabled: Boolean) {
+        val generation = synchronized(protectionPrefs) { ++protectionGeneration }
+        val wasEnabled = protectionPrefs.getBoolean("hide_images", false)
+        if (enabled && !wasEnabled) {
+            clear()
+            // Record the change only once the wipe has finished: a process
+            // death before then must wipe again on the next start.
+            val wipe = clearJob
+            scope.launch {
+                wipe?.join()
+                synchronized(protectionPrefs) {
+                    if (wipe?.isCancelled != true && generation == protectionGeneration) {
+                        protectionPrefs.edit().putBoolean("hide_images", true).apply()
+                    }
+                }
+            }
+        } else {
+            protectionPrefs.edit().putBoolean("hide_images", enabled).apply()
+        }
+        seedNow()
+        enqueuePeriodic()
+    }
+
+    fun seedNow() {
+        val pending = clearJob
+        // A clear() after this call supersedes it: clear() invalidates the
+        // write generation first, so a seed still waiting on an older wipe
+        // must not enqueue after that clear()'s cancellation.
+        val generation = repository.writeGate.capture()
+        scope.launch {
+            pending?.join()
+            if (!repository.writeGate.current(generation)) return@launch
+            val request = OneTimeWorkRequestBuilder<WatchNextSyncWorker>()
+                .setConstraints(networkConstraints)
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .build()
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                WatchNextSyncWorker.UNIQUE_NAME_ONESHOT,
+                ExistingWorkPolicy.REPLACE,
+                request,
+            )
+        }
+    }
+
+    fun enqueuePeriodic() {
+        val request = PeriodicWorkRequestBuilder<WatchNextSyncWorker>(
+            1, TimeUnit.HOURS,
+        )
+            .setConstraints(networkConstraints)
+            .build()
+        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+            WatchNextSyncWorker.UNIQUE_NAME_PERIODIC,
+            ExistingPeriodicWorkPolicy.KEEP,
+            request,
+        )
+    }
+
+    /**
+     * Re-checks Profile Selection when a timed away interval runs out at
+     * [expiresAtMs] (wall clock, like the policy), so the launcher stops
+     * showing this profile's titles then rather than at the next hourly
+     * refresh. Needs no network: it only wipes the row, or does nothing if
+     * Silo was opened in time.
+     *
+     * A wake-up alarm does the timely check, since WorkManager's delay is
+     * only a minimum and JobScheduler never wakes a TV in standby.
+     * [WatchNextProfileExpiryReceiver] re-arms it after a reboot or a clock
+     * change. The WorkManager job stays as a backstop.
+     */
+    fun scheduleProfileExpiryCheck(expiresAtMs: Long) {
+        context.getSystemService(AlarmManager::class.java)?.setWindow(
+            AlarmManager.RTC_WAKEUP,
+            expiresAtMs,
+            EXPIRY_ALARM_WINDOW_MS,
+            PendingIntent.getBroadcast(
+                context,
+                0,
+                Intent(context, WatchNextProfileExpiryReceiver::class.java)
+                    .setAction(WatchNextProfileExpiryReceiver.ACTION_PROFILE_EXPIRY),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            ),
+        )
+        val delayMs = (expiresAtMs - System.currentTimeMillis()).coerceAtLeast(0L)
+        val request = OneTimeWorkRequestBuilder<WatchNextSyncWorker>()
+            .setInitialDelay(delayMs, TimeUnit.MILLISECONDS)
+            .setInputData(workDataOf(WatchNextSyncWorker.KEY_POLICY_CHECK_ONLY to true))
+            .build()
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            WatchNextSyncWorker.UNIQUE_NAME_PROFILE_EXPIRY,
+            ExistingWorkPolicy.REPLACE,
+            request,
+        )
+    }
+
+    /**
+     * Returns the provider wipe, which runs after this returns. [keepRefresh]
+     * leaves the hourly refresh in place for a wipe that only Profile
+     * Selection asked for: each run re-checks the setting, so the row comes
+     * back if the same profile may show it again.
+     */
+    fun clear(keepRefresh: Boolean = false): Job {
+        repository.invalidate()
+        // Cancel FIRST, then wipe. Cancel BOTH the periodic refresh and any
+        // in-flight one-shot seed — without cancelling before the wipe, a
+        // seedNow() that's mid-flight when the user signs out (or switches
+        // profile) races [WatchNextRepository.clearAll] and can re-insert the
+        // previous user's tiles onto the shared launcher after the wipe. The
+        // generation fence rejects old work even before WorkManager delivers
+        // cancellation. The repository orders the wipe after any dispatched
+        // write, and rejects old writers waiting behind that wipe.
+        WorkManager.getInstance(context).apply {
+            if (!keepRefresh) cancelUniqueWork(WatchNextSyncWorker.UNIQUE_NAME_PERIODIC)
+            cancelUniqueWork(WatchNextSyncWorker.UNIQUE_NAME_ONESHOT)
+        }
+        // Cross-process ContentResolver deletes are binder I/O: run them off
+        // the caller's (main) thread so clear() stays cheap for call sites.
+        // Track the wipe so [seedNow] can join it before enqueuing a seed.
+        return scope.launch { repository.clearAll() }.also { clearJob = it }
+    }
+
+    private val networkConstraints = Constraints.Builder()
+        .setRequiredNetworkType(NetworkType.CONNECTED)
+        .build()
+
+    private companion object {
+        // The shortest window an inexact alarm gets from Android 12 on; an
+        // exact alarm would need the SCHEDULE_EXACT_ALARM permission.
+        const val EXPIRY_ALARM_WINDOW_MS = 10 * 60 * 1000L
+    }
+}

@@ -1,0 +1,615 @@
+package org.siloserver.silo.tv.ui.components
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusRestorer
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.ExperimentalComposeUiApi
+import org.siloserver.silo.common.R as CommonR
+import org.siloserver.silo.common.cards.LocalEpisodeSpoilerPrefs
+import org.siloserver.silo.model.section.SectionItem
+import org.siloserver.silo.model.settings.EpisodeSpoilers
+import org.siloserver.silo.overlays.OverlayData
+import org.siloserver.silo.overlays.OverlayDataExtractor
+import org.siloserver.silo.tv.ui.focus.TvFocusLog
+import org.siloserver.silo.tv.ui.theme.TvRailScrollBehavior
+import org.siloserver.silo.tv.ui.theme.tvRailPinOnFocus
+import org.siloserver.silo.tv.ui.theme.Spacing
+import org.siloserver.silo.tv.ui.util.tvArtworkAspectRatioForMediaType
+import org.siloserver.silo.common.diagnostics.DiagnosticsKeyAnomalyLogger
+import org.siloserver.silo.common.diagnostics.DiagnosticsKeyCollection
+import org.siloserver.silo.common.diagnostics.DiagnosticsListSnapshot
+import org.siloserver.silo.common.i18n.isRightToLeftText
+import org.siloserver.silo.common.i18n.LocaleFormat
+import androidx.compose.ui.platform.LocalConfiguration
+
+/** Visual style of cards inside a [TvMediaRow]. */
+enum class TvRowStyle { Poster, Backdrop }
+enum class TvRowCardLayout { Default, ReferenceShelf }
+
+private data class TvMediaRowItemModel(
+    val item: SectionItem,
+    /** Lazy-list key; see [tvMediaRowSlotKeys]. */
+    val slotKey: String,
+    val progress: Float?,
+    val remainingMinutes: Int?,
+    val backdropUrl: String?,
+    val backdropThumbhash: String?,
+    val shelfTitle: String,
+    /** With [shelfEpisodeTag], the line under the shelf title. */
+    val shelfSubtitle: String?,
+    /** The episode tag that leads the subtitle on a progress row ("S01E02 • Title"). */
+    val shelfEpisodeTag: TvHeroFactToken.ResToken?,
+    val overlay: OverlayData,
+    val contentType: String,
+    /** Spoiler protection: blur this card's still (an unstarted episode). */
+    val hidesArtwork: Boolean,
+    /** The same for the poster layout, which shows the item's own poster. */
+    val hidesPoster: Boolean,
+)
+
+/**
+ * Horizontal row with a header and a lazy list of cards. This is the workhorse
+ * of the home screen and library-detail recommended views. The row adds a
+ * little vertical padding so the focus lift on cards doesn't clip against the
+ * top/bottom of its bounds.
+ *
+ * @param items the section items to render.
+ * @param onItemClick fired when a card is pressed.
+ * @param showProgress if true, displays the item's resume progress (used by
+ *  continue-watching rows).
+ * @param style whether to render items as 2:3 posters or 16:9 backdrops.
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+fun TvMediaRow(
+    title: String,
+    items: List<SectionItem>,
+    onItemClick: (contentId: String) -> Unit,
+    modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
+    onSeeAllClick: (() -> Unit)? = null,
+    showProgress: Boolean = false,
+    /**
+     * This profile's own unwatched state per content id, when [items] carry
+     * someone else's progress (a party picker's group progress). Spoiler
+     * protection uses it instead of the items' position.
+     */
+    unwatchedById: Map<String, Boolean>? = null,
+    style: TvRowStyle = TvRowStyle.Poster,
+    cardLayout: TvRowCardLayout = TvRowCardLayout.Default,
+    horizontalPadding: androidx.compose.ui.unit.Dp = Spacing.safeArea,
+    startPadding: androidx.compose.ui.unit.Dp = horizontalPadding,
+    endPadding: androidx.compose.ui.unit.Dp = horizontalPadding,
+    itemSpacing: androidx.compose.ui.unit.Dp = 20.dp,
+    rowTopPadding: androidx.compose.ui.unit.Dp = 24.dp,
+    rowBottomPadding: androidx.compose.ui.unit.Dp = 24.dp,
+    posterWidth: androidx.compose.ui.unit.Dp? = null,
+    eyebrow: String? = null,
+    /** When false, the built-in [TvSectionHeader] is omitted so callers can supply
+     *  their own header above a bare rail (e.g. the detail "More Like This" rail). */
+    showHeader: Boolean = true,
+    itemCardModifier: Modifier = Modifier,
+    upFocusRequester: FocusRequester? = null,
+    onDirectionUp: (() -> Boolean)? = null,
+    firstItemFocusRequester: FocusRequester? = null,
+    firstItemFocusRequest: Int = 0,
+    /** Targets the LazyRow GROUP itself (not a card). Programmatic requests
+     *  that cross this row's focusRestorer toward a descendant card are
+     *  cancelled by its `enter` interception; a request on the group is
+     *  honored, letting callers hop onto the row before targeting card 0. */
+    rowContainerFocusRequester: FocusRequester? = null,
+    firstItemCardModifier: Modifier = Modifier,
+    /** Attaches [restoreFocusRequester] to the card at this index so callers
+     *  can restore focus to the exact card that launched a detail page. While
+     *  set it also becomes the row restorer's enter fallback, so the FIRST
+     *  enter after this row is recreated lands directly on that card instead
+     *  of card 0. Callers should only pass it while a restore is pending. */
+    restoreFocusIndex: Int = -1,
+    restoreFocusRequester: FocusRequester? = null,
+    /** Nonzero only while an exact-card return is pending. The row uses its
+     *  private horizontal state to compose [restoreFocusIndex] before focus is
+     *  requested; ordinary row rendering never changes horizontal position. */
+    restoreFocusRequest: Int = 0,
+    onRestoreFocusTargetPlaced: ((Int, Int) -> Unit)? = null,
+    onRestoreFocusTargetDisposed: ((Int, Int) -> Unit)? = null,
+    /** Fired (on focus GAIN only) with whichever card the user focuses, so the
+     *  Skyline marquee + backdrop can preview the focused item. */
+    onItemFocused: ((SectionItem) -> Unit)? = null,
+    /** Indexed focus callback for callers that maintain a rolling prefetch
+     *  window around the currently focused card. */
+    onItemFocusedAtIndex: ((SectionItem, Int) -> Unit)? = null,
+    /** Reports whether this row or any descendant card currently owns focus. */
+    onRowFocusChanged: ((Boolean) -> Unit)? = null,
+    cardActions: (SectionItem) -> TvMediaCardActions = { TvMediaCardActions() },
+    /** Optional direct long-press action. Null keeps the card's context menu. */
+    longClickAction: (SectionItem) -> (() -> Unit)? = { null },
+    /**
+     * Ends the row with an "Explore all" card that opens the row's full page.
+     * It is an ordinary focusable item after the last card. In the restore
+     * parameters above it sits at index `items.size` of the caller's list.
+     */
+    onExploreAllClick: (() -> Unit)? = null,
+    /** Fired when the "Explore all" card gains focus. */
+    onExploreAllFocused: (() -> Unit)? = null,
+    /**
+     * Poster rows: outlines this card and labels its bottom corner with [markedBadge], such as
+     * the movie on screen in its box set row.
+     */
+    markedContentId: String? = null,
+    markedBadge: String? = null,
+    /**
+     * Set for rows that hold one card per series, such as Continue Watching:
+     * each episode card is keyed by its series, so a refresh that moves a
+     * series on to its next episode updates the card in place and keeps focus.
+     */
+    keyEpisodesBySeries: Boolean = false,
+) {
+    val diagnosticsKeySnapshot = remember(items) {
+        DiagnosticsListSnapshot.fromKeys(items.map { it.contentId })
+    }
+    LaunchedEffect(diagnosticsKeySnapshot) {
+        DiagnosticsKeyAnomalyLogger.snapshot(
+            DiagnosticsKeyCollection.TV_MEDIA_ROW,
+            diagnosticsKeySnapshot,
+        )
+    }
+    if (items.isEmpty()) return
+    val rowState = rememberLazyListState()
+    val spoilerPrefs = LocalEpisodeSpoilerPrefs.current
+    // The configuration: shelf years are written in the app's digits when the model is built.
+    val configuration = LocalConfiguration.current
+    val rowItems = remember(items, showProgress, style, cardLayout, spoilerPrefs, unwatchedById, keyEpisodesBySeries, configuration) {
+        // Deduplicate before keying. A repeated contentId inside one row makes
+        // the lazy list throw ("Key ... was already used"), which is fatal —
+        // and a row has no reason to show the same title twice anyway. Feeds
+        // can legitimately overlap, so this is a property of the row, not a
+        // bug to fix upstream of it.
+        val distinctItems = items.distinctBy { it.contentId }
+        val slotKeys = tvMediaRowSlotKeys(distinctItems, keyEpisodesBySeries)
+        distinctItems.mapIndexed { index, item ->
+            val unwatchedEpisode = item.type.equals("episode", ignoreCase = true) &&
+                (unwatchedById?.get(item.contentId) ?: EpisodeSpoilers.isUnwatched(item))
+            TvMediaRowItemModel(
+                item = item,
+                slotKey = slotKeys[index],
+                progress = if (showProgress) item.progressFraction() else null,
+                remainingMinutes = if (showProgress) item.remainingMinutes() else null,
+                backdropUrl = item.bestBackdropUrl(),
+                backdropThumbhash = item.bestBackdropThumbhash(),
+                shelfTitle = item.shelfTitle(showProgress = showProgress),
+                shelfSubtitle = item.shelfSubtitle(showProgress = showProgress),
+                shelfEpisodeTag = if (showProgress) tvEpisodeTagToken(item.seasonNumber, item.episodeNumber) else null,
+                overlay = OverlayDataExtractor.fromSectionItem(item),
+                contentType = "${cardLayout.name}:${style.name}:${item.type}",
+                // Protect the selected still while preserving series fallback art.
+                hidesArtwork = spoilerPrefs.hidesImage(unwatchedEpisode, EpisodeSpoilers.selectedImageIsStill(item)),
+                hidesPoster = spoilerPrefs.hidesImage(unwatchedEpisode, item.posterIsEpisodeStill),
+            )
+        }
+    }
+    // The caller counts positions in the list it handed us; we render a
+    // deduplicated one, which can be shorter. Translate through contentId so a
+    // duplicate earlier in the row cannot shift the restored card.
+    val restoreFocusContentId = items.getOrNull(restoreFocusIndex)?.contentId
+    // Outbound focus reports also speak the caller's list. distinctBy keeps
+    // first occurrences, so a rendered item's first raw index is itself.
+    val rawIndexByContentId = remember(items) {
+        buildMap {
+            items.forEachIndexed { rawIndex, item ->
+                putIfAbsent(item.contentId, rawIndex)
+            }
+        }
+    }
+    val hasExploreAll = onExploreAllClick != null
+    val restoresExploreAll = hasExploreAll && restoreFocusIndex == items.size
+    val resolvedRestoreFocusIndex = remember(rowItems, restoreFocusContentId, restoresExploreAll) {
+        if (restoresExploreAll) {
+            rowItems.size
+        } else {
+            restoreFocusContentId
+                ?.let { contentId -> rowItems.indexOfFirst { it.item.contentId == contentId } }
+                ?: -1
+        }
+    }
+    val focusSlotCount = rowItems.size + if (hasExploreAll) 1 else 0
+
+    LaunchedEffect(restoreFocusRequest, resolvedRestoreFocusIndex, restoreFocusContentId) {
+        val scrolled = prepareTvMediaRowFocusRestore(
+            requestId = restoreFocusRequest,
+            restoreFocusIndex = resolvedRestoreFocusIndex,
+            itemCount = focusSlotCount,
+            scrollToItem = rowState::scrollToItem,
+        )
+        // A restore scroll that fires while no caller-driven ladder could be
+        // running is the signature of the rail snapping instead of gliding
+        // (the instant jump cancels the pin's animation) — surface it in the
+        // debug focus log rather than leaving it invisible on screen.
+        if (restoreFocusRequest > 0 || scrolled) {
+            TvFocusLog.d {
+                "rail restore scroll request=$restoreFocusRequest " +
+                    "index=$resolvedRestoreFocusIndex scrolled=$scrolled"
+            }
+        }
+    }
+
+    LaunchedEffect(firstItemFocusRequest) {
+        if (firstItemFocusRequest > 0 && firstItemFocusRequester != null) {
+            runCatching { firstItemFocusRequester.requestFocus() }
+        }
+    }
+
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        if (showHeader) {
+            TvSectionHeader(
+                title = title,
+                icon = icon,
+                iconSize = if (showProgress) 22.dp else 18.dp,
+                onSeeAllClick = onSeeAllClick,
+                eyebrow = eyebrow,
+                modifier = Modifier.padding(start = startPadding, end = endPadding),
+            )
+        }
+        TvRailScrollBehavior {
+        LazyRow(
+            state = rowState,
+            // focusRestorer remembers the last-focused card inside this row.
+            // After the user UPs to the menu and DOWNs back to the row,
+            // focus returns to that exact card instead of jumping back to
+            // index 0. The fallback (used the very first time, when nothing
+            // is remembered yet) is the explicit firstItemFocusRequester
+            // attached to index 0 — or Compose's default first-focusable
+            // search if the row wasn't given one.
+            modifier = Modifier
+                .then(
+                    if (rowContainerFocusRequester != null) {
+                        Modifier.focusRequester(rowContainerFocusRequester)
+                    } else {
+                        Modifier
+                    },
+                )
+                .then(
+                    if (onRowFocusChanged != null) {
+                        Modifier.onFocusChanged { state ->
+                            onRowFocusChanged(state.hasFocus)
+                        }
+                    } else {
+                        Modifier
+                    },
+                )
+                .focusRestorer(
+                    restoreFocusRequester ?: firstItemFocusRequester ?: FocusRequester.Default,
+                ),
+            horizontalArrangement = Arrangement.spacedBy(itemSpacing),
+            contentPadding = PaddingValues(
+                start = startPadding,
+                end = endPadding,
+                top = rowTopPadding,
+                bottom = rowBottomPadding,
+            ),
+        ) {
+            /**
+             * Restore target, Up handling, and rail pinning for the slot at
+             * [index]: the same for a card and for the "Explore all" card.
+             */
+            @Composable
+            fun slotFocusModifier(index: Int, isRestoreFocusTarget: Boolean): Modifier = Modifier.then(
+                if (restoreFocusRequester != null && index == resolvedRestoreFocusIndex) {
+                    Modifier.focusRequester(restoreFocusRequester)
+                } else {
+                    Modifier
+                },
+            ).then(
+                if (isRestoreFocusTarget && onRestoreFocusTargetPlaced != null) {
+                    // Caller's coordinates, matching Disposed below: the
+                    // consumer compares this against the index it passed in.
+                    Modifier.onGloballyPositioned {
+                        onRestoreFocusTargetPlaced(restoreFocusRequest, restoreFocusIndex)
+                    }
+                } else {
+                    Modifier
+                },
+            ).then(
+                if (onDirectionUp != null) {
+                    Modifier.onPreviewKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp) {
+                            onDirectionUp?.invoke() ?: false
+                        } else {
+                            false
+                        }
+                    }
+                } else {
+                    Modifier
+                },
+            ).then(
+                if (upFocusRequester != null) {
+                    Modifier.focusProperties { up = upFocusRequester }
+                } else {
+                    Modifier
+                },
+            ).tvRailPinOnFocus(rowState, index, startPadding)
+
+            itemsIndexed(
+                items = rowItems,
+                key = { _, rowItem -> rowItem.slotKey },
+                contentType = { _, rowItem -> rowItem.contentType },
+            ) { index, rowItem ->
+                val item = rowItem.item
+                // A slot keyed by series keeps its card, and its focus, when the
+                // episode in it changes. The card then never gains focus again,
+                // so report the new item here, or the feed would take the old
+                // one as removed and pull focus back as if it had been lost.
+                val focusedAs = remember { mutableStateOf<String?>(null) }
+                val reportFocus = {
+                    onItemFocused?.invoke(item)
+                    onItemFocusedAtIndex?.invoke(
+                        item,
+                        rawIndexByContentId[item.contentId] ?: index,
+                    )
+                }
+                SideEffect {
+                    val focusedContentId = focusedAs.value
+                    if (focusedContentId != null && focusedContentId != item.contentId) {
+                        focusedAs.value = item.contentId
+                        reportFocus()
+                    }
+                }
+                val isRestoreFocusTarget =
+                    restoreFocusRequest > 0 && index == resolvedRestoreFocusIndex
+                if (isRestoreFocusTarget && onRestoreFocusTargetDisposed != null) {
+                    // Report the position the caller asked about, not ours. It
+                    // compares this against the index it passed in, and after
+                    // deduplication the two coordinate spaces can differ.
+                    DisposableEffect(restoreFocusRequest, restoreFocusIndex) {
+                        onDispose {
+                            onRestoreFocusTargetDisposed(restoreFocusRequest, restoreFocusIndex)
+                        }
+                    }
+                }
+                // Always anchor firstItemFocusRequester to index 0 so it can
+                // serve as a stable fallback target for focusRestorer and for
+                // imperative requestFocus() calls from parent screens.
+                val itemFocusRequester = firstItemFocusRequester.takeIf { index == 0 }
+                val appliedCardModifier = itemCardModifier.then(
+                    if (index == 0) firstItemCardModifier else Modifier,
+                ).then(
+                    slotFocusModifier(index, isRestoreFocusTarget),
+                )
+                .then(
+                    if (onItemFocused != null || onItemFocusedAtIndex != null) {
+                        Modifier.onFocusChanged { st ->
+                            focusedAs.value = if (st.isFocused) item.contentId else null
+                            if (st.isFocused) reportFocus()
+                        }
+                    } else {
+                        Modifier
+                    },
+                )
+                // Memoised per item: the producer builds a fresh action bundle
+                // (four fresh lambdas) on every call, and TvMediaCardActions is
+                // a data class comparing those lambdas by identity — so without
+                // this no visible card could ever skip recomposition once its
+                // row recomposed (which the feed does on every focus move).
+                //
+                // Keyed on the PRODUCER as well as the item: what the bundle
+                // contains depends on what the producer closes over, not only on
+                // the item — Home decides whether to expose "remove from continue
+                // watching" from the section it is building actions for. An
+                // item-only key would keep a stale bundle (and stale callback
+                // owners) after a refresh that reclassifies the section while
+                // leaving the item equal (Codex).
+                val itemActions = remember(item, cardActions) { cardActions(item) }
+                val itemLongClick = remember(item, longClickAction) { longClickAction(item) }
+                when (cardLayout) {
+                    TvRowCardLayout.ReferenceShelf -> TvReferenceShelfCard(
+                        hideArtwork = rowItem.hidesArtwork,
+                        title = rowItem.shelfTitle,
+                        imageUrl = rowItem.backdropUrl,
+                        imageThumbhash = rowItem.backdropThumbhash,
+                        subtitle = rowItem.shelfEpisodeTag
+                            ?.let { tag ->
+                                listOfNotNull(tag.resolved(), rowItem.shelfSubtitle?.let { bidiIsolated(it, isRightToLeftText()) })
+                                    .joinToString(" • ")
+                            }
+                            ?: rowItem.shelfSubtitle,
+                        detail = if (showProgress) rowItem.remainingMinutes?.let { stringResource(CommonR.string.shell_card_minutesLeft, it) } else null,
+                        mediaType = item.type,
+                        progress = rowItem.progress,
+                        onClick = { onItemClick(item.contentId) },
+                        focusRequester = itemFocusRequester,
+                        cardModifier = appliedCardModifier,
+                        userState = item.userState,
+                        actions = itemActions,
+                        contentKey = item.contentId,
+                        onLongClick = itemLongClick,
+                    )
+                    TvRowCardLayout.Default -> when (style) {
+                        TvRowStyle.Backdrop -> TvEpisodeCard(
+                            title = item.title,
+                            stillUrl = rowItem.backdropUrl,
+                            stillThumbhash = rowItem.backdropThumbhash,
+                            hideStill = rowItem.hidesArtwork,
+                            seriesTitle = item.seriesTitle,
+                            seasonNumber = item.seasonNumber,
+                            episodeNumber = item.episodeNumber,
+                            mediaType = item.type,
+                            progress = rowItem.progress,
+                            year = item.year.takeIf { it > 0 },
+                            onClick = { onItemClick(item.contentId) },
+                            focusRequester = itemFocusRequester,
+                            cardModifier = appliedCardModifier,
+                            userState = item.userState,
+                            overlay = rowItem.overlay,
+                            actions = itemActions,
+                            contentKey = item.contentId,
+                            onLongClick = itemLongClick,
+                        )
+                        TvRowStyle.Poster -> TvMediaCard(
+                            seriesContentId = cinemaBaySeriesBadgeId(item.type, item.contentId, item.seriesId),
+                            allowTrailerPreview = true,
+                            hideArtwork = rowItem.hidesPoster,
+                            title = item.title,
+                            posterUrl = item.posterUrl,
+                            posterThumbhash = item.posterThumbhash,
+                            year = item.year.takeIf { it > 0 },
+                            userState = item.userState,
+                            progress = rowItem.progress,
+                            mediaType = item.type,
+                            width = posterWidth ?: tvCardWidth(),
+                            onClick = { onItemClick(item.contentId) },
+                            focusRequester = itemFocusRequester,
+                            cardModifier = appliedCardModifier,
+                            overlay = rowItem.overlay,
+                            actions = itemActions,
+                            contentKey = item.contentId,
+                            onLongClick = itemLongClick,
+                            // Bottom corner: the top corners hold the quality overlays and watched check.
+                            cornerLabel = markedBadge.takeIf { item.contentId == markedContentId },
+                            highlighted = markedContentId != null && item.contentId == markedContentId,
+                        )
+                    }
+                }
+            }
+            if (onExploreAllClick != null) {
+                item(key = TvExploreAllItemKey, contentType = "explore-all:${cardLayout.name}:${style.name}") {
+                    val index = rowItems.size
+                    val isRestoreFocusTarget = restoreFocusRequest > 0 && index == resolvedRestoreFocusIndex
+                    if (isRestoreFocusTarget && onRestoreFocusTargetDisposed != null) {
+                        DisposableEffect(restoreFocusRequest, restoreFocusIndex) {
+                            onDispose {
+                                onRestoreFocusTargetDisposed(restoreFocusRequest, restoreFocusIndex)
+                            }
+                        }
+                    }
+                    TvExploreAllCard(
+                        style = style,
+                        cardLayout = cardLayout,
+                        // Square like the row's cards when they are (audiobooks).
+                        artworkAspectRatio = tvArtworkAspectRatioForMediaType(rowItems.lastOrNull()?.item?.type),
+                        posterWidth = posterWidth ?: tvCardWidth(),
+                        onClick = onExploreAllClick,
+                        cardModifier = itemCardModifier
+                            .then(slotFocusModifier(index, isRestoreFocusTarget))
+                            .then(
+                                if (onExploreAllFocused != null) {
+                                    Modifier.onFocusChanged { if (it.isFocused) onExploreAllFocused() }
+                                } else {
+                                    Modifier
+                                },
+                            ),
+                    )
+                }
+            }
+        }
+        }
+    }
+}
+
+/** LazyRow key of the "Explore all" card; content ids never contain NUL. */
+private const val TvExploreAllItemKey = "\u0000explore-all"
+
+internal suspend fun prepareTvMediaRowFocusRestore(
+    requestId: Int,
+    restoreFocusIndex: Int,
+    itemCount: Int,
+    scrollToItem: suspend (Int) -> Unit,
+): Boolean {
+    if (requestId <= 0 || restoreFocusIndex !in 0 until itemCount) return false
+    scrollToItem(restoreFocusIndex)
+    return true
+}
+
+/** Fraction [0..1] of item consumed for "continue watching" progress bars. */
+private fun SectionItem.progressFraction(): Float? {
+    val pos = positionSeconds ?: return null
+    val dur = durationSeconds ?: return null
+    if (dur <= 0) return null
+    return (pos / dur).toFloat().coerceIn(0f, 1f)
+}
+
+/** Remaining runtime for layouts that expose it inside the card itself. */
+private fun SectionItem.remainingMinutes(): Int? {
+    val pos = positionSeconds ?: return null
+    val dur = durationSeconds ?: return null
+    if (dur <= 0 || pos >= dur) return null
+    return ((dur - pos) / 60.0).toInt()
+}
+
+/** Prefer wide artwork for 16:9 row cards, falling back to poster only if needed. */
+private fun SectionItem.bestBackdropUrl(): String? {
+    return backdropUrl?.takeIf { it.isNotBlank() } ?: posterUrl
+}
+
+private fun SectionItem.bestBackdropThumbhash(): String? {
+    return if (!backdropUrl.isNullOrBlank()) backdropThumbhash else posterThumbhash
+}
+
+private fun SectionItem.shelfTitle(showProgress: Boolean): String {
+    return if (showProgress && !seriesTitle.isNullOrBlank()) {
+        seriesTitle ?: title
+    } else {
+        title
+    }
+}
+
+private fun SectionItem.shelfSubtitle(showProgress: Boolean): String? {
+    // A progress row's episode tag is [TvMediaRowItemModel.shelfEpisodeTag], added when drawn.
+    if (showProgress) return title.takeIf { it.isNotBlank() }
+    return when {
+        year > 0 && genres.isNotEmpty() -> "${LocaleFormat.integer(year)} • ${genres.first()}"
+        year > 0 -> LocaleFormat.integer(year)
+        genres.isNotEmpty() -> genres.first()
+        else -> null
+    }
+}
+
+/**
+ * Lazy-list keys for a row's cards, one per item.
+ *
+ * With [keyEpisodesBySeries], an episode is keyed by its series, so a refresh
+ * that moves the series on to its next episode (Continue Watching after
+ * playback, or progress from another device) updates the card in place. Keyed
+ * by episode, the focused card would be disposed, and Compose would hand focus
+ * to the first focusable on screen, the top bar's Search button. tvOS keeps
+ * focus on the card that takes the slot. Only the caller knows a row holds one
+ * card per series; a series that shows up twice anyway falls back to content
+ * ids, since a repeated key is fatal to the lazy list.
+ */
+internal fun tvMediaRowSlotKeys(items: List<SectionItem>, keyEpisodesBySeries: Boolean): List<String> {
+    if (!keyEpisodesBySeries) return items.map { it.contentId }
+    fun seriesOf(item: SectionItem): String? =
+        item.seriesId?.takeIf { it.isNotBlank() && item.type.equals("episode", ignoreCase = true) }
+    val cardsPerSeries = items.mapNotNull(::seriesOf).groupingBy { it }.eachCount()
+    // The NUL prefix keeps a series key from ever equalling a content id, as
+    // TvExploreAllItemKey does.
+    return items.map { item ->
+        seriesOf(item)?.takeIf { cardsPerSeries[it] == 1 }?.let { "\u0000series-slot:$it" } ?: item.contentId
+    }
+}

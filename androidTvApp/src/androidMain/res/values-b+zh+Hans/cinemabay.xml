@@ -1,0 +1,34 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+  <string name="app_name">CinemaBay</string>
+  <string name="android_settings_appLanguageFooter">此个人资料在所有设备上的CinemaBay菜单和按钮语言。音频、字幕和元数据语言是单独的设置项。</string>
+  <plurals name="diagnostics_capture_hostedFooter">
+    <item quantity="other">报告包含CinemaBay应用的版本和构建号、Android版本、设备型号、崩溃详情以及你查看过的诊断日志。假名化安装凭据不会与你自托管服务器上的账户关联。报告不包含用户名、电子邮件、个人资料、服务器地址和播放会话ID。报告绝不会自动发送，最多可能保留%1$d天。</item>
+  </plurals>
+  <plurals name="diagnostics_capture_hostedFooterTv">
+    <item quantity="other">报告包含CinemaBay应用的版本和构建号、Android版本、设备型号、崩溃详情以及你查看过的诊断日志。假名化安装凭据不会与你自托管服务器上的账户关联。报告不包含用户名、电子邮件、个人资料、服务器地址和播放会话ID。报告绝不会自动发送，最多可能保留%1$d天。完整政策：%2$s</item>
+  </plurals>
+  <string name="diagnostics_prompt_privacyNotice">报告包含CinemaBay应用的版本和构建号、Android版本、设备型号、崩溃详情和诊断日志。其假名化凭据不会与你自托管服务器上的账户关联。报告不包含用户名、电子邮件、个人资料、服务器地址和播放会话ID。报告绝不会自动发送，最多可能保留30天。</string>
+  <string name="diagnostics_prompt_title">CinemaBay遇到了问题</string>
+  <string name="settings_bufferingQuality_description">在“自动”模式下播放持续缓冲时CinemaBay的处理方式。如果画质是你手动选择的，CinemaBay总会先询问再降低。</string>
+  <string name="settings_episodes_footer">继续播放时回退：返回看了一部分的作品时向后跳转。仍在观看提示：设置连续播放多少集后，CinemaBay会询问你是否仍在观看。</string>
+  <string name="settings_notifications_inAppFooter">有新内容上线时，在CinemaBay内显示提醒。</string>
+  <string name="settings_profileLaunch_afterOneHour_detail">离开CinemaBay 1小时后显示“谁在观看”。</string>
+  <string name="settings_profileLaunch_afterTwelveHours_detail">离开CinemaBay 12小时后显示“谁在观看”。</string>
+  <string name="settings_profileLaunch_askEveryLaunch_detail">每次返回CinemaBay时显示“谁在观看”。</string>
+  <string name="settings_profileSelection_footer">选择CinemaBay何时询问谁在观看。此设置仅适用于此设备。</string>
+  <string name="settings_streaming_footer">%1$s强制HDR直通：在这台电视未报告支持HDR时仍允许HDR播放。它不会强制HDMI输出切换为HDR，Android仍可能将画面转换为SDR。仅在确认你的电视支持来源格式时开启。不支持的格式可能导致黑屏或颜色异常。真黑边：让CinemaBay在播放时不再绘制画面周围的黑边。如果在HDR或Dolby Vision下黑边看起来发灰，可以尝试开启；如果黑边变亮或出现细线，请再次关闭。</string>
+  <string name="settingsManifest_catalog_metadata_language_description">CinemaBay在标题、简介和图片上优先使用的备用语言。</string>
+  <string name="settingsManifest_playback_audio_language_description">选择CinemaBay优先使用的语音语言。</string>
+  <string name="settingsManifest_playback_auto_skip_intro_description">CinemaBay检测到片头时自动跳过。</string>
+  <string name="settingsManifest_playback_auto_skip_recap_description">CinemaBay检测到“前情提要”时自动跳过。</string>
+  <string name="settingsManifest_playback_buffering_quality_mode_description">在自动模式下播放持续缓冲时CinemaBay的处理方式。降低你手动选择的画质前，CinemaBay总会先询问你。</string>
+  <string name="settingsManifest_playback_intro_skip_mode_description">片头开始时CinemaBay的处理方式：不做处理、显示“跳过片头”按钮，或直接跳过并提供撤销选项。</string>
+  <string name="settingsManifest_playback_max_bitrate_kbps_description">限制播放可使用的带宽。不设上限时，CinemaBay会根据所选分辨率自动选择。</string>
+  <string name="settingsManifest_playback_preferred_quality_description">选择CinemaBay优先使用的画质。</string>
+  <string name="settingsManifest_playback_subtitle_language_description">选择CinemaBay优先使用的字幕语言。</string>
+  <string name="settingsManifest_playback_subtitle_mode_description">CinemaBay何时开启字幕。</string>
+  <string name="settingsManifest_player_passout_threshold_description">自动播放多少集后，CinemaBay会询问你是否仍在观看。设为0则从不询问。</string>
+  <string name="settingsManifest_subtitle_matches_device_description">使用操作系统的字幕样式，而不是CinemaBay的样式。</string>
+  <string name="settingsManifest_ui_theme_description">CinemaBay界面的颜色主题。</string>
+</resources>

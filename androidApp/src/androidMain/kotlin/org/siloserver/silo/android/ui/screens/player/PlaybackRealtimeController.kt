@@ -1,0 +1,120 @@
+package org.siloserver.silo.android.ui.screens.player
+
+import org.siloserver.silo.network.PlaybackRealtimeClient
+import org.siloserver.silo.network.PlaybackRealtimeEvent
+import org.siloserver.silo.playback.PlaybackAction
+import org.siloserver.silo.playback.decodeMarkersUpdate
+import org.siloserver.silo.playback.decodePlaybackSubtitleReady
+import org.siloserver.silo.playback.decodePlaybackSubtitleSyncUpdated
+import org.siloserver.silo.playback.decodePlaybackSubtitleTimingChanged
+import org.siloserver.silo.playback.decidePlaybackAction
+import org.siloserver.silo.playback.isTransport
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+
+/**
+ * Binds the per-session playback control socket to [PlayerViewModel] for the
+ * lifetime of a player screen. Active whenever a playback [sessionId] exists.
+ * Applies remote commands via the VM's remote-control surface and acks/results
+ * each one. Socket loss does not interrupt playback — the loop reconnects with
+ * capped backoff; hello is sent on the [PlaybackRealtimeEvent.Opened] event so
+ * the server marks the connection control-ready (R2).
+ */
+class PlaybackRealtimeController(
+    private val sessionId: String,
+    private val client: PlaybackRealtimeClient,
+    private val viewModel: PlayerViewModel,
+    private val scope: CoroutineScope,
+    /**
+     * Watch Party only: routes a transport command through the room's
+     * permission decision and says whether the room took it. Stop is not
+     * transport here; it ends only this device's engagement.
+     */
+    private val roomTransport: ((PlaybackAction) -> Boolean)? = null,
+) {
+    private companion object {
+        const val BACKOFF_START_MS = 2_000L
+        const val BACKOFF_MAX_MS = 30_000L
+        const val STATUS_COMPLETED = "completed"
+        const val STATUS_REJECTED = "rejected"
+    }
+
+    fun start() {
+        scope.launch {
+            var backoff = BACKOFF_START_MS
+            while (isActive) {
+                try {
+                    client.connect(sessionId).collect { event ->
+                        when (event) {
+                            is PlaybackRealtimeEvent.Opened -> {
+                                client.sendHello(sessionId)
+                                viewModel.reconcileMarkers(sessionId)
+                            }
+                            is PlaybackRealtimeEvent.Command -> handleCommand(event)
+                            is PlaybackRealtimeEvent.ServerEvent -> handleServerEvent(event)
+                            is PlaybackRealtimeEvent.Closed -> { /* fall through to reconnect */ }
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e // screen left / sessionId changed — stop the loop
+                } catch (_: Throwable) {
+                    // A send failed during a close race etc. — don't let the
+                    // controller die; fall through to the backoff + reconnect.
+                }
+                // socket closed / errored; back off and retry.
+                delay(backoff)
+                backoff = (backoff * 2).coerceAtMost(BACKOFF_MAX_MS)
+            }
+        }
+    }
+
+    private suspend fun handleCommand(cmd: PlaybackRealtimeEvent.Command) {
+        client.sendAck(sessionId, cmd.commandId)
+        val action = decidePlaybackAction(cmd)
+        // A Watch Party is authoritative for transport: play, pause, and seek
+        // ask the room like any other input and never move this player alone.
+        // Stop still leaves (see PlayerScreen), ending only this engagement.
+        val roomRouted = roomTransport != null && action.isTransport && action !is PlaybackAction.Stop
+        val gated = roomTransport == null && action.isTransport && viewModel.remoteTransportSuppressed
+        val status = when {
+            action is PlaybackAction.Reject || gated -> STATUS_REJECTED
+            roomRouted -> if (requireNotNull(roomTransport)(action)) STATUS_COMPLETED else STATUS_REJECTED
+            else -> STATUS_COMPLETED
+        }
+        // Send the result BEFORE applying: a Stop tears the screen down (which
+        // cancels this coroutine), so applying first could drop the result.
+        client.sendResult(sessionId, cmd.commandId, status)
+        if (!gated && !roomRouted) applyAction(action)
+    }
+
+    private fun applyAction(action: PlaybackAction) {
+        when (action) {
+            is PlaybackAction.Pause -> viewModel.remotePause()
+            is PlaybackAction.Unpause -> viewModel.remoteUnpause()
+            is PlaybackAction.TogglePlayPause -> viewModel.remoteTogglePlayPause()
+            is PlaybackAction.SeekTo -> viewModel.remoteSeek(action.positionSeconds)
+            is PlaybackAction.ShowMessage -> viewModel.remoteDisplayMessage(action.message)
+            is PlaybackAction.Stop -> viewModel.remoteStop(action.notice)
+            is PlaybackAction.SetAudioTrack -> viewModel.remoteSelectAudio(action.index)
+            is PlaybackAction.SetSubtitleTrack -> viewModel.remoteSelectSubtitle(action.index)
+            is PlaybackAction.Ignore, is PlaybackAction.Reject -> Unit
+        }
+    }
+
+    private fun handleServerEvent(event: PlaybackRealtimeEvent.ServerEvent) {
+        when (event.name) {
+            "subtitle_ready" -> viewModel.applySubtitleReady(decodePlaybackSubtitleReady(event))
+            "subtitle_timing_changed" ->
+                viewModel.applySubtitleTimingChanged(decodePlaybackSubtitleTimingChanged(event))
+            "subtitle_sync_updated" ->
+                viewModel.applySubtitleSyncUpdated(decodePlaybackSubtitleSyncUpdated(event))
+            "markers_updated" -> viewModel.applyMarkersUpdate(decodeMarkersUpdate(event))
+            // chapter_thumbnail_ready: no scrubber-thumbnail UI yet → nothing to update.
+            else -> { /* ignore */ }
+        }
+    }
+}

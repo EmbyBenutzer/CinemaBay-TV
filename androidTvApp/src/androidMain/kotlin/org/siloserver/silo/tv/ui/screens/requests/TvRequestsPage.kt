@@ -1,0 +1,831 @@
+package org.siloserver.silo.tv.ui.screens.requests
+
+import org.siloserver.silo.common.i18n.UiText
+import org.siloserver.silo.common.i18n.text
+import androidx.compose.runtime.rememberCoroutineScope
+import org.siloserver.silo.common.requests.rememberRequestRouter
+import org.siloserver.silo.model.request.RequestDiscoverySection
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Inbox
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusRestorer
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import android.content.res.Resources
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.tv.material3.Icon
+import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.Text
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import org.koin.compose.koinInject
+import org.koin.compose.viewmodel.koinViewModel
+import org.koin.core.parameter.parametersOf
+import org.siloserver.silo.common.R as CommonR
+import org.siloserver.silo.common.cards.LocalCardPresentation
+import org.siloserver.silo.common.requests.RequestRowCopy
+import org.siloserver.silo.common.requests.RequestStageTrack
+import org.siloserver.silo.model.catalog.ExternalRatings
+import org.siloserver.silo.model.request.MediaRequest
+import org.siloserver.silo.common.i18n.stringResourceWithNames
+import org.siloserver.silo.model.request.RequestDisplayState
+import org.siloserver.silo.model.request.RequestMediaResult
+import org.siloserver.silo.model.request.RequestProgress
+import org.siloserver.silo.model.request.requestBackdropUrl
+import org.siloserver.silo.model.request.requestPosterUrl
+import org.siloserver.silo.model.section.SectionItem
+import org.siloserver.silo.repository.RequestsRepository
+import org.siloserver.silo.tv.ui.components.TvDialog
+import org.siloserver.silo.tv.ui.components.TvDialogAction
+import org.siloserver.silo.tv.ui.components.TvDialogActionStyle
+import org.siloserver.silo.tv.ui.components.TvErrorScreen
+import org.siloserver.silo.tv.ui.components.TvFocusMarquee
+import org.siloserver.silo.tv.ui.components.TvHeroFactToken
+import org.siloserver.silo.tv.ui.components.TvMarqueeContent
+import org.siloserver.silo.tv.ui.components.TvRootHeroBackdrop
+import org.siloserver.silo.tv.ui.components.TvSectionHeader
+import org.siloserver.silo.tv.ui.components.LocalAmbientBackdropTint
+import org.siloserver.silo.tv.ui.components.TvSkylineBringIntoViewSpec
+import org.siloserver.silo.tv.ui.components.TvSkylineItemSpacing
+import org.siloserver.silo.tv.ui.components.TvSkylineMarqueeBottomGap
+import org.siloserver.silo.tv.ui.components.TvSkylineRowBandBottomInset
+import org.siloserver.silo.tv.ui.components.TvSkylineRowBandMaxFraction
+import org.siloserver.silo.tv.ui.components.TvSkylineRowCardVerticalPadding
+import org.siloserver.silo.tv.ui.components.TvSkylineRowPreviewSpacing
+import org.siloserver.silo.tv.ui.components.rememberAmbientBackdropTintState
+import org.siloserver.silo.tv.ui.components.tvSkylineRowBandHeight
+import org.siloserver.silo.tv.ui.focus.TvContentInitialFocusMaxAttempts
+import org.siloserver.silo.tv.ui.focus.TvObservedFocusResult
+import org.siloserver.silo.tv.ui.focus.TvReturnResolution
+import org.siloserver.silo.tv.ui.focus.TvReturnSection
+import org.siloserver.silo.tv.ui.focus.TvReturnTarget
+import org.siloserver.silo.tv.ui.focus.resolveTvReturnTarget
+import org.siloserver.silo.tv.ui.focus.requestFocusUntilObserved
+import org.siloserver.silo.tv.ui.theme.DarkSurfaceElevated
+import org.siloserver.silo.tv.ui.theme.SiloOnSurface
+import org.siloserver.silo.tv.ui.theme.Spacing
+import org.siloserver.silo.tv.ui.theme.TvSkyline
+import org.siloserver.silo.viewmodel.MyRequestsViewModel
+import org.siloserver.silo.viewmodel.RequestsViewModel
+import org.siloserver.silo.common.i18n.LocaleInteger
+
+/**
+ * The Requests page, opened from the profile menu, in the Skyline layout
+ * Home and the library tabs use: an ambient backdrop and a passive preview panel that follow the focused
+ * card, including its request status and stage track, over horizontally
+ * scrolling rows in the bottom band (the tvOS `TVRequestsPage`). Rows: the
+ * user's own requests, then the discover carousels. Request administration
+ * (approve, decline, retry) stays in web admin.
+ *
+ * Focus: the page claims the first card when the tab is selected, and the last
+ * focused card when it returns from a detail page. Up from the first row
+ * reaches the top bar through the shell. Loading, empty, and error states own
+ * focus themselves, so entry always lands somewhere.
+ */
+@Composable
+fun TvRequestsPage(
+    onOpenLibraryItem: (contentId: String) -> Unit,
+    onOpenRequestDetail: (mediaType: String, tmdbId: Int) -> Unit,
+    onInitialContentFocus: () -> Unit,
+    onFocusHandoffFailed: () -> Unit = {},
+    /** Shell token bumped when the tab is selected from the bar. */
+    focusRequest: Int = 0,
+    hub: RequestsViewModel = koinViewModel(key = "tv-requests-hub") { parametersOf(false) },
+    /** For Cancel and Remove on the user's own cards; the hub's list shows the rows. */
+    mine: MyRequestsViewModel = koinViewModel(key = "tv-requests-mine") { parametersOf(false) },
+    repository: RequestsRepository = koinInject(),
+) {
+    val hubState by hub.uiState.collectAsState()
+    val mineState by mine.uiState.collectAsState()
+    var hasLoaded by rememberSaveable { mutableStateOf(false) }
+    var actionTarget by remember { mutableStateOf<TvRequestItem?>(null) }
+    /** The failed request whose removal waits on its confirmation. */
+    var removeTarget by remember { mutableStateOf<MediaRequest?>(null) }
+    val scope = rememberCoroutineScope()
+
+    // Rows appear together once every read for the page has answered, so the
+    // first row never changes under a focused card. Re-read on every return.
+    suspend fun load() {
+        hub.fetch()
+        hasLoaded = true
+    }
+    LaunchedEffect(Unit) { load() }
+
+    val mineTitle = stringResource(CommonR.string.requests_yourRequests)
+    val discoverLabel = stringResource(CommonR.string.requests_hub_discover)
+    val rows = if (hasLoaded) tvRequestRows(hubState.myRequests, hubState.sections, mineTitle, discoverLabel) else emptyList()
+    // A failed cancel's or removal's reason, or a removal's confirmation, shows
+    // for a few seconds. The view models outlive this page's composition (a
+    // detail push and Back re-enter it), so remember what was already shown
+    // and replay nothing.
+    // Held as UiText and resolved where it shows, so it follows an in-place language change.
+    var transientMessage by remember { mutableStateOf<UiText?>(null) }
+    // Saved state can't hold the message itself, so it keeps the message's
+    // identity: its description, which doesn't change with the app language.
+    val cancelMessage = mineState.actionErrorMessage
+    var seenCancelMessage by rememberSaveable { mutableStateOf(cancelMessage?.toString()) }
+    var seenNotice by rememberSaveable { mutableStateOf(mineState.notice?.sequence) }
+    suspend fun showTransient(message: UiText) {
+        transientMessage = message
+        delay(ActionMessageMs)
+        if (transientMessage == message) transientMessage = null
+    }
+    LaunchedEffect(cancelMessage) {
+        val message = cancelMessage
+        // Cleared by the next action: the same message after it is a new one.
+        if (message == null) seenCancelMessage = null
+        if (message == null || message.toString() == seenCancelMessage) return@LaunchedEffect
+        seenCancelMessage = message.toString()
+        showTransient(message.text)
+    }
+    LaunchedEffect(mineState.notice) {
+        val notice = mineState.notice
+        if (notice == null || notice.sequence == seenNotice) return@LaunchedEffect
+        seenNotice = notice.sequence
+        showTransient(notice.message.text)
+    }
+    val actionMessage = transientMessage
+
+    val router = rememberRequestRouter(repository, onOpenLibraryItem, onOpenRequestDetail)
+    fun open(item: TvRequestItem) {
+        when (item) {
+            is TvRequestItem.Record -> router.openRecord(item.record)
+            is TvRequestItem.Result -> router.openResult(item.result)
+        }
+    }
+
+    fun actionsFor(item: TvRequestItem): List<TvRequestAction> =
+        item.actions(canCancel = mineState::canCancel, canRemove = mineState::canRemove)
+
+    val target = actionTarget
+    val targetActions = target?.let(::actionsFor).orEmpty()
+    // A card's actions can lapse while its dialog is up (an action on it
+    // started elsewhere); the dialog closes rather than offer nothing.
+    LaunchedEffect(target, targetActions.isEmpty()) {
+        if (target != null && targetActions.isEmpty()) actionTarget = null
+    }
+    if (target != null && targetActions.isNotEmpty()) {
+        TvRequestActionDialog(
+            item = target,
+            actions = targetActions,
+            onDismiss = { actionTarget = null },
+            onAction = { action, record ->
+                actionTarget = null
+                when (action) {
+                    // The hub's list shows the row; it settles an uncertain cancel.
+                    TvRequestAction.Cancel -> mine.cancel(record, refresh = { hub.fetch() })
+                    TvRequestAction.Remove -> removeTarget = record
+                }
+            },
+        )
+    }
+    removeTarget?.let { record ->
+        // Keep request comes first and takes focus, so a stray Select deletes nothing.
+        TvDialog(
+            title = stringResource(CommonR.string.requests_remove_title),
+            message = stringResourceWithNames(CommonR.string.requests_remove_message, record.title),
+            onDismissRequest = { removeTarget = null },
+            actions = listOf(
+                TvDialogAction(label = stringResource(CommonR.string.requests_remove_keep), onClick = { removeTarget = null }),
+                TvDialogAction(
+                    label = stringResource(CommonR.string.requests_remove_confirm),
+                    onClick = {
+                        removeTarget = null
+                        // The hub's list shows the row; it re-reads unless the removal is confirmed.
+                        mine.removeFailed(record, refresh = { hub.fetch() })
+                    },
+                    style = TvDialogActionStyle.Destructive,
+                ),
+            ),
+        )
+    }
+
+    Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        if (rows.isEmpty()) {
+            TvRequestsPlaceholder(
+                hasLoaded = hasLoaded,
+                error = hubState.error?.text(),
+                focusRequest = focusRequest,
+                onRetry = {
+                    hasLoaded = false
+                    scope.launch { load() }
+                },
+                onInitialContentFocus = onInitialContentFocus,
+                onFocusHandoffFailed = onFocusHandoffFailed,
+            )
+        } else {
+            TvRequestsFeed(
+                rows = rows,
+                focusRequest = focusRequest,
+                onOpen = ::open,
+                // A card with nothing to offer ignores the long-press.
+                onLongPress = { item -> if (actionsFor(item).isNotEmpty()) actionTarget = item },
+                onInitialContentFocus = onInitialContentFocus,
+                onFocusHandoffFailed = onFocusHandoffFailed,
+            )
+        }
+        if (actionMessage != null) {
+            Text(
+                text = actionMessage.text(),
+                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp),
+                color = SiloOnSurface,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = TvSkyline.safeAreaX, bottom = 20.dp)
+                    .background(DarkSurfaceElevated.copy(alpha = 0.92f), RoundedCornerShape(50))
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+            )
+        }
+    }
+}
+
+// ── Rows ─────────────────────────────────────────────────────
+
+internal data class TvRequestRow(
+    val id: String,
+    val title: String,
+    val items: List<TvRequestItem>,
+    val label: String? = null,
+) {
+    /** Page-unique focus key: the same title can sit in two rows. */
+    fun key(item: TvRequestItem): String = "$id|${item.id}"
+}
+
+internal sealed interface TvRequestItem {
+    val id: String
+
+    /** One of the signed-in user's requests. */
+    data class Record(val record: MediaRequest) : TvRequestItem {
+        override val id: String get() = "request:${record.id}"
+    }
+
+    data class Result(val result: RequestMediaResult) : TvRequestItem {
+        override val id: String get() = "tmdb:${result.mediaType}:${result.tmdbId}"
+    }
+}
+
+private fun tvRequestRows(
+    myRequests: List<MediaRequest>,
+    sections: List<RequestDiscoverySection>,
+    mineTitle: String,
+    discoverLabel: String,
+): List<TvRequestRow> = buildList {
+    val mine = myRequests.filterTvMediaRequests()
+    if (mine.isNotEmpty()) add(TvRequestRow("mine", mineTitle, mine.map { TvRequestItem.Record(it) }))
+    sections.filterTvRequestSections().forEachIndexed { index, section ->
+        add(
+            TvRequestRow(
+                id = "discover:${section.key}",
+                title = section.title,
+                items = section.results.map { TvRequestItem.Result(it) },
+                label = if (index == 0) discoverLabel else null,
+            ),
+        )
+    }
+}
+
+// ── Feed ─────────────────────────────────────────────────────
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun TvRequestsFeed(
+    rows: List<TvRequestRow>,
+    focusRequest: Int,
+    onOpen: (TvRequestItem) -> Unit,
+    onLongPress: (TvRequestItem) -> Unit,
+    onInitialContentFocus: () -> Unit,
+    onFocusHandoffFailed: () -> Unit,
+) {
+    val tintState = rememberAmbientBackdropTintState()
+    val bandState = rememberLazyListState()
+    val rowStates = remember { mutableMapOf<String, LazyListState>() }
+    val requesters = remember { mutableMapOf<String, FocusRequester>() }
+    fun requesterFor(key: String) = requesters.getOrPut(key) { FocusRequester() }
+
+    var focusedKey by remember { mutableStateOf<String?>(null) }
+    /** The card holding focus right now, for confirming an entry claim landed on its target. */
+    var focusedCardKey by remember { mutableStateOf<String?>(null) }
+    /** Last focused card, restored when the page returns from a detail page. */
+    var lastFocusedKey by rememberSaveable { mutableStateOf<String?>(null) }
+    /** That card's place, for handing focus on when it leaves the page. */
+    var lastFocusedTarget by remember { mutableStateOf<TvReturnTarget?>(null) }
+    /** The viewer moved focus off that card (to the top bar, say) while it was still on the page. */
+    var focusMovedAway by remember { mutableStateOf(false) }
+    var appliedFocusRequest by rememberSaveable { mutableStateOf(0) }
+    // Set when a card opens a page. Focus moves while this page is torn down
+    // (an outer route takes the whole shell out of composition), and those
+    // moves must not replace the card the viewer actually opened.
+    var leaving by remember { mutableStateOf(false) }
+    fun openFrom(key: String, item: TvRequestItem) {
+        lastFocusedKey = key
+        leaving = true
+        onOpen(item)
+    }
+    var previewKey by remember { mutableStateOf<String?>(null) }
+    val latestRows by rememberUpdatedState(rows)
+
+    fun locate(key: String?): Pair<Int, Int>? {
+        if (key == null) return null
+        latestRows.forEachIndexed { rowIndex, row ->
+            val itemIndex = row.items.indexOfFirst { row.key(it) == key }
+            if (itemIndex >= 0) return rowIndex to itemIndex
+        }
+        return null
+    }
+
+    /** Scrolls [key]'s card into view and claims focus for it. */
+    suspend fun focusCard(key: String): TvObservedFocusResult {
+        val (rowIndex, itemIndex) = locate(key) ?: (0 to 0)
+        bandState.scrollToItem(rowIndex)
+        rowStates[latestRows[rowIndex].id]?.scrollToItem(itemIndex)
+        return requestFocusUntilObserved(
+            maxAttempts = TvContentInitialFocusMaxAttempts,
+            awaitAttempt = { withFrameNanos { } },
+            requestFocus = { requesterFor(key).requestFocus() },
+            // The target card itself: focus entering the page lands on some
+            // other card first, and that must not count as the claim.
+            isFocused = { focusedCardKey == key },
+        )
+    }
+
+    // Entry: the first card when the tab is selected from the bar, the last
+    // focused card on a return from detail.
+    LaunchedEffect(focusRequest) {
+        val fromBar = focusRequest != appliedFocusRequest
+        appliedFocusRequest = focusRequest
+        val first = latestRows.first().let { it.key(it.items.first()) }
+        val target = if (fromBar) first else lastFocusedKey?.takeIf { locate(it) != null } ?: first
+        val result = focusCard(target)
+        if (result == TvObservedFocusResult.Focused) onInitialContentFocus() else onFocusHandoffFailed()
+    }
+
+    // The focused card left the page (its request was removed or cancelled):
+    // focus goes to the card that took its place instead of falling to the top bar.
+    LaunchedEffect(rows) {
+        val key = lastFocusedKey ?: return@LaunchedEffect
+        if (leaving || focusMovedAway || locate(key) != null) return@LaunchedEffect
+        val sections = latestRows.map { row -> TvReturnSection(row.id, row.items.map(row::key)) }
+        val successor = resolveTvReturnTarget(lastFocusedTarget, sections, treatAbsenceAsFinal = true)
+        if (successor is TvReturnResolution.Located) focusCard(successor.itemId)
+    }
+
+    // The band's vertical bring-into-view is off (TvSkylineBringIntoViewSpec),
+    // so the focused row is scrolled to the top of the band explicitly, as
+    // Home's feed does.
+    val focusedRowIndex = locate(focusedKey)?.first
+    LaunchedEffect(focusedRowIndex, rows.size) {
+        if (focusedRowIndex != null && focusedRowIndex in rows.indices) bandState.animateScrollToItem(focusedRowIndex)
+    }
+
+    // The preview follows focus after a short rest, as Home's marquee does.
+    LaunchedEffect(focusedKey) {
+        val key = focusedKey ?: return@LaunchedEffect
+        if (previewKey != null) delay(MarqueeRestMs)
+        previewKey = key
+    }
+    // Keyed on the configuration too: the preview's meta line is resolved
+    // here and must follow an in-place language change.
+    val configuration = LocalConfiguration.current
+    val resources = LocalContext.current.resources
+    val preview = remember(previewKey, rows, configuration) {
+        val key = previewKey ?: rows.first().let { it.key(it.items.first()) }
+        locate(key)?.let { (rowIndex, itemIndex) -> rows[rowIndex].let { row -> TvRequestPreview.of(resources, row.items[itemIndex], row) } }
+    }
+    LaunchedEffect(preview?.content?.heroBackdropUrl) {
+        preview?.let { tintState.set(it.content.source, it.content.heroBackdropUrl) }
+    }
+
+    CompositionLocalProvider(
+        LocalAmbientBackdropTint provides tintState,
+        LocalBringIntoViewSpec provides TvSkylineBringIntoViewSpec,
+    ) {
+        BoxWithConstraints(
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            val presentation = LocalCardPresentation.current
+            val bandHeight = tvSkylineRowBandHeight(presentation).coerceAtMost(maxHeight * TvSkylineRowBandMaxFraction)
+            val trailingPadding = (bandHeight - TvSkylineRowBandBottomInset).coerceAtLeast(0.dp)
+            val previews = remember(rows) { mutableMapOf<String, TvRequestPreview>() }
+
+            TvRootHeroBackdrop(content = preview?.content, modifier = Modifier.fillMaxSize())
+            TvFocusMarquee(
+                content = preview?.content,
+                startPadding = TvSkyline.safeAreaX,
+                topPadding = TvSkyline.barTopInset + TvSkyline.barHeight,
+                bottomPadding = bandHeight + TvSkylineMarqueeBottomGap,
+                modifier = Modifier.fillMaxSize(),
+                footer = { content ->
+                    val shown = if (content.id == preview?.content?.id) preview else previews[content.id]
+                    shown?.let { TvRequestPreviewStatus(it) }
+                },
+            )
+            preview?.let { previews[it.content.id] = it }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(bandHeight)
+                    .align(Alignment.BottomStart)
+                    .clipToBounds(),
+            ) {
+                LazyColumn(
+                    state = bandState,
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(TvSkylineRowPreviewSpacing),
+                    contentPadding = PaddingValues(bottom = trailingPadding),
+                ) {
+                    itemsIndexed(rows, key = { _, row -> row.id }) { rowIndex, row ->
+                        val rowState = rowStates.getOrPut(row.id) { LazyListState() }
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            TvSectionHeader(
+                                title = row.title,
+                                eyebrow = row.label,
+                                modifier = Modifier.padding(start = TvSkyline.safeAreaX, end = Spacing.safeArea),
+                            )
+                            LazyRow(
+                                state = rowState,
+                                modifier = Modifier.focusRestorer(),
+                                horizontalArrangement = Arrangement.spacedBy(TvSkylineItemSpacing),
+                                contentPadding = PaddingValues(
+                                    start = TvSkyline.safeAreaX,
+                                    end = Spacing.safeArea,
+                                    top = TvSkylineRowCardVerticalPadding,
+                                    bottom = TvSkylineRowCardVerticalPadding,
+                                ),
+                            ) {
+                                itemsIndexed(row.items, key = { _, item -> item.id }) { index, item ->
+                                    val key = row.key(item)
+                                    val cardModifier = Modifier.onFocusChanged {
+                                        if (it.hasFocus) {
+                                            focusedCardKey = key
+                                            focusMovedAway = false
+                                        } else if (focusedCardKey == key) {
+                                            focusedCardKey = null
+                                            // A card that left the rows lost focus with them; one still listed lost it to the viewer.
+                                            focusMovedAway = locate(key) != null
+                                        }
+                                        if (it.hasFocus && !leaving) {
+                                            focusedKey = key
+                                            lastFocusedKey = key
+                                            lastFocusedTarget = TvReturnTarget(row.id, key, rowIndex, index)
+                                        }
+                                    }
+                                    when (item) {
+                                        is TvRequestItem.Record -> TvRequestRecordCard(
+                                            record = item.record,
+                                            onClick = { openFrom(key, item) },
+                                            onLongClick = { onLongPress(item) },
+                                            focusRequester = requesterFor(key),
+                                            modifier = cardModifier,
+                                        )
+                                        is TvRequestItem.Result -> TvRequestCard(
+                                            result = item.result,
+                                            onClick = { openFrom(key, item) },
+                                            focusRequester = requesterFor(key),
+                                            modifier = cardModifier,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private const val MarqueeRestMs = 150L
+private const val ActionMessageMs = 4_000L
+
+/** What the preview panel shows for the focused card. */
+internal data class TvRequestPreview(
+    val content: TvMarqueeContent,
+    val progress: RequestProgress?,
+    val statusText: String?,
+) {
+    companion object {
+        fun of(resources: Resources, item: TvRequestItem, row: TvRequestRow): TvRequestPreview {
+            val meta = mutableListOf<TvHeroFactToken>()
+            val title: String
+            val overview: String?
+            val posterPath: String?
+            val backdropPath: String?
+            val mediaType: String
+            val progress: RequestProgress?
+            val statusText: String?
+            val year: Int?
+            when (item) {
+                is TvRequestItem.Record -> {
+                    val record = item.record
+                    title = record.title
+                    overview = record.overview
+                    posterPath = record.posterPath
+                    backdropPath = record.backdropPath
+                    mediaType = record.mediaType
+                    year = record.year
+                    progress = RequestProgress.of(record)
+                    statusText = RequestRowCopy.status(record, progress).text(resources)
+                }
+                is TvRequestItem.Result -> {
+                    val result = item.result
+                    title = result.title
+                    overview = result.overview
+                    posterPath = result.posterPath
+                    backdropPath = result.backdropPath
+                    mediaType = result.mediaType
+                    year = result.year
+                    // Like the detail page: a title that can't be requested has no track.
+                    progress = RequestProgress.of(result.availability, result.request)
+                        ?.takeUnless { it.display is RequestDisplayState.Unavailable }
+                    statusText = progress?.longText?.text(resources)
+                }
+            }
+            year?.takeIf { it > 0 }?.let { meta += TvHeroFactToken.NumberToken(LocaleInteger(it)) }
+            meta += TvHeroFactToken.TextToken(resources.getString(RequestRowCopy.mediaTypeLabel(mediaType)))
+            when (item) {
+                is TvRequestItem.Record -> RequestRowCopy.day(item.record.createdAt)?.let {
+                    meta += TvHeroFactToken.TextToken(resources.getString(CommonR.string.requests_requestedOn, it))
+                }
+                is TvRequestItem.Result -> ExternalRatings.tmdb(item.result.voteAverage)?.let { meta += TvHeroFactToken.ExternalRating(it) }
+            }
+            val posterUrl = requestPosterUrl(posterPath)
+            val backdropUrl = requestBackdropUrl(backdropPath)
+            val content = TvMarqueeContent(
+                id = row.key(item),
+                title = title,
+                logoUrl = null,
+                badges = emptyList(),
+                metaParts = meta,
+                synopsis = overview?.takeIf { it.isNotBlank() },
+                detailLine = null,
+                specLine = null,
+                backdropUrl = backdropUrl,
+                backdropThumbhash = null,
+                posterUrl = posterUrl,
+                posterThumbhash = null,
+                isEpisode = false,
+                // The tint samples the same artwork the backdrop shows.
+                source = SectionItem(
+                    contentId = row.key(item),
+                    type = mediaType,
+                    title = title,
+                    posterUrl = posterUrl,
+                    backdropUrl = backdropUrl,
+                ),
+            )
+            return TvRequestPreview(content, progress, statusText)
+        }
+    }
+}
+
+/** The status sentence and stage track under the preview's synopsis. */
+@Composable
+private fun TvRequestPreviewStatus(preview: TvRequestPreview) {
+    val progress = preview.progress ?: return
+    Row(
+        modifier = Modifier.padding(top = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(11.dp),
+    ) {
+        TvRequestStatusLabel(
+            progress = progress,
+            text = preview.statusText ?: progress.longText.text(),
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = SiloOnSurface,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        RequestStageTrack(progress = progress, height = 3.dp, modifier = Modifier.width(120.dp))
+    }
+}
+
+// ── Placeholders ─────────────────────────────────────────────
+
+/**
+ * The page before it has rows: a loading skeleton in the feed's geometry, the
+ * empty state, or the error. Each owns focus, so entry from the bar always
+ * lands in the page.
+ */
+@Composable
+private fun TvRequestsPlaceholder(
+    hasLoaded: Boolean,
+    error: String?,
+    focusRequest: Int,
+    onRetry: () -> Unit,
+    onInitialContentFocus: () -> Unit,
+    onFocusHandoffFailed: () -> Unit,
+) {
+    val owner = remember { FocusRequester() }
+    var ownerHasFocus by remember { mutableStateOf(false) }
+    val state = when {
+        !hasLoaded -> "loading"
+        error != null -> "error"
+        else -> "empty"
+    }
+    LaunchedEffect(focusRequest, state) {
+        // The error view owns its Retry button; hand the shell back its bar
+        // rather than holding the handoff open.
+        if (state == "error") {
+            onFocusHandoffFailed()
+            return@LaunchedEffect
+        }
+        val result = requestFocusUntilObserved(
+            maxAttempts = TvContentInitialFocusMaxAttempts,
+            awaitAttempt = { withFrameNanos { } },
+            requestFocus = owner::requestFocus,
+            isFocused = { ownerHasFocus },
+        )
+        if (result == TvObservedFocusResult.Focused) onInitialContentFocus() else onFocusHandoffFailed()
+    }
+    when (state) {
+        "error" -> TvErrorScreen(message = error.orEmpty(), onRetry = onRetry)
+        else -> {
+            val label = if (state == "loading") {
+                stringResource(CommonR.string.requests_loadingSpoken)
+            } else {
+                stringResource(CommonR.string.requests_empty)
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .focusRequester(owner)
+                    .onFocusChanged { ownerHasFocus = it.isFocused }
+                    .semantics { contentDescription = label }
+                    .focusable(),
+            ) {
+                if (state == "loading") TvRequestsLoadingView() else TvRequestsEmptyState()
+            }
+        }
+    }
+}
+
+@Composable
+private fun TvRequestsEmptyState() {
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Icon(imageVector = Icons.Outlined.Inbox, contentDescription = null, tint = Color.White.copy(alpha = 0.62f), modifier = Modifier.size(36.dp))
+        Text(text = stringResource(CommonR.string.requests_empty), style = MaterialTheme.typography.headlineSmall, color = Color.White)
+        Text(
+            text = stringResource(CommonR.string.requests_emptyBody),
+            style = MaterialTheme.typography.bodyMedium,
+            color = Color.White.copy(alpha = 0.68f),
+        )
+    }
+}
+
+/**
+ * First frame while rows load: the same preview-and-row geometry as the feed,
+ * so the real page replaces it in place instead of building itself from a
+ * black canvas.
+ */
+@Composable
+private fun TvRequestsLoadingView() {
+    val presentation = LocalCardPresentation.current
+    val cardWidth = tvRequestCardWidth()
+    val bar = Color.White.copy(alpha = 0.10f)
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val bandHeight = tvSkylineRowBandHeight(presentation).coerceAtMost(maxHeight * TvSkylineRowBandMaxFraction)
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = TvSkyline.safeAreaX, bottom = bandHeight + TvSkylineMarqueeBottomGap),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(modifier = Modifier.size(260.dp, 36.dp).background(Color.White.copy(alpha = 0.14f), RoundedCornerShape(6.dp)))
+            Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                listOf(59.dp, 41.dp, 75.dp).forEach { Box(modifier = Modifier.size(it, 11.dp).background(bar, RoundedCornerShape(3.dp))) }
+            }
+            Box(modifier = Modifier.size(360.dp, 9.dp).background(bar, RoundedCornerShape(3.dp)))
+            Box(modifier = Modifier.size(305.dp, 9.dp).background(bar, RoundedCornerShape(3.dp)))
+            Text(
+                text = stringResource(CommonR.string.requests_loading),
+                style = MaterialTheme.typography.bodyMedium,
+                color = SiloOnSurface.copy(alpha = 0.72f),
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .height(bandHeight)
+                .padding(start = TvSkyline.safeAreaX),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Box(modifier = Modifier.size(140.dp, 18.dp).background(bar, RoundedCornerShape(3.dp)))
+            Row(
+                modifier = Modifier.padding(top = TvSkylineRowCardVerticalPadding),
+                horizontalArrangement = Arrangement.spacedBy(TvSkylineItemSpacing),
+            ) {
+                repeat(8) {
+                    Box(modifier = Modifier.size(cardWidth, cardWidth * 1.5f).background(bar, RoundedCornerShape(8.dp)))
+                }
+            }
+        }
+    }
+}
+
+// ── Long-press actions ───────────────────────────────────────
+
+internal enum class TvRequestAction { Cancel, Remove }
+
+/** The action's dialog label. */
+@Composable
+private fun TvRequestAction.title(): String = stringResource(
+    when (this) {
+        TvRequestAction.Cancel -> CommonR.string.requests_action_cancel
+        TvRequestAction.Remove -> CommonR.string.requests_remove_confirm
+    },
+)
+
+/** The long-press actions a card offers right now; empty when it has none. */
+internal fun TvRequestItem.actions(
+    canCancel: (MediaRequest) -> Boolean,
+    canRemove: (MediaRequest) -> Boolean,
+): List<TvRequestAction> = when (this) {
+    is TvRequestItem.Record -> buildList {
+        if (canCancel(record)) add(TvRequestAction.Cancel)
+        if (canRemove(record)) add(TvRequestAction.Remove)
+    }
+    is TvRequestItem.Result -> emptyList()
+}
+
+/** [actions] is non-empty and [item] is a request card; the caller decides both. */
+@Composable
+private fun TvRequestActionDialog(
+    item: TvRequestItem,
+    actions: List<TvRequestAction>,
+    onDismiss: () -> Unit,
+    onAction: (TvRequestAction, MediaRequest) -> Unit,
+) {
+    val record = when (item) {
+        is TvRequestItem.Record -> item.record
+        is TvRequestItem.Result -> return
+    }
+    // Close comes first and takes focus, so a stray press doesn't send a
+    // non-retryable action.
+    TvDialog(
+        title = record.title,
+        message = RequestProgress.of(record).longText.text(),
+        onDismissRequest = onDismiss,
+        actions = listOf(TvDialogAction(label = stringResource(CommonR.string.requests_actionDialog_close), onClick = onDismiss)) + actions.map { action ->
+            TvDialogAction(
+                label = action.title(),
+                onClick = { onAction(action, record) },
+                style = when (action) {
+                    TvRequestAction.Cancel, TvRequestAction.Remove -> TvDialogActionStyle.Destructive
+                },
+            )
+        },
+    )
+}

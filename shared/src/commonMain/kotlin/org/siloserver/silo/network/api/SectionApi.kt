@@ -1,0 +1,115 @@
+package org.siloserver.silo.network.api
+
+import io.ktor.client.*
+import org.siloserver.silo.model.catalog.CatalogQueryGroup
+import org.siloserver.silo.model.catalog.CatalogResponse
+import org.siloserver.silo.model.section.*
+import org.siloserver.silo.network.ApiResult
+import org.siloserver.silo.network.ArtworkWidths
+import org.siloserver.silo.network.AuthScopeSnapshot
+import org.siloserver.silo.network.TokenManagerImpl
+import org.siloserver.silo.network.map
+import org.siloserver.silo.network.apiv2.*
+
+/** Home and library section reads are viewer-scoped v2 transports; DI supplies the real token manager. */
+class SectionApi(client: HttpClient, private val v2: CatalogV2Api = CatalogV2Api(client, ApiV2Gate.Unrestricted),
+    private val sectionItems: LibrarySectionItemsV2Api = LibrarySectionItemsV2Api(client, TokenManagerImpl(), ApiV2Gate.Unrestricted),
+    private val home: HomeSectionsV2Api = HomeSectionsV2Api(client, TokenManagerImpl(), ApiV2Gate.Unrestricted),
+    private val rowItemLimit: SectionRowItemLimit = SectionRowItemLimit.Unsupported) {
+
+    // --- Home ---
+
+    suspend fun captureHomeAuthority() = home.capture()
+    suspend fun isHomeAuthorityCurrent(owner: AuthScopeSnapshot) = home.current(owner)
+    suspend fun getHomeSections(owner: AuthScopeSnapshot, widths: ArtworkWidths? = null): ApiResult<SectionsResponse> =
+        rowItemLimit.read(owner) { limit -> home.list(owner, widths, limit) }
+
+    suspend fun getHomeLayout(owner: AuthScopeSnapshot): ApiResult<List<HomeLayoutRow>> = home.layout(owner)
+
+    suspend fun getHomeSectionItems(id: String, owner: AuthScopeSnapshot,
+        widths: ArtworkWidths? = null): ApiResult<HomeSectionItemsResponse> = home.section(id, owner, widths)
+
+    suspend fun dismissHomeItem(surface: String, itemId: String, anchor: String, owner: AuthScopeSnapshot): ApiResult<Unit> =
+        home.dismiss(surface, itemId, anchor, owner)
+
+    // --- Library Sections ---
+
+    suspend fun getLibrarySections(libraryId: Int, owner: AuthScopeSnapshot,
+        widths: ArtworkWidths? = null): ApiResult<SectionsResponse> =
+        rowItemLimit.read(owner) { limit -> sectionItems.list(libraryId, owner, widths, limit) }
+
+    suspend fun captureLibrarySectionAuthority() = sectionItems.capture()
+    suspend fun isLibrarySectionAuthorityCurrent(owner: AuthScopeSnapshot) = sectionItems.current(owner)
+    suspend fun getLibrarySectionItems(libraryId: Int, sectionId: String, owner: AuthScopeSnapshot,
+        widths: ArtworkWidths? = null): ApiResult<HomeSectionItemsResponse> = sectionItems.read(libraryId, sectionId, owner, widths)
+
+    /**
+     * Pages the section's stored admin definition: the server's catalog section source does not apply
+     * profile overrides, so callers must not refill a `customized` or `is_custom` section through it.
+     */
+    suspend fun getLibrarySectionCatalogItems(libraryId: Int, sectionId: String,
+        owner: AuthScopeSnapshot, continuation: CatalogContinuationV2?, widths: ArtworkWidths? = null): ApiResult<CatalogResponse> =
+        getSectionCatalogItems(libraryId, sectionId, owner, continuation, limit = 100, widths = widths)
+
+    /**
+     * Pages a row's full list through `GET /api/v2/catalog?source=section`: the
+     * Home row when [libraryId] is null, else that library's row. The read is
+     * dropped as `identity_changed` if [owner] stops being the acting profile
+     * before or after the exchange, as the row reads are. A row the profile
+     * can no longer see answers 404.
+     */
+    suspend fun getSectionCatalogItems(libraryId: Int?, sectionId: String, owner: AuthScopeSnapshot,
+        continuation: CatalogContinuationV2?, limit: Int = 50, widths: ArtworkWidths? = null): ApiResult<CatalogResponse> {
+        suspend fun current() = if (libraryId == null) home.current(owner) else sectionItems.current(owner)
+        if (sectionId.isBlank() || (libraryId != null && libraryId <= 0))
+            return ApiResult.Error(422, "validation_failed", "Invalid section.")
+        if (!current()) return identityChanged()
+        val result = v2.browse(CatalogQueryV2(source = "section", scope = if (libraryId == null) "home" else "library",
+            libraryId = libraryId?.toString(), sectionId = sectionId, limit = limit), continuation, widths = widths)
+            .map { it.toCatalogResponse() }
+        if (!current()) return identityChanged()
+        return result
+    }
+
+    // --- Library Collections ---
+
+    suspend fun getLibraryCollections(libraryId: Int): ApiResult<LibraryCollectionsResponse> =
+        v2.libraryCollections(libraryId.toString()).map { tab ->
+            val definitions = tab.collections.associateBy { it.id }
+            fun LibraryCollectionCardV2.card(kind: String) = LibraryCollection(
+                id, title, definitions[id]?.collectionType, itemCount, posterUrl, posterThumbhash,
+                if (kind == "admin") "regular" else kind, creatorProfileId,
+            )
+            val groups = tab.groups.map { group ->
+                LibraryCollectionGroup(group.id, group.name, if (group.kind == "admin") "regular" else group.kind,
+                    group.sortMode, group.sortOrder, group.collections.map { it.card(group.kind) })
+            }
+            val ungrouped = tab.ungrouped?.let { group ->
+                LibraryUngroupedSection(group.sortOrder, group.collections.map { it.card("regular") })
+            }
+            val flat = if (groups.isNotEmpty() || ungrouped != null) {
+                (groups.flatMap { it.collections } + ungrouped?.collections.orEmpty()).distinctBy { it.id }
+            } else tab.collections.map {
+                LibraryCollection(it.id, it.title, it.collectionType, it.itemCount, it.posterUrl, it.posterThumbhash, "regular")
+            }
+            LibraryCollectionsResponse(flat, groups, ungrouped)
+        }
+
+    /** Saved source order is retained unless the caller explicitly chooses a sort. */
+    suspend fun getLibraryCollectionItems(
+        collectionId: String,
+        continuation: CatalogContinuationV2? = null,
+        limit: Int = 60,
+        sort: String? = null,
+        order: String? = null,
+        queryGroups: List<CatalogQueryGroup> = emptyList(),
+        match: String? = null,
+        mediaType: String? = null,
+        libraryId: Int? = null,
+        source: String = "library_collection",
+        widths: ArtworkWidths? = null,
+    ): ApiResult<CatalogResponse> = v2.browse(CatalogQueryV2(
+        source = source, collectionId = collectionId, limit = limit, type = mediaType, libraryId = libraryId?.toString(),
+        sort = sort, order = order.takeIf { sort != null }, groups = queryGroups.toV2Groups(), match = match,
+    ), continuation, widths = widths).map { it.toCatalogResponse() }
+}

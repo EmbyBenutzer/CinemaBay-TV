@@ -1,0 +1,437 @@
+package org.siloserver.silo.tv.cast
+
+import java.time.Instant
+import java.util.UUID
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
+import org.siloserver.silo.cast.SiloCastHandoffChallenge
+import org.siloserver.silo.cast.SiloCastHandoffOffer
+import org.siloserver.silo.cast.SiloCastHandoffReady
+import org.siloserver.silo.cast.SiloCastProtocol
+import org.siloserver.silo.model.server.ServerEntry
+import org.siloserver.silo.network.AndroidServerRegistry
+import org.siloserver.silo.network.ApiResult
+import org.siloserver.silo.network.AuthScopeSnapshot
+import org.siloserver.silo.network.TemporaryAuthScope
+import org.siloserver.silo.network.TokenManager
+import org.siloserver.silo.network.api.DeviceLoginApi
+import org.siloserver.silo.network.api.ServerIdentityProbe
+
+/**
+ * Owns the process-only identity installed while content launched by a phone
+ * is playing on Android TV. Saved servers and their credentials are never
+ * changed: the normal HTTP/player graph reads this short-lived overlay through
+ * [TokenManager], then automatically sees the saved TV identity again on end.
+ */
+class RemotePlaybackIdentityManager(
+    private val deviceLoginApi: DeviceLoginApi,
+    private val tokenManager: TokenManager,
+    private val deviceNameProvider: () -> String,
+    /** Classifies one address; production probes `GET /api/v2/system/identity`. */
+    private val identityProbe: suspend (serverUrl: String) -> ServerIdentityProbe = { ServerIdentityProbe.Unreachable },
+    /** This TV's own saved addresses for a deployment identity, the active server first. */
+    private val savedUrlsFor: suspend (serverIdentity: String) -> List<String> = { emptyList() },
+    /** Whether this TV approved a plain-HTTP origin; credentials go to no other. */
+    private val cleartextApproved: suspend (serverUrl: String) -> Boolean = { false },
+) {
+    data class ActiveIdentity(
+        val generationId: String,
+        val serverId: String,
+        val serverUrl: String,
+        val serverName: String?,
+        /** The deployment identity the phone verified for [serverId], when it sent one. */
+        val serverIdentity: String? = null,
+        val profileId: String,
+        val profileName: String?,
+        val controllerDeviceId: String,
+        val controllerDeviceName: String?,
+        val expiresAtEpochMs: Long,
+        /** The receiver run (see [TvSiloCastReceiver]) that last installed or reused it. */
+        val receiverRun: Long,
+    )
+
+    private val mutex = Mutex()
+
+    @Volatile
+    var activeIdentity: ActiveIdentity? = null
+        private set
+
+    fun matches(offer: SiloCastHandoffOffer, controllerDeviceId: String): Boolean {
+        val active = activeIdentity ?: return false
+        return AndroidServerRegistry.serverIdsMatch(active.serverId, offer.serverId) &&
+            active.profileId == offer.profileId &&
+            active.controllerDeviceId == controllerDeviceId
+    }
+
+    /**
+     * Installs the phone's temporary identity once the server approves it.
+     * [beforeActivation] runs after approval and before anything changes, while
+     * the outgoing identity (the TV's own or an earlier phone's) still owns the
+     * credentials, so whatever is playing can close its server session under the
+     * identity it started with. An offer that fails or is denied leaves the
+     * current identity and playback alone. [allowReuse] gates answering a
+     * matching offer from the active identity without a new approval; the
+     * receiver decides it ([TvSiloCastReceiverPolicy.mayReuseIdentity]),
+     * because the device ID in the match is self-reported.
+     */
+    suspend fun prepare(
+        offer: SiloCastHandoffOffer,
+        controllerDeviceId: String,
+        controllerDeviceName: String?,
+        receiverRun: Long,
+        allowReuse: Boolean,
+        /** Called once the offer needs the full server exchange rather than a reuse. */
+        onFullHandoff: () -> Unit = {},
+        beforeActivation: suspend () -> Unit = {},
+        /** The generation this call installed or reused, reported under the lock before it returns. */
+        onPrepared: (generationId: String) -> Unit = {},
+        onChallenge: suspend (SiloCastHandoffChallenge) -> Unit,
+    ): SiloCastHandoffReady = mutex.withLock {
+        validateOffer(offer)
+
+        // An end in flight has already unpublished its identity (see
+        // [endLocked]) and holds this lock, so an identity being ended is
+        // never reused: this waits for it and takes the full path.
+        activeIdentity?.takeIf { allowReuse && matches(offer, controllerDeviceId) }?.let { active ->
+            val reclaimed = active.copy(receiverRun = receiverRun)
+            activeIdentity = reclaimed
+            onPrepared(reclaimed.generationId)
+            return@withLock reclaimed.toReady(offer.requestId, reused = true)
+        }
+
+        onFullHandoff()
+
+        val serverUrl = resolveServerUrl(offer)
+        val capability = deviceLoginApi.remotePlaybackCapabilityAt(serverUrl).successOrThrow()
+        require(capability.remotePlaybackHandoff && SiloCastProtocol.version in capability.protocolVersions) {
+            "The phone's Silo server does not support remote playback handoff."
+        }
+
+        val started = deviceLoginApi.startRemotePlaybackAt(
+            serverUrl = serverUrl,
+            deviceName = deviceNameProvider(),
+            // Matches the X-Silo-Device-Platform header spelling.
+            devicePlatform = "android-tv",
+        ).successOrThrow()
+        require(started.clientPurpose == "remote_playback" && started.temporary == true) {
+            "The server did not create a temporary remote playback session."
+        }
+
+        onChallenge(
+            SiloCastHandoffChallenge(
+                requestId = offer.requestId,
+                userCode = started.userCode,
+                matchCode = started.matchCode,
+                expiresAt = started.expiresAt,
+            ),
+        )
+
+        val deadlineMs = System.currentTimeMillis() + started.expiresIn.coerceAtLeast(1) * 1_000L
+        while (System.currentTimeMillis() < deadlineMs) {
+            when (val result = deviceLoginApi.pollDeviceLoginAt(serverUrl, started.deviceCode)) {
+                is ApiResult.Success -> {
+                    val poll = result.data
+                    when (poll.status) {
+                        "approved" -> {
+                            val accessToken = poll.accessToken.requireValue("access token")
+                            val refreshToken = poll.refreshToken.requireValue("refresh token")
+                            val profileId = poll.profileId.requireValue("profile")
+                            val profileToken = poll.profileToken.requireValue("profile token")
+                            require(poll.temporary == true && profileId == offer.profileId) {
+                                "The server approved a different or non-temporary profile."
+                            }
+                            val expiresAtMs = poll.sessionExpiresAt?.let(::parseInstantMillis)
+                                ?: (System.currentTimeMillis() + DEFAULT_SESSION_MS)
+                            beforeActivation()
+                            endLocked()
+                            val generationId = UUID.randomUUID().toString()
+                            tokenManager.beginTemporaryScope(
+                                TemporaryAuthScope(
+                                    generationId = generationId,
+                                    serverId = offer.serverId,
+                                    serverUrl = serverUrl,
+                                    accessToken = accessToken,
+                                    refreshToken = refreshToken,
+                                    profileId = profileId,
+                                    profileToken = profileToken,
+                                    // The SESSION deadline — hours past the
+                                    // access token it was issued with, so it
+                                    // must never be read as a token expiry.
+                                    expiresAtEpochMs = expiresAtMs,
+                                    // The token's own deadline, kept separate.
+                                    // Null when the server omits expires_in,
+                                    // which keeps this overlay reactive-only
+                                    // rather than guessing off the session.
+                                    accessTokenExpiresAtEpochMs = poll.expiresIn
+                                        ?.let { System.currentTimeMillis() + it * 1000L },
+                                    accessTokenLifetimeMs = poll.expiresIn?.times(1000L),
+                                ),
+                            )
+                            val active = ActiveIdentity(
+                                generationId = generationId,
+                                serverId = offer.serverId,
+                                serverUrl = serverUrl,
+                                serverName = offer.serverName,
+                                serverIdentity = offer.serverIdentity?.trim()?.takeIf { it.isNotEmpty() },
+                                profileId = profileId,
+                                profileName = offer.profileName,
+                                controllerDeviceId = controllerDeviceId,
+                                controllerDeviceName = controllerDeviceName,
+                                expiresAtEpochMs = expiresAtMs,
+                                receiverRun = receiverRun,
+                            )
+                            activeIdentity = active
+                            onPrepared(generationId)
+                            return@withLock active.toReady(offer.requestId, reused = false)
+                        }
+                        "denied" -> error("Remote playback handoff was denied.")
+                        "expired", "consumed" -> error("Remote playback handoff expired.")
+                        "pending" -> delay((poll.pollAfter ?: started.interval).coerceAtLeast(1) * 1_000L)
+                        else -> error("The server returned an unknown remote playback status.")
+                    }
+                }
+                is ApiResult.Error -> {
+                    if (result.code == 404) error("Remote playback handoff expired.")
+                    error("Pairing status could not be confirmed. Start pairing again.")
+                }
+                is ApiResult.NetworkError -> error("Pairing status could not be confirmed. Start pairing again.")
+            }
+        }
+        error("Remote playback handoff expired.")
+    }
+
+    suspend fun end() = mutex.withLock { endLocked() }
+
+    /**
+     * Runs [block] only while [generationId] is the active identity, under the
+     * lock [prepare] and [end] take, so nothing can replace or end it
+     * meanwhile. Null when it is no longer active. [block] must not suspend.
+     */
+    suspend fun <T> whileActive(generationId: String, block: () -> T): T? = mutex.withLock {
+        if (activeIdentity?.generationId != generationId) null else block()
+    }
+
+    /**
+     * Ends the identity only if [generationId] is still the active one. The
+     * check runs under the same lock as [prepare], so a delayed cleanup can
+     * never end a replacement identity installed after it was scheduled.
+     */
+    suspend fun end(generationId: String): Boolean = mutex.withLock {
+        if (activeIdentity?.generationId != generationId) return@withLock false
+        endLocked()
+        true
+    }
+
+    /**
+     * Ends the active identity unless a receiver run started after [run] has
+     * installed or reused it. A same-phone handoff keeps the generation, so a
+     * generation check would let a delayed stop cleanup revoke the identity
+     * that handoff just claimed. Claims made by [run] itself (or earlier) do
+     * not protect it: that run is stopped, so nothing else will end it.
+     */
+    suspend fun endIfNotClaimedSince(run: Long): Boolean = mutex.withLock {
+        val active = activeIdentity ?: return@withLock false
+        if (active.receiverRun > run) return@withLock false
+        endLocked()
+        true
+    }
+
+    private suspend fun endLocked() {
+        val active = activeIdentity
+        // Unpublish before the logout below: while it is in flight, readers
+        // outside the lock must not launch a title under this identity.
+        activeIdentity = null
+        try {
+            if (active != null && tokenManager.hasTemporaryScope()) {
+                // Bounded: a handoff waiting on this lock must not sit behind
+                // an unreachable server's request timeout.
+                withTimeoutOrNull(LOGOUT_TIMEOUT_MS) {
+                    deviceLoginApi.endRemotePlayback(
+                        AuthScopeSnapshot(
+                            serverId = active.serverId,
+                            serverUrl = active.serverUrl,
+                            profileId = active.profileId,
+                            profileToken = null,
+                            credentialGenerationId = active.generationId,
+                        ),
+                    )
+                }
+            }
+        } finally {
+            // Local credential teardown is mandatory even if the best-effort
+            // server logout throws or the transport disappears mid-request.
+            tokenManager.endTemporaryScope()
+        }
+    }
+
+    private fun validateOffer(offer: SiloCastHandoffOffer) {
+        val normalized = normalizedUrl(offer.serverURL)
+        require(normalized.isNotBlank() && offer.profileId.isNotBlank()) {
+            "The phone sent an invalid server or profile."
+        }
+        // This binding is deliberately exact: canonical matching is suitable
+        // for recognizing a server, but must not let an offer claim a URL that
+        // does not encode to the id sent alongside it.
+        require(AndroidServerRegistry.idFor(normalized) == offer.serverId) {
+            "The phone's server identity does not match its URL."
+        }
+    }
+
+    /**
+     * The address this TV runs the handoff at. With a deployment identity the
+     * phone's address is one candidate (see [RemotePlaybackCandidatePolicy]):
+     * the first that reports the same identity from here wins, so a TV signed
+     * in over the LAN stays on the LAN while the phone uses a public address.
+     * Without one (an older phone) the phone's address is used as-is.
+     *
+     * Candidates are probed at once and judged in order, so stale addresses
+     * cost one probe timeout in total, well inside the phone's wait for the
+     * challenge (15 s on Android).
+     */
+    private suspend fun resolveServerUrl(offer: SiloCastHandoffOffer): String {
+        val offered = normalizedUrl(offer.serverURL)
+        val expected = offer.serverIdentity?.trim()?.takeIf { it.isNotEmpty() } ?: return offered
+        val saved = savedUrlsFor(expected).map(::normalizedUrl)
+        val candidates = RemotePlaybackCandidatePolicy.candidateUrls(
+            savedUrls = saved,
+            offeredUrl = offered,
+            endpointUrls = offer.serverEndpoints.orEmpty().map { it.url },
+        ) {
+            // The phone's own address keeps its old treatment; any other
+            // plain-HTTP address needs this TV's earlier approval.
+            it == offered || !isCleartext(it) || cleartextApproved(it)
+        }
+        return coroutineScope {
+            val probes = candidates.map { it to async { identityProbe(it) } }
+            try {
+                firstMatching(probes, offered, saved, expected)
+            } finally {
+                probes.forEach { (_, probe) -> probe.cancel() }
+            }
+        } ?: error("This TV can't reach ${offer.serverName?.takeIf { it.isNotBlank() } ?: "the phone's server"}.")
+    }
+
+    /** The first candidate, in order, whose answer qualifies it; see [resolveServerUrl]. */
+    private suspend fun firstMatching(
+        probes: List<Pair<String, Deferred<ServerIdentityProbe>>>,
+        offered: String,
+        saved: List<String>,
+        expected: String,
+    ): String? {
+        for ((candidate, probe) in probes) {
+            when (val answer = probe.await()) {
+                is ServerIdentityProbe.Identity -> {
+                    if (answer.serverId == expected) return candidate
+                    // The phone vouches for its addresses, so another server
+                    // answering at one ends the handoff. A saved address of
+                    // this TV's alone may since point elsewhere; it is skipped.
+                    if (candidate == offered || candidate !in saved) error("The phone's server address reached a different Silo server.")
+                }
+                // Reachable, but it can't prove who it is: only the phone's
+                // own address is trusted that way, as before.
+                ServerIdentityProbe.UnsupportedServer -> if (candidate == offered) return candidate
+                ServerIdentityProbe.Unreachable -> Unit
+            }
+        }
+        return null
+    }
+
+    private fun isCleartext(url: String): Boolean = url.startsWith("http://", ignoreCase = true)
+
+    private fun ActiveIdentity.toReady(requestId: String, reused: Boolean) = SiloCastHandoffReady(
+        requestId = requestId,
+        serverId = serverId,
+        profileId = profileId,
+        sessionExpiresAt = Instant.ofEpochMilli(expiresAtEpochMs).toString(),
+        reused = reused,
+    )
+
+    // Wire identity follows silo-apple's ServerRegistry contract exactly:
+    // trim whitespace and trailing slashes, but do not otherwise rewrite the
+    // string. Android's persisted registry additionally lowercases scheme/host;
+    // applying that Android-only normalization to an iPhone offer would change
+    // its base64url server id and reject an otherwise valid cross-platform handoff.
+    private fun normalizedUrl(url: String): String = url.trim().trimEnd('/')
+
+    private fun parseInstantMillis(value: String): Long =
+        runCatching { Instant.parse(value).toEpochMilli() }
+            .getOrDefault(System.currentTimeMillis() + DEFAULT_SESSION_MS)
+
+    private fun String?.requireValue(label: String): String =
+        this?.takeIf { it.isNotBlank() } ?: error("The approved remote session omitted its $label.")
+
+    private fun <T> ApiResult<T>.successOrThrow(): T = when (this) {
+        is ApiResult.Success -> data
+        is ApiResult.Error -> error(message.ifBlank { "Server returned HTTP $code." })
+        is ApiResult.NetworkError -> throw exception
+    }
+
+    private companion object {
+        const val DEFAULT_SESSION_MS = 24 * 60 * 60 * 1_000L
+        const val LOGOUT_TIMEOUT_MS = 5_000L
+    }
+}
+
+/**
+ * The addresses a TV tries for a handoff, in order, de-duplicated: its own
+ * saved addresses for the deployment (already known to work from here), the
+ * phone's address, then the deployment's other addresses in the server's
+ * order. Mirrors silo-apple `RemotePlaybackCandidatePolicy`.
+ */
+internal object RemotePlaybackCandidatePolicy {
+    /** Endpoint-only addresses probed per offer. */
+    const val MAX_ENDPOINTS = 6
+
+    /** Endpoints read from one offer at all, so a long list can't cost unbounded consent lookups. */
+    const val MAX_ENDPOINTS_READ = 24
+
+    const val MAX_SAVED = 6
+
+    /**
+     * This TV's saved addresses that may serve [identity], at most
+     * [MAX_SAVED]: those recorded under it, then those with no recorded
+     * identity, the active server first within each. Every candidate is
+     * probed and an unverified one that answers for another deployment is
+     * skipped, so trying them is safe.
+     */
+    fun savedUrls(entries: List<ServerEntry>, activeId: String?, identity: String): List<String> {
+        fun recorded(entry: ServerEntry) = entry.verifiedServerId?.takeIf { it.isNotBlank() }
+        return entries
+            .filter { recorded(it) == identity || recorded(it) == null }
+            .sortedWith(compareBy({ recorded(it) == null }, { it.id != activeId }))
+            .take(MAX_SAVED)
+            .map { it.url }
+    }
+
+    /**
+     * The candidates [mayProbe] allows, de-duplicated. Of [endpointUrls], at
+     * most [MAX_ENDPOINTS_READ] are read and the first [MAX_ENDPOINTS]
+     * allowed new ones kept, so the cap counts addresses that will be probed.
+     */
+    suspend fun candidateUrls(
+        savedUrls: List<String>,
+        offeredUrl: String,
+        endpointUrls: List<String>,
+        mayProbe: suspend (String) -> Boolean = { true },
+    ): List<String> {
+        val seen = mutableSetOf<String>()
+        fun fresh(url: String) = url.trim().trimEnd('/').takeIf { it.isNotEmpty() && seen.add(it) }
+
+        val candidates = (savedUrls + offeredUrl).mapNotNull(::fresh).filter { mayProbe(it) }.toMutableList()
+        var endpoints = 0
+        for (url in endpointUrls.take(MAX_ENDPOINTS_READ)) {
+            if (endpoints == MAX_ENDPOINTS) break
+            val candidate = fresh(url) ?: continue
+            if (mayProbe(candidate)) {
+                candidates += candidate
+                endpoints += 1
+            }
+        }
+        return candidates
+    }
+}

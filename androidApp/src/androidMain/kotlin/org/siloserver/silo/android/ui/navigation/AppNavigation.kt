@@ -1,0 +1,2451 @@
+package org.siloserver.silo.android.ui.navigation
+
+import org.siloserver.silo.common.R as CommonR
+import androidx.compose.ui.res.stringResource
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import org.siloserver.silo.android.auth.ActiveProfileReset
+import org.siloserver.silo.android.profiles.ProfileLaunchAction
+import org.siloserver.silo.android.profiles.profileLaunchAction
+import org.siloserver.silo.common.downloads.DownloadStorage
+import org.siloserver.silo.common.network.ServerReachabilityMonitor
+import org.siloserver.silo.common.network.ServerReachabilityStatus
+import org.siloserver.silo.common.profiles.ProfileAwayTracker
+import org.siloserver.silo.common.profiles.ProfileLaunchPreferences
+import org.siloserver.silo.model.profile.ActiveProfileStore
+import org.siloserver.silo.android.ui.components.rememberVideoSeekIntervals
+import org.siloserver.silo.android.cast.GOOGLE_CAST_LEGACY_SEEK_INTERVALS
+import org.siloserver.silo.android.ui.screens.auth.DevicePairingWrongServerScreen
+import org.siloserver.silo.android.ui.screens.auth.DevicePairingUnknownServerScreen
+import androidx.compose.runtime.collectAsState
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import org.siloserver.silo.android.ui.components.LoadingIndicator
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.key
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.ViewModelStoreOwner
+import androidx.navigation.NavBackStackEntry
+import androidx.navigation.NavHostController
+import org.siloserver.silo.common.ui.marquee.MarqueeBackdrop
+import androidx.lifecycle.DEFAULT_ARGS_KEY
+import androidx.lifecycle.viewmodel.MutableCreationExtras
+import androidx.core.os.bundleOf
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navDeepLink
+import androidx.navigation.navArgument
+import kotlinx.coroutines.flow.map
+import org.siloserver.silo.android.cast.GoogleCastMiniBar
+import org.siloserver.silo.android.cast.SiloCastController
+import org.siloserver.silo.android.cast.SiloCastSessionManager
+import org.siloserver.silo.android.ui.screens.cast.SiloCastLaunchHaptics
+import org.siloserver.silo.android.ui.screens.cast.SiloCastMiniBar
+import org.siloserver.silo.android.ui.screens.cast.SiloCastRemoteScreen
+import org.siloserver.silo.android.ui.screens.MainScreen
+import org.siloserver.silo.android.ui.screens.auth.LoginScreen
+import org.siloserver.silo.android.ui.screens.auth.PasswordChangeScreen
+import org.siloserver.silo.android.ui.screens.auth.DevicePairingScreen
+import org.siloserver.silo.android.ui.screens.auth.ServerSetupScreen
+import org.siloserver.silo.android.ui.screens.auth.SetupScreen
+import org.siloserver.silo.android.ui.screens.auth.InviteClaimScreen
+import org.siloserver.silo.android.ui.screens.auth.SignupScreen
+import org.siloserver.silo.android.ui.screens.onboarding.OnboardingTourScreen
+import org.siloserver.silo.android.ui.screens.boxset.BoxSetScreen
+import org.siloserver.silo.android.ui.screens.browse.BrowseScreen
+import org.siloserver.silo.android.ui.screens.browse.BrowseViewModel
+import org.siloserver.silo.android.ui.screens.browse.SectionBrowseScreen
+import org.siloserver.silo.viewmodel.SectionBrowseArgs
+import org.siloserver.silo.android.ui.screens.calendar.CalendarScreen
+import org.siloserver.silo.android.ui.screens.collections.CollectionDetailScreen
+import org.siloserver.silo.android.ui.screens.collections.CollectionsScreen
+import org.siloserver.silo.android.ui.screens.collections.LibraryCollectionsScreen
+import org.siloserver.silo.android.ui.screens.detail.ItemDetailScreen
+import org.siloserver.silo.android.ui.screens.detail.ItemDetailViewModel
+import org.siloserver.silo.android.ui.screens.watchparty.WatchPartyHandoff
+import org.siloserver.silo.android.ui.screens.watchparty.WatchPartyHubScreen
+import org.siloserver.silo.android.ui.screens.watchparty.WatchPartyLobbyScreen
+import org.siloserver.silo.android.ui.screens.watchparty.WatchPartySoloGuardDialog
+import org.siloserver.silo.android.ui.screens.watchparty.rememberWatchPartySoloGuard
+import org.siloserver.silo.model.watchtogether.RoomSnapshot
+import org.siloserver.silo.repository.WatchTogetherRepository
+import org.siloserver.silo.android.ui.screens.people.PersonDetailScreen
+import org.siloserver.silo.android.ui.screens.people.PersonDetailViewModel
+import org.siloserver.silo.android.ui.screens.notifications.InboxScreen
+import org.siloserver.silo.android.ui.screens.personal.FavoritesScreen
+import org.siloserver.silo.android.ui.screens.personal.HistoryScreen
+import org.siloserver.silo.android.ui.screens.personal.PersonalListsScreen
+import org.siloserver.silo.android.ui.screens.personal.WatchlistScreen
+import org.siloserver.silo.android.ui.screens.player.MobilePlayerRouteTarget
+import org.siloserver.silo.android.ui.screens.player.PlayerScreen
+import org.siloserver.silo.android.ui.screens.player.PlayerViewModel
+import org.siloserver.silo.android.ui.screens.profiles.CreateProfileScreen
+import org.siloserver.silo.android.ui.screens.profiles.EditProfileScreen
+import org.siloserver.silo.android.ui.screens.profiles.ProfileSelectionScreen
+import org.siloserver.silo.android.ui.screens.requests.MyRequestsScreen
+import org.siloserver.silo.android.ui.screens.requests.RequestDiscoverRowScreen
+import org.siloserver.silo.android.ui.screens.requests.RequestDetailScreen
+import org.siloserver.silo.android.ui.screens.requests.RequestsScreen
+import org.siloserver.silo.android.ui.screens.search.MobileSearchMediaType
+import org.siloserver.silo.android.ui.screens.search.SearchScreen
+import org.siloserver.silo.android.ui.screens.search.SearchViewModel
+import org.siloserver.silo.android.ui.screens.servers.AccountDetailScreen
+import org.siloserver.silo.android.ui.screens.servers.AccountsScreen
+import org.siloserver.silo.android.ui.screens.servers.ChangeAccountScreen
+import org.siloserver.silo.android.ui.screens.servers.ServerSwitchDestination
+import org.siloserver.silo.android.ui.screens.settings.SettingsDownloadsScreen
+import org.siloserver.silo.android.ui.screens.settings.SettingsInterfaceScreen
+import org.siloserver.silo.android.ui.screens.settings.SettingsNotificationsScreen
+import org.siloserver.silo.android.ui.screens.settings.SettingsProfileSelectionScreen
+import org.siloserver.silo.android.ui.screens.settings.SettingsPlaybackScreen
+import org.siloserver.silo.android.ui.screens.settings.SettingsScreen
+import org.siloserver.silo.android.ui.screens.settings.SettingsSubtitlesScreen
+import org.siloserver.silo.android.ui.screens.settings.diagnostics.DiagnosticsPromptDialog
+import org.siloserver.silo.common.diagnostics.DiagnosticsLifecycleLogger
+import org.siloserver.silo.android.ui.screens.settings.diagnostics.DiagnosticsReportScreen
+import org.siloserver.silo.android.ui.screens.settings.diagnostics.DiagnosticsSettingsScreen
+import org.siloserver.silo.android.ui.screens.settings.diagnostics.DiagnosticsViewModel
+import org.siloserver.silo.cast.SiloCastPlaybackRequest
+import org.siloserver.silo.common.cards.ProvideCardPresentation
+import org.siloserver.silo.common.cards.ProvideEpisodeSpoilerPrefs
+import org.siloserver.silo.common.settings.ProvideTitleArt
+import org.siloserver.silo.common.settings.TitleArtStore
+import org.siloserver.silo.common.overlays.ProvideCardOverlays
+import org.siloserver.silo.common.player.video.VideoPlayerRouteArgs
+import org.siloserver.silo.common.settings.CardPresentationStore
+import org.siloserver.silo.common.settings.OverlayPrefsStore
+import org.siloserver.silo.network.TokenManager
+import org.siloserver.silo.repository.ProfilePromptAction
+import org.siloserver.silo.repository.ProfileVerificationRecovery
+import org.koin.compose.koinInject
+import org.koin.compose.viewmodel.koinViewModel
+import org.koin.core.parameter.parametersOf
+
+/**
+ * Detail identity actually on screen, which a series redirect can move away
+ * from the route's own `contentId` argument.
+ */
+private const val DisplayedDetailContentIdKey = "displayedDetailContentId"
+
+private fun NavBackStackEntry.displayedDetailContentId(): String? =
+    savedStateHandle.get<String>(DisplayedDetailContentIdKey) ?: arguments?.getString("contentId")
+
+/** Set on a detail entry that a title's "More like this" rail opened. */
+private const val OpenedFromRelatedRailKey = "openedFromRelatedRail"
+
+/** The profile picker and its screens, where a prompt has nothing to add. */
+private val ProfilePromptPickerRoutes: Set<String> = setOf(
+    Route.ProfileSelection.route,
+    Route.CreateProfile.route,
+    Route.EditProfile.ROUTE,
+)
+
+/**
+ * Destinations a profile-verification prompt waits behind: playback and reading
+ * keep going on the session they started with, and the sign-in and server
+ * screens have no profile in use.
+ */
+private val ProfilePromptDeferredRoutes: Set<String> = setOf(
+    Route.Player.ROUTE,
+    Route.AudiobookPlayer.ROUTE,
+    Route.BookReader.ROUTE,
+    Route.SiloCastRemote.route,
+    Route.Login.route,
+    Route.ServerSetup.route,
+    Route.ServerSetupPrefilled.ROUTE,
+    Route.ServerList.route,
+    Route.AccountDetail.ROUTE,
+    Route.ChangeAccount.ROUTE,
+    Route.Setup.route,
+    Route.Signup.route,
+    Route.PairDevice.ROUTE,
+    Route.InviteClaim.ROUTE,
+    Route.PasswordChange.route,
+)
+
+/** Page-to-page cross-fade duration (ms). Snappier than Compose Nav's 700ms default. */
+private const val PageFadeDurationMs = 200
+
+/** Longest the Profile Selection cover stays up while Who's Watching replaces the previous profile's screens. */
+private const val PROFILE_COVER_MAX_MS = 2_000L
+
+/** Screens that show no profile: sign-in, server setup, and the profile picker itself. */
+private val ProfileFreeRoutes: Set<String> get() =
+    MarqueeRoutes + ProfilePromptPickerRoutes + Route.ServerList.route + Route.AccountDetail.ROUTE
+
+internal class PlayerTargetProviderRegistration(
+    val backStackEntryId: String,
+    val target: () -> MobilePlayerRouteTarget?,
+)
+
+internal fun currentPlayerTargetOrNull(
+    currentBackStackEntryId: String?,
+    registration: PlayerTargetProviderRegistration?,
+): MobilePlayerRouteTarget? {
+    if (currentBackStackEntryId == null || registration?.backStackEntryId != currentBackStackEntryId) {
+        return null
+    }
+    return registration.target()
+}
+
+/** First-run routes, drawn transparent over the shared [MarqueeBackdrop]. */
+private val MarqueeRoutes = setOf(
+    Route.ServerSetup.route,
+    Route.ServerSetupPrefilled.ROUTE,
+    Route.Login.route,
+    Route.Setup.route,
+    Route.Signup.route,
+    Route.InviteClaim.ROUTE,
+    Route.ProfileSelection.route,
+    Route.ChangeAccount.ROUTE,
+    Route.PasswordChange.route,
+)
+
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun AppNavigation(
+    navController: NavHostController = rememberNavController(),
+    startDestination: String = Route.Login.route,
+    pendingExternalRoute: ExternalRouteRequest? = null,
+    onExternalRouteConsumed: (ExternalRouteRequest) -> Unit = {},
+    /**
+     * Re-queues [route] as a pending external request. Used when an action
+     * inside a destination is about to send the user through authentication,
+     * which clears the back stack and would otherwise lose that destination.
+     */
+    onRequeueExternalRoute: (String) -> Unit = {},
+) {
+    val tokenManager: TokenManager = koinInject()
+    val serverRegistry: org.siloserver.silo.network.ServerRegistry = koinInject()
+    val authRepository: org.siloserver.silo.repository.AuthRepository = koinInject()
+    val overlayPrefsStore: OverlayPrefsStore = koinInject()
+    val activeProfileStore: ActiveProfileStore = koinInject()
+    val cardPresentationStore: CardPresentationStore = koinInject()
+    val episodeSpoilerStore: org.siloserver.silo.common.settings.EpisodeSpoilerStore = koinInject()
+    val seekIntervalStore: org.siloserver.silo.common.settings.SeekIntervalStore = koinInject()
+    val titleArtStore: TitleArtStore = koinInject()
+    val signOutTeardown: org.siloserver.silo.android.auth.SignOutTeardown = koinInject()
+    val nativeSignInCoordinator: org.siloserver.silo.android.auth.NativeSignInCoordinator = koinInject()
+    val profileSwitchTeardown: org.siloserver.silo.android.auth.ProfileSwitchTeardown = koinInject()
+    val siloCastController: SiloCastController = koinInject()
+    // Lives as long as the nav host, so work started from a destination that is
+    // popped in the same gesture (re-hydrating after a profile switch) is not
+    // cancelled with that destination's own scope.
+    val navScope = rememberCoroutineScope()
+    val profileSwitching by profileSwitchTeardown.switching.collectAsState()
+    // Both "Switch Profile" entry points (profile menu, Settings) run here, so
+    // leaving a tab while settings are pushed cannot cancel the switch; the
+    // teardown ignores a repeat request while one is in flight.
+    val switchProfile: () -> Unit = remember(navController, profileSwitchTeardown) {
+        {
+            navScope.launch {
+                profileSwitchTeardown.switchProfile {
+                    navController.navigate(Route.ProfileSelection.route)
+                }
+            }
+        }
+    }
+    val diagnosticsViewModel = koinViewModel<DiagnosticsViewModel>()
+    val diagnosticsState by diagnosticsViewModel.state.collectAsState()
+    var activePlayerTargetProvider by remember {
+        mutableStateOf<PlayerTargetProviderRegistration?>(null)
+    }
+    val watchTogetherRepository: WatchTogetherRepository = koinInject()
+    val watchPartyHandoff: WatchPartyHandoff = koinInject()
+    // D5: an external link that starts solo playback asks to leave a party first.
+    val externalSoloGuard = rememberWatchPartySoloGuard()
+
+    // The party player loads from the room itself; the route's content
+    // arguments are placeholders only. There is one party player at a time:
+    // when this room's player is already in the back stack, return to it; it
+    // follows the room's selection on its own.
+    fun openPartyPlayer(room: RoomSnapshot, replacing: String?) {
+        val topPlayer = runCatching { navController.getBackStackEntry(Route.Player.ROUTE) }.getOrNull()
+        if (topPlayer?.arguments?.getString("roomId") == room.roomId) {
+            navController.popBackStack(Route.Player.ROUTE, inclusive = false)
+            return
+        }
+        navController.navigate(
+            Route.Player(
+                contentId = room.selectedContentId?.takeIf { it.isNotBlank() } ?: PARTY_PLAYER_PLACEHOLDER_ID,
+                fileId = room.selectedFileId,
+                libraryId = room.selectedLibraryId,
+                roomId = room.roomId,
+            ).route,
+        ) {
+            if (replacing != null) popUpTo(replacing) { inclusive = true }
+        }
+    }
+
+    // Back to the hub below, or replace [replacing] with a new hub.
+    fun openPartyHub(replacing: String) {
+        if (!navController.popBackStack(Route.WatchPartyHub.ROUTE, inclusive = false)) {
+            navController.navigate(Route.WatchPartyHub().route) {
+                popUpTo(replacing) { inclusive = true }
+            }
+        }
+    }
+
+    DisposableEffect(siloCastController) {
+        siloCastController.startBrowsing()
+        onDispose { siloCastController.stopBrowsing() }
+    }
+    SiloCastLaunchHaptics(siloCastController)
+
+    // Graceful handling of server-side session invalidation (refresh 401'd).
+    // The TokenManager has already wiped the active account's tokens (the
+    // account stays, needing to sign in again) by the time this fires: Change
+    // Account while another account has a session, so the expired one shows
+    // "Sign in again" beside it; otherwise Login for the same account.
+    LaunchedEffect(Unit) {
+        tokenManager.sessionExpired.collect {
+            val route = if (serverRegistry.hasOtherSession()) Route.ChangeAccount().route else Route.Login.route
+            navController.navigate(route) {
+                popUpTo(0) { inclusive = true }
+                launchSingleTop = true
+            }
+        }
+    }
+
+    // The server stopped accepting the active profile's PIN proof (an admin
+    // changed the account's access). The recovery has already cleared the
+    // stale profile selection, but not the sign-in; send the user to the
+    // profile picker to choose a profile and enter its PIN again. Playback and
+    // the sign-in screens are not interrupted: the prompt waits until the user
+    // leaves them (or a remote-playback overlay ends), and is dropped after a
+    // sign-out, a server switch, or a profile pick.
+    val profileVerificationRecovery: ProfileVerificationRecovery = koinInject()
+    LaunchedEffect(Unit) {
+        // promptChecks re-emits when a remote-playback overlay ends, so a
+        // prompt deferred behind it does not wait for the next navigation.
+        kotlinx.coroutines.flow.combine(
+            profileVerificationRecovery.promptChecks,
+            navController.currentBackStackEntryFlow,
+        ) { prompt, entry -> prompt to entry.destination.route }
+            .collect { (prompt, route) ->
+                if (prompt == null) return@collect
+                when (
+                    profileVerificationRecovery.actionFor(
+                        prompt = prompt,
+                        currentRoute = route,
+                        deferRoutes = ProfilePromptDeferredRoutes,
+                        pickerRoutes = ProfilePromptPickerRoutes,
+                    )
+                ) {
+                    ProfilePromptAction.Defer -> Unit
+                    // Already on the picker: it reloads itself, and a PIN
+                    // being typed is kept.
+                    ProfilePromptAction.AlreadyThere,
+                    ProfilePromptAction.Drop,
+                    -> profileVerificationRecovery.consume(prompt)
+                    ProfilePromptAction.Navigate -> {
+                        profileVerificationRecovery.consume(prompt)
+                        navController.navigate(Route.ProfileSelection.route) {
+                            popUpTo(0) { inclusive = true }
+                            launchSingleTop = true
+                        }
+                        // Same per-profile teardown as Switch Profile, after
+                        // leaving the shell so it does not repaint first.
+                        overlayPrefsStore.clear()
+                        activeProfileStore.reset()
+                        cardPresentationStore.clear()
+                        seekIntervalStore.clear()
+                        episodeSpoilerStore.clear()
+                        titleArtStore.clear()
+                    }
+                }
+            }
+    }
+
+    // Android can restore Silo's previous back stack over the start route
+    // MainActivity chose: after its process was killed in the background.
+    // When Profile Selection has already cleared the profile at launch, that
+    // brings back the previous profile's screens with no profile behind them,
+    // so go to Who's Watching instead. Look beneath the top too: Manage
+    // Servers over Home would otherwise let Back reach Home with no profile
+    // chosen, and every stack of profile screens has a tab at its root.
+    LaunchedEffect(navController) {
+        val restoredRoute = navController.currentBackStackEntryFlow.first().destination.route
+        val restoresProfileScreens = (restoredRoute != null && restoredRoute !in ProfileFreeRoutes) ||
+            Tab.entries.any { tab -> runCatching { navController.getBackStackEntry(tab.route) }.isSuccess }
+        if (startDestination == Route.ProfileSelection.route &&
+            restoresProfileScreens &&
+            !tokenManager.getAccessToken().isNullOrBlank() &&
+            tokenManager.getProfileId().isNullOrBlank()
+        ) {
+            navController.navigate(Route.ProfileSelection.route) {
+                popUpTo(0) { inclusive = true }
+                launchSingleTop = true
+            }
+        }
+    }
+
+    // Profile Selection's return rule (silo-apple `applyProfileReturnPolicy`):
+    // when Silo comes back from the background and the setting asks, Who's
+    // Watching replaces whatever was on screen. Playback that kept going in
+    // the background never raises the request (see ProfileAwayTracker).
+    val profileAwayTracker: ProfileAwayTracker = koinInject()
+    val profileLaunchPreferences: ProfileLaunchPreferences = koinInject()
+    val activeProfileReset: ActiveProfileReset = koinInject()
+    val downloadStorage: DownloadStorage = koinInject()
+    val reachabilityMonitor: ServerReachabilityMonitor = koinInject()
+    LaunchedEffect(profileAwayTracker) {
+        kotlinx.coroutines.flow.combine(
+            profileAwayTracker.selectionRequired,
+            navController.currentBackStackEntryFlow,
+        ) { required, entry -> required to entry.destination.route }.collect { (required, route) ->
+            if (!required) return@collect
+            // Nothing to replace when signed out, or when no profile is in
+            // use and none of its screens are showing (already choosing a
+            // profile, or adding a server).
+            val profileId = tokenManager.getProfileId()
+            if (route == null ||
+                tokenManager.getAccessToken().isNullOrBlank() ||
+                (profileId.isNullOrBlank() && route in ProfileFreeRoutes)
+            ) {
+                profileAwayTracker.onSelectionHandled()
+                return@collect
+            }
+            val serverId = serverRegistry.activeEntry.value?.id
+            val accountId = serverRegistry.activeEntry.value?.accountId
+            val offlineWithDownloads = withContext(Dispatchers.IO) {
+                hasLocalDownloadsForScope(downloadStorage, serverId, accountId, profileId) &&
+                    !reachabilityMonitor.retryNow().canUseServer
+            }
+            // Re-check after the wait, as silo-apple's return policy does.
+            val action = profileLaunchAction(
+                // One tile with no PIN never asks (multi-account spec §4.2).
+                requiresSelection = profileLaunchPreferences.requiresSelectionAfterBackground() &&
+                    !serverRegistry.hasSingleOpenTile(),
+                startsOfflineOnDownloads = offlineWithDownloads,
+            )
+            if (action != ProfileLaunchAction.AskWhoIsWatching) {
+                profileAwayTracker.onSelectionHandled()
+                return@collect
+            }
+            // Leave the profile's screens before clearing its state, as
+            // Switch Profile does. The reset pushes pending device-setting
+            // writes under this profile before it drops it.
+            navController.navigate(Route.ProfileSelection.route) {
+                popUpTo(0) { inclusive = true }
+                launchSingleTop = true
+            }
+            activeProfileReset.clearActiveProfile()
+            // MainActivity covers the screen while the request is up; lift
+            // it once the previous profile's screens have faded out.
+            withTimeoutOrNull(PROFILE_COVER_MAX_MS) {
+                navController.visibleEntries.first { entries ->
+                    entries.all { it.destination.route in ProfileFreeRoutes }
+                }
+            }
+            profileAwayTracker.onSelectionHandled()
+        }
+    }
+
+    // The offline exception above keeps a profile for its downloads while the
+    // server cannot be reached, with the away interval still recorded. Ask
+    // once the server answers again, without waiting for the next return.
+    // Playback and reading keep going until the user leaves them, as the
+    // profile-verification prompt waits.
+    LaunchedEffect(reachabilityMonitor) {
+        kotlinx.coroutines.flow.combine(
+            reachabilityMonitor.state.map { it.status == ServerReachabilityStatus.Reachable }.distinctUntilChanged(),
+            navController.currentBackStackEntryFlow,
+        ) { reachable, entry -> reachable to entry.destination.route }.collect { (reachable, route) ->
+            if (!reachable || route == null || route in ProfilePromptDeferredRoutes || route in ProfileFreeRoutes) {
+                return@collect
+            }
+            // In use with a profile, a recorded interval that requires
+            // selection is only left behind by that exception: every other
+            // path ends the interval or asks.
+            if (profileAwayTracker.selectionRequired.value ||
+                !profileLaunchPreferences.requiresSelectionAfterBackground() ||
+                tokenManager.getProfileId().isNullOrBlank()
+            ) {
+                return@collect
+            }
+            profileAwayTracker.requestSelection()
+        }
+    }
+
+    fun navigateExternalRoute(route: String) {
+        // An external link to a TAB (silo://downloads) must switch tabs,
+        // not push a second copy of that tab. A duplicate tab entry also
+        // makes the tab anchor ambiguous: popUpTo(route) resolves to the
+        // NEWEST match, so the older anchor entry would survive and Back
+        // could loop through a hidden tab.
+        if (tabForRoute(route) != null) {
+            // Tear the player down BEFORE the tab switch, and without
+            // saving it. tabSwitchNavOptions saves state so a tab keeps
+            // its stack, which is right for a tab — but a saved player
+            // entry keeps its ViewModelStore alive, so onCleared never
+            // runs and the playback session it owns is never stopped.
+            // The save is also keyed to the LOWEST popped destination,
+            // so a later clearBackStack on the player route would not
+            // even find it. Popping first means the player's teardown
+            // runs the ordinary way.
+            // ONLY when the player is the current destination. An
+            // inclusive pop also removes everything above its target,
+            // so a player sitting BELOW other entries — an external
+            // item link pushed over it, say — would take those with it
+            // and silently discard state the viewer expected back.
+            // Leaving that rarer case saved is the pre-existing
+            // behaviour; destroying history to fix it is worse.
+            if (shouldPopPlayerBeforeExternalTab(
+                    navController.currentBackStackEntry?.destination?.route,
+                )
+            ) {
+                navController.popBackStack(
+                    route = Route.Player.ROUTE,
+                    inclusive = true,
+                    saveState = false,
+                )
+            }
+            navController.navigate(route) {
+                tabSwitchNavOptions(navController.bottomMostTabRoute())
+            }
+        } else {
+            val replaceCurrentPlayer = shouldReplaceCurrentPlayer(
+                currentDestinationRoute = navController.currentBackStackEntry
+                    ?.destination?.route,
+                targetRoute = route,
+            )
+            // Single-top only when the arguments agree it really is the
+            // same screen. AndroidX matches the destination NODE, so an
+            // external link to item B while item A's detail is showing
+            // reused A's entry and Back skipped A entirely — the same
+            // defect this branch fixes for in-app navigation.
+            val useSingleTop = navController.currentBackStackEntry?.arguments?.getString("libraryId") == null &&
+                shouldLaunchExternalRouteSingleTop(
+                    currentDestinationRoute = navController.currentBackStackEntry
+                        ?.destination?.route,
+                    currentContentId = navController.currentBackStackEntry?.displayedDetailContentId(),
+                    targetRoute = route,
+                )
+            navController.navigate(route) {
+                if (replaceCurrentPlayer) {
+                    popUpTo(Route.Player.ROUTE) { inclusive = true }
+                }
+                // Decided from the finite external-route producer set,
+                // not punctuation. A route's spelling does not say
+                // whether its arguments identify a distinct request.
+                launchSingleTop = useSingleTop
+            }
+        }
+    }
+
+    val profileRepository: org.siloserver.silo.repository.ProfileRepository = koinInject()
+    val playerSettingsStore: org.siloserver.silo.common.settings.PlayerSettingsStore = koinInject()
+    val notificationTileSwitch = remember {
+        org.siloserver.silo.android.push.NotificationTileSwitch(
+            authRepository, serverRegistry, tokenManager, profileRepository, activeProfileReset, playerSettingsStore,
+        )
+    }
+
+    // The server switch's per-profile teardown: the previous identity's
+    // overlays, active profile and card presentation must not render under
+    // the next one.
+    fun clearSwitchedIdentityCaches() {
+        overlayPrefsStore.clear()
+        activeProfileStore.reset()
+        cardPresentationStore.clear()
+    }
+
+    // For a profile opened without the picker, which would otherwise re-hydrate.
+    suspend fun hydrateProfileStores() {
+        overlayPrefsStore.hydrateIfNeeded()
+        cardPresentationStore.hydrateIfNeeded()
+        seekIntervalStore.hydrateIfNeeded()
+        episodeSpoilerStore.hydrateIfNeeded()
+        titleArtStore.hydrateIfNeeded()
+    }
+
+    // Keyed on request identity, not route text, so delivering the same deep
+    // link again after Back still restarts the wait. The back-stack flow emits
+    // the current entry immediately, covering both "request arrives on Main"
+    // and "Main arrives with a request queued". Delivery itself is one-shot.
+    LaunchedEffect(pendingExternalRoute?.generation) {
+        // A notification opens its tile first; the route then waits below for
+        // that tile's screens, and is checked against it as any other.
+        val tile = (pendingExternalRoute?.scope as? ExternalRouteScope.Identity)?.takeIf { it.switchesToTile }
+        val tileServerId = tile?.serverId
+        val tileAccountId = tile?.accountId
+        val tileProfileId = tile?.profileId
+        if (tileServerId != null && tileAccountId != null && tileProfileId != null) {
+            val destination = notificationTileSwitch.switchTo(tileServerId, tileAccountId, tileProfileId)
+            if (destination != null) {
+                clearSwitchedIdentityCaches()
+                navController.navigate(destination) {
+                    popUpTo(0) { inclusive = true }
+                    launchSingleTop = true
+                }
+                if (destination == Route.OnboardingTour.route) {
+                    navScope.launch { hydrateProfileStores() }
+                }
+            }
+        }
+        consumeExternalRouteOnce(
+            pendingExternalRoute = pendingExternalRoute,
+            // While Profile Selection is replacing the previous profile's
+            // screens, those screens are not a place to deliver a link: it
+            // would open (or start playing) under the profile being cleared,
+            // then be wiped. Wait until the request is handled; Who's
+            // Watching then holds the link as it does at launch.
+            currentDestinationRoutes = kotlinx.coroutines.flow.combine(
+                navController.currentBackStackEntryFlow,
+                profileAwayTracker.selectionRequired,
+            ) { entry, selectionRequired -> entry.destination.route to selectionRequired }
+                .filter { (_, selectionRequired) -> !selectionRequired }
+                .map { (route, _) -> route },
+            isAlreadyAtRoute = { route ->
+                navController.isDisplayingExactPlayerRoute(
+                    route = route,
+                    currentPlayerTarget = currentPlayerTargetOrNull(
+                        currentBackStackEntryId = navController.currentBackStackEntry?.id,
+                        registration = activePlayerTargetProvider,
+                    ),
+                )
+            },
+            navigate = { route ->
+                // D5: solo playback from a link asks to leave a party first.
+                if (route.startsWith("player/") && !route.contains("roomId=")) {
+                    externalSoloGuard.run { navigateExternalRoute(route) }
+                } else {
+                    navigateExternalRoute(route)
+                }
+            },
+            isStillValidForScope = { scope ->
+                // Checked AFTER the wait: the identity can move while a request
+                // sits through setup, login and profile selection.
+                when (scope) {
+                    ExternalRouteScope.Unscoped -> true
+                    is ExternalRouteScope.Identity -> {
+                        // One snapshot, for the same reason the capture side
+                        // takes one: separate getters can tear across a switch
+                        // and validate against an identity that never existed.
+                        val live = tokenManager.snapshotCurrentScope()
+                        scope.matches(
+                            serverId = live?.serverId,
+                            profileId = live?.profileId,
+                            identityGeneration = live?.identityGeneration,
+                            accountId = live?.accountId,
+                        )
+                    }
+                }
+            },
+            onConsumed = onExternalRouteConsumed,
+        )
+    }
+
+    // Re-read the authenticated profile id whenever the current destination
+    // changes (Login → ProfileSelection → Main). This drives card-overlay
+    // hydration off the authenticated identity instead of a one-shot at app
+    // start, where the user is still on Login and the settings calls 401.
+    val currentEntry by navController.currentBackStackEntryAsState()
+    LaunchedEffect(currentEntry?.destination?.route) {
+        DiagnosticsLifecycleLogger.route(currentEntry?.destination?.route)
+    }
+    val overlaySessionKey by produceState<String?>(
+        initialValue = null,
+        currentEntry?.destination?.route,
+    ) {
+        value = tokenManager.getProfileId()
+    }
+
+    ProvideCardOverlays(store = overlayPrefsStore, sessionKey = overlaySessionKey) {
+    ProvideCardPresentation(store = cardPresentationStore, sessionKey = overlaySessionKey) {
+    ProvideEpisodeSpoilerPrefs(store = episodeSpoilerStore, sessionKey = overlaySessionKey) {
+    ProvideTitleArt(store = titleArtStore, sessionKey = overlaySessionKey) {
+    // Shared-element host: lets a tapped poster morph into the item-detail
+    // backdrop. The scope is published via CompositionLocal so deep descendants
+    // (a poster card, the detail hero) can opt in without threading it through
+    // every composable signature in between.
+    SharedTransitionLayout(modifier = Modifier.fillMaxSize()) {
+    // One hand-off shared by every media source. It also carries the browse
+    // deck used by the horizontally paged detail sheet.
+    val heroSourceHandoff = remember { HeroSourceHandoff() }
+    CompositionLocalProvider(
+        LocalSharedTransitionScope provides this,
+        LocalHeroSourceHandoff provides heroSourceHandoff,
+        LocalProfileSwitch provides switchProfile,
+    ) {
+    Box(modifier = Modifier.fillMaxSize()) {
+    // The first-run screens draw over one shared brand-light backdrop that
+    // lives outside the destinations, so it keeps moving while they fade.
+    AnimatedVisibility(
+        visible = currentEntry?.destination?.route in MarqueeRoutes,
+        enter = fadeIn(tween(PageFadeDurationMs)),
+        exit = fadeOut(tween(PageFadeDurationMs)),
+    ) {
+        MarqueeBackdrop()
+    }
+    NavHost(
+        navController = navController,
+        startDestination = startDestination,
+        // Fill the bounded Surface so destinations get a bounded height. Without
+        // this the host wraps to content, leaking unbounded height into screens
+        // like the reader whose WebView paginates against the viewport height.
+        modifier = Modifier.fillMaxSize(),
+        // Item detail is an ordinary full-screen page, so every route shares the
+        // same short fade. It used to be presented as a rounded card rising
+        // from the bottom, which needed the source page held underneath and
+        // then cross-dissolved to hide the seam.
+        enterTransition = { fadeIn(tween(PageFadeDurationMs)) },
+        exitTransition = { fadeOut(tween(PageFadeDurationMs)) },
+        popEnterTransition = { fadeIn(tween(PageFadeDurationMs)) },
+        popExitTransition = { fadeOut(tween(PageFadeDurationMs)) },
+    ) {
+        // ---- Auth flow ----
+        composable(Route.ServerSetup.route) {
+            ServerSetupScreen(
+                onNavigateToSetup = {
+                    navController.navigate(Route.Setup.route) {
+                        popUpTo(Route.ServerSetup.route) { inclusive = true }
+                    }
+                },
+                onNavigateToLogin = { _ ->
+                    navController.navigate(Route.Login.route) {
+                        popUpTo(Route.ServerSetup.route) { inclusive = true }
+                    }
+                },
+                onNavigateToProfiles = {
+                    navController.navigate(Route.ProfileSelection.route) {
+                        popUpTo(Route.ServerSetup.route) { inclusive = true }
+                    }
+                },
+            )
+        }
+        composable(
+            route = Route.ServerSetupPrefilled.ROUTE,
+            arguments = listOf(navArgument("url") { type = NavType.StringType }),
+        ) { backStackEntry ->
+            ServerSetupScreen(
+                prefillUrl = backStackEntry.arguments?.getString("url"),
+                onNavigateToSetup = {
+                    navController.navigate(Route.Setup.route) {
+                        popUpTo(Route.ServerSetupPrefilled.ROUTE) { inclusive = true }
+                    }
+                },
+                onNavigateToLogin = { _ ->
+                    navController.navigate(Route.Login.route) {
+                        popUpTo(Route.ServerSetupPrefilled.ROUTE) { inclusive = true }
+                    }
+                },
+                onNavigateToProfiles = {
+                    navController.navigate(Route.ProfileSelection.route) {
+                        popUpTo(Route.ServerSetupPrefilled.ROUTE) { inclusive = true }
+                    }
+                },
+            )
+        }
+        composable(Route.Login.route) {
+            LoginScreen(
+                onNavigateToSignup = {
+                    navController.navigate(Route.Signup.route)
+                },
+                onNavigateToProfiles = {
+                    // A fresh Who's watching for the account just signed in to:
+                    // whatever was below belonged to the account before it.
+                    navController.navigate(Route.ProfileSelection.route) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                },
+                onChangeServer = {
+                    // Back to the screen this sign-in was opened from (Change
+                    // Account, server setup); at the root, Change Account
+                    // while other accounts or servers are saved, else server
+                    // setup.
+                    when {
+                        navController.previousBackStackEntry != null -> navController.popBackStack()
+                        serverRegistry.hasOtherAccountsOrServers() -> navController.navigate(Route.ChangeAccount().route) {
+                            popUpTo(Route.Login.route) { inclusive = true }
+                        }
+                        else -> navController.navigate(Route.ServerSetup.route) {
+                            popUpTo(Route.Login.route) { inclusive = true }
+                        }
+                    }
+                },
+            )
+        }
+        composable(Route.Setup.route) {
+            SetupScreen(
+                onNavigateToProfiles = {
+                    navController.navigate(Route.ProfileSelection.route) {
+                        popUpTo(Route.Setup.route) { inclusive = true }
+                    }
+                },
+            )
+        }
+        composable(Route.Signup.route) {
+            SignupScreen(
+                onNavigateToLogin = {
+                    navController.popBackStack()
+                },
+                onNavigateToProfiles = {
+                    navController.navigate(Route.ProfileSelection.route) {
+                        popUpTo(Route.Signup.route) { inclusive = true }
+                    }
+                },
+            )
+        }
+        composable(
+            route = Route.InviteClaim.ROUTE,
+            arguments = listOf(
+                navArgument("server") { type = NavType.StringType },
+                navArgument("token") { type = NavType.StringType },
+            ),
+            deepLinks = listOf(
+                navDeepLink { uriPattern = "silo://invite?server={server}&token={token}" },
+            ),
+        ) { backStackEntry ->
+            val server = backStackEntry.arguments?.getString("server").orEmpty()
+            val claimToken = backStackEntry.arguments?.getString("token").orEmpty()
+            InviteClaimScreen(
+                serverUrl = server,
+                token = claimToken,
+                onNavigateToLogin = {
+                    navController.navigate(Route.Login.route) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                },
+                onClaimComplete = {
+                    navController.navigate(Route.ProfileSelection.route) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                },
+            )
+        }
+
+        composable(Route.OnboardingTour.route) {
+            OnboardingTourScreen(
+                onDone = {
+                    navController.navigate(Route.Home.route) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                },
+            )
+        }
+
+        composable(
+            route = Route.PairDevice.ROUTE,
+            arguments = listOf(
+                navArgument("token") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("code") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("serverOrigin") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("serverId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("serverUrl") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
+            // Deliberately NO navDeepLink registrations. While they existed,
+            // Navigation matched the Activity's launch Intent itself when the
+            // graph was installed and landed Pair Device before any
+            // server/token/profile gate had run — the exact bypass
+            // MainActivity's pending-route queue exists to prevent. The
+            // manifest filter still delivers the Intent; MainActivity parses
+            // and queues it.
+        ) { backStackEntry ->
+            val token = backStackEntry.arguments?.getString("token")
+            val code = backStackEntry.arguments?.getString("code")
+            val requiredOrigin = backStackEntry.arguments?.getString("serverOrigin")
+            val requiredServerId = backStackEntry.arguments?.getString("serverId")
+            val linkServerUrl = backStackEntry.arguments?.getString("serverUrl")
+            val knownServers by serverRegistry.entries.collectAsState()
+            val activeServer by serverRegistry.activeEntry.collectAsState()
+            val serverIdentities: org.siloserver.silo.repository.ServerIdentityRepository = koinInject()
+            // A `silo://device?server=` link names its server by deployment
+            // identity; matching it may need a probe, so it resolves async.
+            // Origin-scoped and unscoped links resolve at once, as before.
+            val match by produceState<DeviceLoginServerMatch?>(
+                initialValue = if (requiredServerId == null) {
+                    deviceLoginServerMatch(requiredOrigin, activeServer?.url, knownServers)
+                } else {
+                    null
+                },
+                requiredServerId, requiredOrigin, activeServer?.id, knownServers.map { it.id to it.url },
+            ) {
+                value = if (requiredServerId == null) {
+                    deviceLoginServerMatch(requiredOrigin, activeServer?.url, knownServers)
+                } else {
+                    deviceLoginServerMatchByIdentity(
+                        requiredServerId = requiredServerId,
+                        linkUrl = linkServerUrl,
+                        activeEntry = activeServer,
+                        entries = knownServers,
+                        identityOf = { entry -> serverIdentities.identityOf(entry) },
+                        entriesWithIdentity = serverIdentities::entriesFor,
+                    )
+                }
+            }
+            /** This request again, with [pendingCode] as its code: for re-queueing it. */
+            fun pairDeviceRoute(pendingCode: String?) = Route.PairDevice(
+                token = token,
+                code = pendingCode,
+                serverOrigin = requiredOrigin,
+                serverId = requiredServerId,
+                serverUrl = linkServerUrl,
+            ).route
+            val requeueRoute = pairDeviceRoute(code)
+            val pairingScope = rememberCoroutineScope()
+            val pairingDone: () -> Unit = {
+                if (!navController.popBackStack()) {
+                    navController.navigate(Route.Home.route) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                }
+            }
+            /**
+             * Sign in on [serverId]'s server (the active one when null), then
+             * come back to [pendingCode]: signing in ends at profile selection,
+             * whose popUpTo(0) wipes this destination, so the request is
+             * re-queued. Sign-in runs on the active server, so a different
+             * server becomes active. Runs in the nav host's scope: it
+             * outlives this destination.
+             */
+            fun signInThenReturn(serverId: String?, pendingCode: String?) {
+                navScope.launch {
+                    val switchTo = serverId?.takeIf { it != serverRegistry.activeServerId.value }
+                    if (switchTo != null) authRepository.switchToServer(switchTo)
+                    onRequeueExternalRoute(pairDeviceRoute(pendingCode ?: code))
+                    navController.navigate(Route.Login.route) {
+                        if (switchTo != null) popUpTo(0) { inclusive = true }
+                    }
+                }
+            }
+
+            /**
+             * "Not you? Switch account" (multi-account spec §4.6): approve
+             * with another saved account on [serverId]'s server instead of
+             * signing out of this one. [accountId] null is "Add an account":
+             * the server becomes active with no account and sign-in follows,
+             * its provider asked to offer another account; [startSignIn] (a
+             * provider that takes it) has the login screen start that
+             * sign-in by itself, as on silo-apple. Either way the request is
+             * re-queued and comes back once that account has a profile.
+             */
+            fun switchAccountThenReturn(serverId: String?, pendingCode: String?, accountId: String?, startSignIn: Boolean) {
+                navScope.launch {
+                    val target = serverId ?: serverRegistry.activeServerId.value ?: return@launch
+                    // Settings still waiting to sync go to the account they
+                    // were made on, before the switch.
+                    signOutTeardown.flushPendingSettings()
+                    authRepository.switchToAccount(target, accountId)
+                    if (serverRegistry.activeServerId.value != target || serverRegistry.activeAccountId.value != accountId) {
+                        return@launch
+                    }
+                    clearSwitchedIdentityCaches()
+                    if (accountId == null) nativeSignInCoordinator.requestAccountChoice(target, autoStart = startSignIn)
+                    onRequeueExternalRoute(pairDeviceRoute(pendingCode ?: code))
+                    val destination = when {
+                        tokenManager.getAccessToken().isNullOrBlank() -> Route.Login.route
+                        serverRegistry.activeEntry.value?.profileId.isNullOrBlank() -> Route.ProfileSelection.route
+                        activeProfileReset.clearIfSelectionRequired() -> Route.ProfileSelection.route
+                        else -> Route.OnboardingTour.route
+                    }
+                    navController.navigate(destination) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                    if (destination == Route.OnboardingTour.route) hydrateProfileStores()
+                }
+            }
+            when (val resolved = match) {
+                null -> org.siloserver.silo.android.ui.screens.auth.AuthStage {
+                    androidx.compose.material3.CircularProgressIndicator(
+                        modifier = Modifier.align(androidx.compose.ui.Alignment.Center),
+                    )
+                }
+                is DeviceLoginServerMatch.SwitchRequired -> {
+                    val inPlace = resolved.inPlaceApprovalServer(token, code)
+                    if (inPlace != null) {
+                        // The link's code is approved on the saved server it
+                        // names, with that server's own credentials: the phone
+                        // stays on its active server (silo-apple parity).
+                        DevicePairingScreen(
+                            token = null,
+                            code = code,
+                            serverId = inPlace.id,
+                            lockServer = true,
+                            onDone = pairingDone,
+                            onSignIn = { selectedServerId, typedCode ->
+                                signInThenReturn(selectedServerId ?: inPlace.id, typedCode)
+                            },
+                            onSwitchAccount = { selectedServerId, typedCode, accountId, startSignIn ->
+                                switchAccountThenReturn(selectedServerId ?: inPlace.id, typedCode, accountId, startSignIn)
+                            },
+                        )
+                    } else {
+                        // A `token` link: only the active server's lookup takes it.
+                        DevicePairingWrongServerScreen(
+                            serverName = resolved.entry.displayName,
+                            onSwitch = {
+                                pairingScope.launch {
+                                    authRepository.switchToServer(resolved.entry.id)
+                                    // Profile Selection covers this switch as
+                                    // it does the server list's: a saved
+                                    // profile there needs choosing (and its
+                                    // PIN) again, which routes through the
+                                    // picker below.
+                                    activeProfileReset.clearIfSelectionRequired()
+                                    // Re-queue ONLY if the target server will send
+                                    // the user through auth: that flow ends at
+                                    // profile selection, whose popUpTo(0) wipes this
+                                    // destination and the code would have to be
+                                    // scanned again. Re-queueing unconditionally was
+                                    // worse — with no sign-in needed the request just
+                                    // waited for this screen to close and then
+                                    // reopened it.
+                                    val authRoute = pairingAuthRouteOrNull(
+                                        tokenManager = tokenManager,
+                                        activeEntryProfileId = serverRegistry.activeEntry.value
+                                            ?.profileId,
+                                    )
+                                    if (authRoute != null) {
+                                        onRequeueExternalRoute(requeueRoute)
+                                        // Requeueing alone left the user sitting on
+                                        // a pairing screen for a server they are not
+                                        // signed in to; the queued request only
+                                        // fires once something else takes them
+                                        // somewhere authenticated. Send them.
+                                        navController.navigate(authRoute) {
+                                            popUpTo(0) { inclusive = true }
+                                        }
+                                    }
+                                }
+                            },
+                            onCancel = {
+                                if (!navController.popBackStack()) {
+                                    navController.navigate(Route.Home.route) {
+                                        popUpTo(0) { inclusive = true }
+                                    }
+                                }
+                            },
+                        )
+                    }
+                }
+                is DeviceLoginServerMatch.UnknownServer ->
+                    DevicePairingUnknownServerScreen(
+                        origin = resolved.origin,
+                        onAddServer = {
+                            // Adding a server always runs setup and login, which
+                            // clear this destination — so this one always
+                            // re-queues. The link's address is filled in.
+                            onRequeueExternalRoute(requeueRoute)
+                            val linkOrigin = resolved.origin.takeIf {
+                                it.startsWith("https://", ignoreCase = true) || it.startsWith("http://", ignoreCase = true)
+                            }
+                            navController.navigate(
+                                linkOrigin?.let { Route.ServerSetupPrefilled(it).route } ?: Route.ServerSetup.route,
+                            )
+                        },
+                        onCancel = {
+                            if (!navController.popBackStack()) {
+                                navController.navigate(Route.Home.route) {
+                                    popUpTo(0) { inclusive = true }
+                                }
+                            }
+                        },
+                    )
+                DeviceLoginServerMatch.Active -> DevicePairingScreen(
+                    token = token,
+                    code = code,
+                    serverId = activeServer?.id,
+                    // A link that names this server keeps the code on it.
+                    lockServer = requiredServerId != null || requiredOrigin != null,
+                    onDone = pairingDone,
+                    // "Sign in" after a 401 on the chosen server: sign in there
+                    // (it becomes active) and come back to the typed code.
+                    onSignIn = { selectedServerId, typedCode ->
+                        signInThenReturn(selectedServerId, typedCode)
+                    },
+                    onSwitchAccount = { selectedServerId, typedCode, accountId, startSignIn ->
+                        // "Not you? Switch account": another saved account on
+                        // the server the card names, or a new one; then back
+                        // to this code.
+                        switchAccountThenReturn(selectedServerId, typedCode, accountId, startSignIn)
+                    },
+                )
+            }
+        }
+
+        // ---- Settings › Accounts (servers and their accounts) ----
+        val onAccountsSwitched: (ServerSwitchDestination) -> Unit = { destination ->
+            // Route to whichever screen the new server's stored
+            // credentials can support — Home if a token+profile
+            // already exist (so the user stays signed in), else
+            // ProfileSelection or Login as appropriate.
+            val target = when (destination) {
+                // Through the tour gate, not straight to Home — the
+                // switched-to server's profile may not have seen the
+                // tour; the gate short-circuits when it has.
+                ServerSwitchDestination.Home -> Route.OnboardingTour.route
+                ServerSwitchDestination.ProfileSelection -> Route.ProfileSelection.route
+                ServerSwitchDestination.ChangeAccount -> Route.ChangeAccount().route
+                ServerSwitchDestination.Login -> Route.Login.route
+                ServerSwitchDestination.ServerSetup -> Route.ServerSetup.route
+            }
+            // Overlays and card presentation are cached per profile on
+            // the old server. Drop them so the new server's shell can't
+            // render — or write back — the previous identity's values;
+            // the providers above re-hydrate for the new session.
+            // Parity with the TV shell's server-switch path.
+            clearSwitchedIdentityCaches()
+            // Not seekIntervalStore.clear() or episodeSpoilerStore.clear():
+            // the registry switch has already reset them and started
+            // hydrating the new server's profile through their identity
+            // flow, and a clear here would discard that load.
+            navController.navigate(target) {
+                popUpTo(0) { inclusive = true }
+                launchSingleTop = true
+            }
+        }
+        composable(Route.ServerList.route) {
+            AccountsScreen(
+                onAddServer = { navController.navigate(Route.ServerSetup.route) },
+                onOpenAccount = { accountId -> navController.navigate(Route.AccountDetail(accountId).route) },
+                onSwitched = onAccountsSwitched,
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable(
+            route = Route.AccountDetail.ROUTE,
+            arguments = listOf(navArgument("accountId") { type = NavType.StringType }),
+        ) { backStackEntry ->
+            AccountDetailScreen(
+                accountId = backStackEntry.arguments?.getString("accountId").orEmpty(),
+                onSwitched = onAccountsSwitched,
+                onBack = { navController.popBackStack() },
+            )
+        }
+
+        // ---- Change Account (every saved server's accounts) ----
+        composable(
+            route = Route.ChangeAccount.ROUTE,
+            arguments = listOf(
+                navArgument("addOn") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
+        ) { backStackEntry ->
+            val changeActivity = androidx.activity.compose.LocalActivity.current
+            // The account open when this screen came up. Back returns to the
+            // screen below only while that account is still the one open;
+            // after a sign-in was started elsewhere (the active account
+            // changed) the screens below belong to another account.
+            val openedWith = remember {
+                serverRegistry.activeServerId.value to serverRegistry.activeAccountId.value
+            }
+            val canReturn = navController.previousBackStackEntry != null
+            ChangeAccountScreen(
+                addAccountOn = backStackEntry.arguments?.getString("addOn"),
+                onOpenPicker = {
+                    navController.navigate(Route.ProfileSelection.route) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                },
+                onReturnToPicker = {
+                    if (navController.previousBackStackEntry?.destination?.route == Route.ProfileSelection.route) {
+                        navController.popBackStack()
+                    } else {
+                        // From the avatar menu: the open account's picker, as
+                        // Switch profile shows it, with the shell below.
+                        navScope.launch {
+                            profileSwitchTeardown.switchProfile {
+                                navController.navigate(Route.ProfileSelection.route) {
+                                    popUpTo(Route.ChangeAccount.ROUTE) { inclusive = true }
+                                }
+                            }
+                        }
+                    }
+                },
+                onSignIn = {
+                    // Another account (or none) is active now, so nothing
+                    // below this screen applies; Back from sign-in returns
+                    // here.
+                    navController.navigate(Route.ChangeAccount().route) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                    navController.navigate(Route.Login.route)
+                },
+                onAddServer = { navController.navigate(Route.ServerSetup.route) },
+                onBack = if (canReturn) {
+                    {
+                        val current = serverRegistry.activeServerId.value to serverRegistry.activeAccountId.value
+                        val open = serverRegistry.activeAccount.value?.takeIf { !it.needsSignIn }
+                        when {
+                            current == openedWith -> navController.popBackStack()
+                            // Another account is open: its picker.
+                            open != null -> navController.navigate(Route.ProfileSelection.route) {
+                                popUpTo(0) { inclusive = true }
+                            }
+                            // None is open: this is the root now.
+                            else -> changeActivity?.finish()
+                        }
+                    }
+                } else {
+                    null
+                },
+            )
+        }
+
+        // ---- Profile selection ----
+        composable(Route.ProfileSelection.route) {
+            // Switch Profile opens the picker above Main so Back can cancel it.
+            // Once profile recovery has cleared the selection (a stale PIN
+            // proof), Main has no profile to return to and every request there
+            // would fail, so Back leaves the app, as it does when the picker is
+            // the first screen. A picker opened from the server list or a
+            // sign-in screen (adding a server) has no profile yet either; Back
+            // there still returns to that screen.
+            val pickerActivity = androidx.activity.compose.LocalActivity.current
+            val selectedProfileId = serverRegistry.activeEntry.collectAsState().value?.profileId
+            val previousRoute = navController.previousBackStackEntry?.destination?.route
+            androidx.activity.compose.BackHandler(
+                enabled = selectedProfileId.isNullOrBlank() &&
+                    previousRoute != null &&
+                    previousRoute !in ProfilePromptDeferredRoutes,
+            ) {
+                pickerActivity?.finish()
+            }
+            ProfileSelectionScreen(
+                onNavigateToHome = {
+                    // A chosen profile ends any away interval (silo-apple
+                    // `remember`).
+                    profileLaunchPreferences.clearBackgroundedAt()
+                    // The switch-profile paths dropped the per-profile card
+                    // and seek-interval caches; re-hydrate for the profile just picked. The
+                    // providers above the graph only re-run when the profile id
+                    // itself changes, so re-selecting the SAME profile would
+                    // otherwise render cleared (default) cards until the next
+                    // foreground refresh. Idempotent when they already ran.
+                    navScope.launch {
+                        overlayPrefsStore.hydrateIfNeeded()
+                        cardPresentationStore.hydrateIfNeeded()
+                        seekIntervalStore.hydrateIfNeeded()
+                        episodeSpoilerStore.hydrateIfNeeded()
+                        titleArtStore.hydrateIfNeeded()
+                    }
+                    // Route through the tour gate: OnboardingTourScreen checks
+                    // server-side state and immediately hands off to Home when
+                    // the profile has already completed or skipped the tour.
+                    navController.navigate(Route.OnboardingTour.route) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                },
+                onNavigateToCreateProfile = {
+                    navController.navigate(Route.CreateProfile.route)
+                },
+                onNavigateToEditProfile = { profileId ->
+                    navController.navigate(Route.EditProfile(profileId).route)
+                },
+                onChangeAccount = {
+                    navController.navigate(Route.ChangeAccount().route) { launchSingleTop = true }
+                },
+                onAddAccount = {
+                    val serverId = serverRegistry.activeServerId.value
+                    navController.navigate(Route.ChangeAccount(addAccountOn = serverId).route) { launchSingleTop = true }
+                },
+                onAddServer = { navController.navigate(Route.ServerSetup.route) },
+                onSignInAgain = {
+                    // As Change Account's Sign in again: Back from sign-in
+                    // returns to Change Account, not to a picker with no session.
+                    navController.navigate(Route.ChangeAccount().route) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                    navController.navigate(Route.Login.route)
+                },
+                onSignOut = { removeServer ->
+                    navScope.launch {
+                        val signedOut = if (removeServer) signOutTeardown.signOutAndRemoveServer() else signOutTeardown.signOut()
+                        if (!signedOut) return@launch
+                        navController.navigate(serverRegistry.routeAfterSignOut()) {
+                            popUpTo(0) { inclusive = true }
+                        }
+                    }
+                },
+                onPasswordChangeRequired = {
+                    // The restricted session can't use any screen beneath
+                    // (another server's, or Home), so this becomes the root
+                    // and Back leaves the app, as the picker's Back does then.
+                    navController.navigate(Route.PasswordChange.route) {
+                        popUpTo(0) { inclusive = true }
+                        launchSingleTop = true
+                    }
+                },
+            )
+        }
+        composable(Route.PasswordChange.route) {
+            PasswordChangeScreen(
+                onFinished = {
+                    navController.navigate(Route.ProfileSelection.route) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                },
+                onSignOut = {
+                    navScope.launch {
+                        if (!signOutTeardown.signOut()) return@launch
+                        // As the picker's Sign out: another signed-in account opens Change Account.
+                        navController.navigate(serverRegistry.routeAfterSignOut()) {
+                            popUpTo(0) { inclusive = true }
+                        }
+                    }
+                },
+            )
+        }
+        composable(Route.CreateProfile.route) {
+            CreateProfileScreen(
+                onNavigateBack = { navController.popBackStack() },
+                onProfileCreated = {
+                    navController.popBackStack(
+                        route = Route.ProfileSelection.route,
+                        inclusive = false,
+                    )
+                },
+            )
+        }
+        composable(
+            route = Route.EditProfile.ROUTE,
+            arguments = listOf(
+                navArgument("profileId") { type = NavType.StringType },
+            ),
+        ) { backStackEntry ->
+            val profileId = backStackEntry.arguments?.getString("profileId").orEmpty()
+            EditProfileScreen(
+                profileId = profileId,
+                onNavigateBack = { navController.popBackStack() },
+            )
+        }
+
+        // ---- Main tabs ----
+        composable(Route.Home.route) {
+            // Publish this destination's visibility scope so poster cards in the
+            // home rails can morph into the detail hero on tap.
+            CompositionLocalProvider(LocalNavAnimatedVisibilityScope provides this) {
+                MainScreen(navController, Tab.Home)
+            }
+        }
+        composable(Route.Libraries.route) {
+            MainScreen(navController, Tab.Libraries)
+        }
+        composable(Route.Recommendations.route) {
+            MainScreen(navController, Tab.ForYou)
+        }
+        composable(Route.Downloads.route) {
+            MainScreen(navController, Tab.Downloads)
+        }
+        composable(Route.Inbox.route) {
+            InboxScreen(
+                onBackClick = { navController.popBackStack() },
+                onItemClick = { contentId ->
+                    navController.navigate(Route.ItemDetail(contentId).route)
+                },
+            )
+        }
+        // ---- Legacy route aliases (defensive) ----
+        // Pre-consolidation builds had standalone Video/Audio/Reading
+        // destinations; they were folded into the Home shell. A NavController
+        // back stack restored from such a build could still reference these route
+        // strings — and navigating to a route with no registered destination
+        // throws (crash on launch). Register no-op aliases that redirect to Home
+        // so a restore can never hit an unregistered destination.
+        for (legacyRoute in listOf("video", "audio", "reading")) {
+            composable(legacyRoute) {
+                LaunchedEffect(Unit) {
+                    navController.navigate(Route.Home.route) {
+                        popUpTo(legacyRoute) { inclusive = true }
+                        // A restored stack can already hold Home IMMEDIATELY
+                        // below the legacy entry; without this the redirect adds
+                        // a second one, and a duplicate tab route makes the tab
+                        // anchor ambiguous (popUpTo resolves to the newest
+                        // match). Home further down is not collapsed — this
+                        // checks the new top after the alias is popped.
+                        launchSingleTop = true
+                    }
+                }
+            }
+        }
+        // Same reasoning for the withdrawn admin dashboard, except that Settings
+        // is where its entry point used to live, so that is where it lands.
+        // Registered, never rendered — the admin surface stays deleted.
+        composable("admin") {
+            LaunchedEffect(Unit) {
+                navController.navigate(Route.Settings.route) {
+                    popUpTo("admin") { inclusive = true }
+                    launchSingleTop = true
+                }
+            }
+        }
+        // The Card overlays editor was removed (overlays are edited on the web
+        // app); a saved back stack from an older build can still hold its
+        // route, so keep a hidden redirect to Settings rather than crash on
+        // restore. Registered, never rendered.
+        composable("settings/card_overlays") {
+            LaunchedEffect(Unit) {
+                navController.navigate(Route.Settings.route) {
+                    popUpTo("settings/card_overlays") { inclusive = true }
+                    launchSingleTop = true
+                }
+            }
+        }
+        // The request Approvals screen was removed (request administration is
+        // web admin only); a saved back stack from an older build can still
+        // hold its route, so keep a hidden redirect to Requests rather than
+        // crash on restore. Registered, never rendered.
+        composable("requests/approvals") {
+            LaunchedEffect(Unit) {
+                navController.navigate(Route.Requests.route) {
+                    popUpTo("requests/approvals") { inclusive = true }
+                    launchSingleTop = true
+                }
+            }
+        }
+        composable(Route.Settings.route) {
+            SettingsScreen(
+                onOpenInterface = { navController.navigate(Route.SettingsInterface.route) },
+                onOpenPlayback = { navController.navigate(Route.SettingsPlayback.route) },
+                onOpenSubtitles = { navController.navigate(Route.SettingsSubtitles.route) },
+                onOpenDownloads = { navController.navigate(Route.SettingsDownloads.route) },
+                onOpenNotifications = { navController.navigate(Route.SettingsNotifications.route) },
+                onOpenProfileSelection = { navController.navigate(Route.SettingsProfileSelection.route) },
+                onNavigateToServers = {
+                    navController.navigate(Route.ServerList.route)
+                },
+                onPairDevice = {
+                    navController.navigate(Route.PairDevice().route)
+                },
+                // Same switch as the profile menu: push pending settings,
+                // leave the shell, then drop the per-profile caches.
+                onSwitchProfile = switchProfile,
+                onNavigateToWatchlist = { navController.navigate(Route.Watchlist.route) },
+                onNavigateToFavorites = { navController.navigate(Route.Favorites.route) },
+                onNavigateToHistory = { navController.navigate(Route.History.route) },
+                onNavigateToCollections = { navController.navigate(Route.Collections().route) },
+                onNavigateToDiagnostics = {
+                    navController.navigate(Route.Diagnostics.route)
+                },
+                onLoggedOut = {
+                    navController.navigate(serverRegistry.routeAfterSignOut()) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                },
+                onBackClick = { navController.popBackStack() },
+            )
+        }
+        // Settings sub-pages share the overview's view model, so the value a
+        // page changes is the value its overview row shows on the way back.
+        composable(Route.SettingsInterface.route) { entry ->
+            SettingsInterfaceScreen(
+                viewModel = koinViewModel(viewModelStoreOwner = settingsOwner(navController, entry)),
+                onBackClick = { navController.popBackStack() },
+            )
+        }
+        composable(Route.SettingsPlayback.route) { entry ->
+            SettingsPlaybackScreen(
+                viewModel = koinViewModel(viewModelStoreOwner = settingsOwner(navController, entry)),
+                onBackClick = { navController.popBackStack() },
+            )
+        }
+        composable(Route.SettingsSubtitles.route) { entry ->
+            SettingsSubtitlesScreen(
+                viewModel = koinViewModel(viewModelStoreOwner = settingsOwner(navController, entry)),
+                onBackClick = { navController.popBackStack() },
+            )
+        }
+        composable(Route.SettingsDownloads.route) { entry ->
+            SettingsDownloadsScreen(
+                viewModel = koinViewModel(viewModelStoreOwner = settingsOwner(navController, entry)),
+                downloadsViewModel = koinViewModel(),
+                onBackClick = { navController.popBackStack() },
+            )
+        }
+        composable(Route.SettingsNotifications.route) { entry ->
+            SettingsNotificationsScreen(
+                viewModel = koinViewModel(viewModelStoreOwner = settingsOwner(navController, entry)),
+                onBackClick = { navController.popBackStack() },
+            )
+        }
+        composable(Route.SettingsProfileSelection.route) {
+            SettingsProfileSelectionScreen(onBackClick = { navController.popBackStack() })
+        }
+        composable(Route.Diagnostics.route) {
+            DiagnosticsSettingsScreen(
+                onBackClick = { navController.popBackStack() },
+                onReportSelected = { reportId ->
+                    navController.navigate(Route.DiagnosticsReport(reportId).route)
+                },
+            )
+        }
+        composable(
+            route = Route.DiagnosticsReport.ROUTE,
+            arguments = listOf(navArgument("reportId") { type = NavType.StringType }),
+        ) { backStackEntry ->
+            DiagnosticsReportScreen(
+                reportId = backStackEntry.arguments?.getString("reportId").orEmpty(),
+                onBackClick = { navController.popBackStack() },
+            )
+        }
+        composable(Route.SiloCastRemote.route) {
+            SiloCastRemoteScreen(onBack = { navController.popBackStack() })
+        }
+        composable(
+            route = Route.Search.ROUTE,
+            arguments = listOf(
+                navArgument("mediaType") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
+        ) { backStackEntry ->
+            val searchViewModel = koinViewModel<SearchViewModel>()
+            SearchScreen(
+                onItemClick = { contentId ->
+                    navController.navigate(Route.ItemDetail(contentId).route)
+                },
+                onBoxSetClick = { boxSet ->
+                    navController.navigate(Route.BoxSet(boxSet.id, boxSet.libraryId).route)
+                },
+                onPersonClick = { personId ->
+                    navController.navigate(Route.PersonDetail(personId).route)
+                },
+                onRequestMediaClick = { mediaType, tmdbId ->
+                    navController.navigate(Route.RequestDetail(mediaType, tmdbId).route)
+                },
+                onRequestLibraryItemClick = { contentId ->
+                    navController.navigate(Route.ItemDetail(contentId).route)
+                },
+                onBackClick = { navController.popBackStack() },
+                viewModel = searchViewModel,
+                initialMediaType = MobileSearchMediaType.fromRouteValue(
+                    backStackEntry.arguments?.getString("mediaType"),
+                ),
+            )
+        }
+
+        // ---- Requests ----
+        val openRequestDetail: (String, Int) -> Unit = { mediaType, tmdbId ->
+            navController.navigate(Route.RequestDetail(mediaType, tmdbId).route)
+        }
+        val openRequestLibraryItem: (String) -> Unit = { contentId ->
+            navController.navigate(Route.ItemDetail(contentId).route)
+        }
+        composable(Route.Requests.route) {
+            RequestsScreen(
+                onBackClick = { navController.popBackStack() },
+                onMyRequestsClick = { navController.navigate(Route.MyRequests.route) },
+                onRequestDetailClick = openRequestDetail,
+                onLibraryItemClick = openRequestLibraryItem,
+                onDiscoverRowClick = { key, title -> navController.navigate(Route.RequestDiscoverRow(key, title).route) },
+            )
+        }
+        composable(
+            route = Route.RequestDiscoverRow.ROUTE,
+            arguments = listOf(
+                navArgument("key") { type = NavType.StringType },
+                navArgument("title") { type = NavType.StringType; defaultValue = "" },
+            ),
+        ) { backStackEntry ->
+            RequestDiscoverRowScreen(
+                rowKey = backStackEntry.arguments?.getString("key").orEmpty(),
+                title = backStackEntry.arguments?.getString("title").orEmpty(),
+                onBackClick = { navController.popBackStack() },
+                onRequestDetailClick = openRequestDetail,
+                onLibraryItemClick = openRequestLibraryItem,
+            )
+        }
+        composable(Route.MyRequests.route) {
+            MyRequestsScreen(
+                onBackClick = { navController.popBackStack() },
+                onRequestDetailClick = openRequestDetail,
+                onLibraryItemClick = openRequestLibraryItem,
+            )
+        }
+        composable(
+            route = Route.RequestDetail.ROUTE,
+            arguments = listOf(
+                navArgument("mediaType") { type = NavType.StringType },
+                navArgument("tmdbId") { type = NavType.IntType },
+            ),
+        ) { backStackEntry ->
+            val mediaType = backStackEntry.arguments?.getString("mediaType").orEmpty()
+            val tmdbId = backStackEntry.arguments?.getInt("tmdbId") ?: 0
+            RequestDetailScreen(
+                mediaType = mediaType,
+                tmdbId = tmdbId,
+                onBackClick = { navController.popBackStack() },
+                onRequestDetailClick = openRequestDetail,
+                onLibraryItemClick = openRequestLibraryItem,
+            )
+        }
+
+        // ---- Browse / Catalog ----
+        composable(
+            route = Route.Browse.ROUTE,
+            arguments = listOf(
+                navArgument("libraryId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
+        ) { backStackEntry ->
+            val browseViewModel = koinViewModel<BrowseViewModel>()
+            BrowseScreen(
+                onItemClick = { contentId ->
+                    navController.navigate(
+                        Route.ItemDetail(
+                            contentId,
+                            libraryId = backStackEntry.arguments?.getString("libraryId")?.toIntOrNull(),
+                        ).route,
+                    )
+                },
+                onBackClick = { navController.popBackStack() },
+                viewModel = browseViewModel,
+            )
+        }
+
+        composable(
+            route = Route.CollectionDetail.ROUTE,
+            arguments = listOf(
+                navArgument("collectionId") { type = NavType.StringType },
+                navArgument("libraryId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("source") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("mediaScope") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
+        ) { backStackEntry ->
+            CollectionDetailScreen(
+                collectionId = backStackEntry.arguments?.getString("collectionId") ?: "",
+                onBackClick = { navController.popBackStack() },
+                // Collection items can live in other libraries, and a
+                // library-scoped item read 404s for those. Open them, and
+                // shuffle picks, unscoped, like the web client.
+                onShuffleStarted = { shuffle ->
+                    navController.navigate(
+                        org.siloserver.silo.android.ui.screens.shuffle.shufflePlayerRoute(shuffle),
+                    )
+                },
+                onItemClick = { contentId ->
+                    navController.navigate(Route.ItemDetail(contentId).route)
+                },
+            )
+        }
+
+        composable(
+            route = Route.SectionBrowse.ROUTE,
+            arguments = listOf(
+                navArgument("sectionId") { type = NavType.StringType },
+                navArgument("title") {
+                    type = NavType.StringType
+                    defaultValue = ""
+                },
+                navArgument("libraryId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("mediaScope") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
+        ) { backStackEntry ->
+            val libraryId = backStackEntry.arguments?.getString("libraryId")?.toIntOrNull()
+            SectionBrowseScreen(
+                args = SectionBrowseArgs(
+                    sectionId = backStackEntry.arguments?.getString("sectionId").orEmpty(),
+                    title = backStackEntry.arguments?.getString("title").orEmpty(),
+                    libraryId = libraryId,
+                    mediaScope = backStackEntry.arguments?.getString("mediaScope")
+                        ?.takeIf { it in setOf("movie", "series") },
+                ),
+                onBackClick = { navController.popBackStack() },
+                onItemClick = { item -> navController.navigate(sectionBrowseDetailRoute(item, libraryId)) },
+            )
+        }
+
+        // ---- Detail screens ----
+        composable(
+            route = Route.BoxSet.ROUTE,
+            arguments = listOf(
+                navArgument("boxSetId") { type = NavType.StringType },
+                navArgument("libraryId") { type = NavType.StringType },
+            ),
+        ) { backStackEntry ->
+            val boxSetId = backStackEntry.arguments?.getString("boxSetId").orEmpty()
+            val boxSetLibraryId = backStackEntry.arguments?.getString("libraryId").orEmpty()
+            val libraryId = boxSetLibraryId.toIntOrNull()
+            BoxSetScreen(
+                viewModel = koinViewModel { parametersOf(boxSetId, boxSetLibraryId) },
+                onBackClick = { navController.popBackStack() },
+                onPlayMovie = { contentId, resumePositionSeconds ->
+                    val launchedRemotely = siloCastController.launchOnConnectedTarget(
+                        SiloCastPlaybackRequest(
+                            contentId = contentId,
+                            libraryId = libraryId,
+                            // A box set's movies carry no saved position. Leave the
+                            // resume to the player instead of forcing a start over.
+                            startFromBeginning = false,
+                            resumePosition = resumePositionSeconds,
+                        ),
+                    )
+                    if (launchedRemotely) {
+                        navController.navigate(Route.SiloCastRemote.route) { launchSingleTop = true }
+                    } else {
+                        navController.navigate(
+                            Route.Player(
+                                libraryId = libraryId,
+                                contentId = contentId,
+                                resumePositionSeconds = resumePositionSeconds,
+                            ).route,
+                        )
+                    }
+                },
+                onMovieClick = { contentId ->
+                    navController.navigate(Route.ItemDetail(contentId, libraryId = libraryId).route)
+                },
+            )
+        }
+
+        composable(
+            route = Route.ItemDetail.ROUTE,
+            arguments = listOf(
+                navArgument("libraryId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("contentId") { type = NavType.StringType },
+                navArgument("seasonNumber") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("episodeContentId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
+        ) { backStackEntry ->
+            val libraryId = backStackEntry.arguments?.getString("libraryId")?.toIntOrNull()
+            // Keep the destination scope available to media cards nested in
+            // the detail page so the poster shared-element hand-off still runs.
+            CompositionLocalProvider(LocalNavAnimatedVisibilityScope provides this) {
+            val initialContentId = backStackEntry.arguments?.getString("contentId").orEmpty()
+            val openingArtworkUrl = remember(initialContentId) { heroSourceHandoff.pendingArtworkUrl }
+            val openingArtworkThumbhash = remember(initialContentId) {
+                heroSourceHandoff.pendingArtworkThumbhash
+            }
+            LaunchedEffect(Unit) {
+                heroSourceHandoff.pendingArtworkUrl = null
+                heroSourceHandoff.pendingArtworkThumbhash = null
+            }
+            // A season or episode detail replaces this page's content with its
+            // series in place, preserving the Back destination. Saved across
+            // recreation so the redirect does not have to run again.
+            var resolvedSeriesId by rememberSaveable(initialContentId) { mutableStateOf<String?>(null) }
+            var resolvedSeason by rememberSaveable(initialContentId) { mutableStateOf<Int?>(null) }
+            var resolvedEpisodeId by rememberSaveable(initialContentId) { mutableStateOf<String?>(null) }
+            // The reverse: a series opened for one of its episodes that cannot
+            // load shows that episode, which then stays put.
+            var fallbackEpisodeId by rememberSaveable(initialContentId) { mutableStateOf<String?>(null) }
+            val resolvedContentId = fallbackEpisodeId ?: resolvedSeriesId ?: initialContentId
+            SideEffect {
+                // A redirected episode now displays Series. External links
+                // must compare against this identity, not the original args.
+                backStackEntry.savedStateHandle[DisplayedDetailContentIdKey] = resolvedContentId
+            }
+            val detailViewModel: ItemDetailViewModel = if (resolvedContentId == initialContentId) {
+                koinViewModel()
+            } else {
+                koinViewModel(
+                    key = "detail-${backStackEntry.id}-$resolvedContentId",
+                    extras = MutableCreationExtras(backStackEntry.defaultViewModelCreationExtras).apply {
+                        // Koin supplies SavedStateHandle from creation extras
+                        // ahead of explicit parameters, so replace its route args.
+                        set(DEFAULT_ARGS_KEY, bundleOf(
+                            "contentId" to resolvedContentId,
+                            "libraryId" to libraryId?.toString(),
+                            "seasonNumber" to resolvedSeason?.toString(),
+                            "episodeContentId" to resolvedEpisodeId,
+                        ))
+                    },
+                )
+            }
+            CompositionLocalProvider(LocalHeroSourceHandoff provides heroSourceHandoff) {
+            key(resolvedContentId) {
+            ItemDetailScreen(
+                openingArtworkUrl = openingArtworkUrl,
+                openingArtworkThumbhash = openingArtworkThumbhash,
+                onBackClick = { navController.popBackStack() },
+                onPlayClick = {
+                        contentId, fileId, versionChosen, audioTrackIndex, subtitleTrackIndex, resumePositionSeconds ->
+                    val launchedRemotely = siloCastController.launchOnConnectedTarget(
+                        SiloCastPlaybackRequest(
+                            contentId = contentId,
+                            libraryId = libraryId,
+                            fileId = fileId,
+                            audioTrackIndex = audioTrackIndex,
+                            subtitleTrackIndex = subtitleTrackIndex,
+                            startFromBeginning = resumePositionSeconds == null,
+                            resumePosition = resumePositionSeconds,
+                            pinsVersion = true.takeIf { versionChosen && fileId != null },
+                        ),
+                    )
+                    if (launchedRemotely) {
+                        navController.navigate(Route.SiloCastRemote.route) { launchSingleTop = true }
+                    } else {
+                        navController.navigate(
+                            Route.Player(
+                                libraryId = libraryId,
+                                contentId = contentId,
+                                fileId = fileId,
+                                versionChosen = versionChosen,
+                                audioTrackIndex = audioTrackIndex,
+                                subtitleTrackIndex = subtitleTrackIndex,
+                                resumePositionSeconds = resumePositionSeconds,
+                            ).route,
+                        )
+                    }
+                },
+                onSimilarItemClick = { contentId ->
+                    if (!navController.navigateToRelatedItemDetail(contentId)) {
+                        // The tapped card handed off its artwork, but no new page
+                        // opened to take it, so clear it for the next detail.
+                        heroSourceHandoff.pendingKey = null
+                        heroSourceHandoff.pendingArtworkUrl = null
+                        heroSourceHandoff.pendingArtworkThumbhash = null
+                    }
+                },
+                onEpisodeDetailClick = { contentId ->
+                    navController.navigate(Route.ItemDetail(contentId, libraryId = libraryId).route)
+                },
+                onSeriesClick = { seriesId ->
+                    navController.navigate(Route.ItemDetail(seriesId, libraryId = libraryId).route)
+                },
+                onSeriesDetailReplace = { seriesId, seasonNumber, episodeId ->
+                    resolvedSeason = seasonNumber
+                    resolvedEpisodeId = episodeId
+                    resolvedSeriesId = seriesId
+                },
+                onEpisodeFallback = { episodeId ->
+                    resolvedSeason = null
+                    resolvedEpisodeId = null
+                    resolvedSeriesId = null
+                    fallbackEpisodeId = episodeId
+                },
+                allowSeriesRedirect = fallbackEpisodeId == null,
+                onShuffleStarted = { shuffle ->
+                    navController.navigate(
+                        org.siloserver.silo.android.ui.screens.shuffle.shufflePlayerRoute(shuffle, libraryId),
+                    )
+                },
+                onPersonClick = { personId ->
+                    personId.toLongOrNull()?.let { id ->
+                        navController.navigate(Route.PersonDetail(id).route)
+                    }
+                },
+                onAudiobookPlayClick = { contentId, fileId, fromStart, startPosition ->
+                    navController.navigate(
+                        Route.AudiobookPlayer(contentId, fileId, fromStart, startPosition, libraryId).route,
+                    )
+                },
+                onBookReadClick = { contentId, fileId ->
+                    navController.navigate(Route.BookReader(contentId, fileId, libraryId).route)
+                },
+                libraryId = libraryId,
+                onWatchParty = { item ->
+                    navController.navigate(Route.WatchPartyHub(host = watchPartyHandoff.offerHost(item)).route)
+                },
+                onPartySelected = { room -> openPartyPlayer(room, replacing = null) },
+                onOpenCastRemote = {
+                    navController.navigate(Route.SiloCastRemote.route) { launchSingleTop = true }
+                },
+                onBoxSetClick = { boxSetId, boxSetLibraryId ->
+                    navController.navigate(Route.BoxSet(boxSetId, boxSetLibraryId).route)
+                },
+                onBoxSetMovieClick = { contentId, boxSetLibraryId ->
+                    navController.navigate(Route.ItemDetail(contentId, libraryId = boxSetLibraryId.toIntOrNull()).route)
+                },
+                viewModel = detailViewModel,
+            )
+            }
+            }
+            }
+        }
+
+        // ---- Watch Party ----
+        composable(
+            route = Route.WatchPartyHub.ROUTE,
+            arguments = listOf(
+                navArgument(Route.WatchPartyHub.ARG_INVITE) {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument(Route.WatchPartyHub.ARG_HOST) {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
+        ) { backStackEntry ->
+            WatchPartyHubScreen(
+                inviteId = backStackEntry.arguments?.getString(Route.WatchPartyHub.ARG_INVITE),
+                hostId = backStackEntry.arguments?.getString(Route.WatchPartyHub.ARG_HOST),
+                onBack = { navController.popBackStack() },
+                // The hub stays below the lobby: it owns a create that may
+                // still be staging the host's item.
+                onOpenLobby = { roomId -> navController.navigate(Route.WatchPartyLobby(roomId).route) },
+                onOpenPlayer = { room -> openPartyPlayer(room, replacing = null) },
+            )
+        }
+
+        composable(
+            route = Route.WatchPartyLobby.ROUTE,
+            arguments = listOf(
+                navArgument(Route.WatchPartyLobby.ARG_ROOM_ID) { type = NavType.StringType },
+            ),
+        ) { backStackEntry ->
+            val roomId = backStackEntry.arguments
+                ?.getString(Route.WatchPartyLobby.ARG_ROOM_ID)
+                .orEmpty()
+            // A lobby restored without a live membership (process death):
+            // the room token was memory-only, so open the hub and its Rejoin
+            // instead of re-adopting silently.
+            val live = remember(roomId) {
+                watchTogetherRepository.roomSnapshot.value?.roomId == roomId ||
+                    watchTogetherRepository.ended.value?.roomId == roomId
+            }
+            if (!live) {
+                LaunchedEffect(roomId) { openPartyHub(replacing = Route.WatchPartyLobby.ROUTE) }
+            } else {
+                WatchPartyLobbyScreen(
+                    roomId = roomId,
+                    onBack = { navController.popBackStack() },
+                    onOpenPlayer = { room -> openPartyPlayer(room, replacing = Route.WatchPartyLobby.ROUTE) },
+                    onPartyEnded = { openPartyHub(replacing = Route.WatchPartyLobby.ROUTE) },
+                    onLeft = { navController.popBackStack() },
+                    onOpenDetail = { contentId -> navController.navigate(Route.ItemDetail(contentId).route) },
+                )
+            }
+        }
+
+        // ---- Audiobook player (audio-only UI) ----
+        composable(
+            route = Route.AudiobookPlayer.ROUTE,
+            arguments = listOf(
+                navArgument("libraryId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument(Route.AudiobookPlayer.ARG_CONTENT_ID) { type = NavType.StringType },
+                navArgument(Route.AudiobookPlayer.ARG_FILE_ID) {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument(Route.AudiobookPlayer.ARG_FROM_START) {
+                    type = NavType.BoolType
+                    defaultValue = false
+                },
+                navArgument(Route.AudiobookPlayer.ARG_START_POSITION) {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
+        ) {
+            org.siloserver.silo.android.ui.screens.audiobook.AudiobookPlayerScreen(
+                onBackClick = { navController.popBackStack() },
+            )
+        }
+
+        // ---- Book reader (dispatches on format) ----
+        composable(
+            route = Route.BookReader.ROUTE,
+            arguments = listOf(
+                navArgument("libraryId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument(Route.BookReader.ARG_CONTENT_ID) { type = NavType.StringType },
+                navArgument(Route.BookReader.ARG_FILE_ID) {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
+        ) {
+            org.siloserver.silo.android.ui.screens.reader.ReaderScreen(
+                onBackClick = { navController.popBackStack() },
+            )
+        }
+
+        composable(
+            route = Route.PersonDetail.ROUTE,
+            arguments = listOf(
+                navArgument("personId") { type = NavType.LongType },
+            ),
+        ) {
+            val personViewModel = koinViewModel<PersonDetailViewModel>()
+            PersonDetailScreen(
+                onBackClick = { navController.popBackStack() },
+                onItemClick = { contentId ->
+                    navController.navigate(Route.ItemDetail(contentId).route)
+                },
+                viewModel = personViewModel,
+            )
+        }
+
+        // ---- Player (fullscreen) ----
+        composable(
+            route = Route.Player.ROUTE,
+            arguments = listOf(
+                navArgument("libraryId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("contentId") { type = NavType.StringType },
+                navArgument("fileId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("quality") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("audioTrackIndex") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("subtitleTrackIndex") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("resumePosition") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("roomId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("shuffleId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("versionChosen") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
+        ) { backStackEntry ->
+            val playerViewModel = koinViewModel<PlayerViewModel>()
+            DisposableEffect(backStackEntry.id, playerViewModel) {
+                val registration = PlayerTargetProviderRegistration(
+                    backStackEntryId = backStackEntry.id,
+                    target = playerViewModel::currentExternalRouteTarget,
+                )
+                activePlayerTargetProvider = registration
+                onDispose {
+                    if (activePlayerTargetProvider === registration) {
+                        activePlayerTargetProvider = null
+                    }
+                }
+            }
+            PlayerScreen(
+                libraryId = backStackEntry.arguments?.getString("libraryId")?.toIntOrNull(),
+                contentId = backStackEntry.arguments?.getString("contentId") ?: "",
+                initialFileId = backStackEntry.arguments?.getString("fileId")?.toIntOrNull(),
+                initialVersionChosen = backStackEntry.arguments?.getString("versionChosen") == "true",
+                initialQuality = VideoPlayerRouteArgs.normalizeQuality(
+                    backStackEntry.arguments?.getString("quality"),
+                ),
+                initialAudioTrackIndex = backStackEntry.arguments?.getString("audioTrackIndex")?.toIntOrNull(),
+                initialSubtitleTrackIndex = backStackEntry.arguments?.getString("subtitleTrackIndex")?.toIntOrNull(),
+                resumePositionOverride = VideoPlayerRouteArgs.parseResumePosition(
+                    backStackEntry.arguments?.getString("resumePosition"),
+                ),
+                roomId = backStackEntry.arguments?.getString("roomId"),
+                shuffleId = backStackEntry.arguments?.getString("shuffleId"),
+                navController = navController,
+                viewModel = playerViewModel,
+            )
+        }
+
+        // ---- Personal data ----
+        composable(Route.Favorites.route) {
+            FavoritesScreen(
+                onBackClick = { navController.popBackStack() },
+                onItemClick = { contentId ->
+                    navController.navigate(Route.ItemDetail(contentId).route)
+                },
+            )
+        }
+        composable(Route.Watchlist.route) {
+            WatchlistScreen(
+                onBackClick = { navController.popBackStack() },
+                onItemClick = { contentId ->
+                    navController.navigate(Route.ItemDetail(contentId).route)
+                },
+            )
+        }
+        composable(Route.PersonalLists.route) {
+            PersonalListsScreen(
+                onBackClick = { navController.popBackStack() },
+                onItemClick = { contentId ->
+                    navController.navigate(Route.ItemDetail(contentId).route)
+                },
+            )
+        }
+        composable(Route.Calendar.route) {
+            MainScreen(navController, Tab.Calendar)
+        }
+        composable(Route.History.route) {
+            HistoryScreen(
+                onBackClick = { navController.popBackStack() },
+                onItemClick = { contentId ->
+                    navController.navigate(Route.ItemDetail(contentId).route)
+                },
+            )
+        }
+        composable(
+            route = Route.Collections.ROUTE,
+            arguments = listOf(
+                navArgument("libraryId") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
+        ) { backStackEntry ->
+            val libraryId = backStackEntry.arguments?.getString("libraryId")?.toIntOrNull()
+            if (libraryId != null) {
+                LibraryCollectionsScreen(
+                    onBackClick = { navController.popBackStack() },
+                    onCollectionClick = { collection ->
+                        navController.navigate(
+                            libraryCollectionDetailRoute(collection, libraryId),
+                        )
+                    },
+                )
+            } else {
+                CollectionsScreen(
+                    onBackClick = { navController.popBackStack() },
+                    onCollectionClick = { collectionId ->
+                        navController.navigate(Route.CollectionDetail(collectionId).route)
+                    },
+                )
+            }
+        }
+
+    }
+    val membershipRepository: org.siloserver.silo.repository.PersonalDataRepository = koinInject()
+    org.siloserver.silo.common.ui.MembershipNoticeHost(
+        actions = membershipRepository.memberships,
+        deferred = currentEntry?.destination?.route == Route.Player.ROUTE ||
+            currentEntry?.destination?.route == Route.AudiobookPlayer.ROUTE,
+        legacyModifier = Modifier.align(androidx.compose.ui.Alignment.BottomCenter).fillMaxWidth(),
+    ) { notice ->
+        org.siloserver.silo.android.ui.components.SiloDialog(
+            title = notice.title,
+            message = notice.message,
+            onDismissRequest = notice.onDismiss,
+            actions = listOf(
+                org.siloserver.silo.android.ui.components.SiloDialogAction(
+                    label = notice.actionLabel,
+                    onClick = notice.onAction,
+                    style = org.siloserver.silo.android.ui.components.SiloDialogActionStyle.Primary,
+                ),
+                org.siloserver.silo.android.ui.components.SiloDialogAction(label = stringResource(CommonR.string.shell_notice_ok), onClick = notice.onDismiss),
+            ),
+        )
+    }
+        diagnosticsState.prompt
+            ?.takeIf {
+                currentEntry?.destination?.route != Route.Diagnostics.route &&
+                    currentEntry?.destination?.route != Route.DiagnosticsReport.ROUTE
+            }
+            ?.let { prompt ->
+            DiagnosticsPromptDialog(
+                prompt = prompt,
+                onReview = { navController.navigate(Route.Diagnostics.route) },
+                onSend = { diagnosticsViewModel.uploadPrompt(prompt) },
+                onAlwaysSend = { diagnosticsViewModel.alwaysSendPrompt(prompt) },
+                onDontSend = { diagnosticsViewModel.declinePrompt(prompt) },
+                allowAlwaysSend = diagnosticsState.allowsAutomaticUpload,
+            )
+        }
+        // Menu-less routes (detail screens etc.) get the cast bar as a bottom
+        // overlay. Tab routes render it inside MainScreen's Scaffold, stacked
+        // above the nav menu (iOS placement); the full remote and the local
+        // player own their whole screen.
+        val currentRoute = currentEntry?.destination?.route
+        val castBarInlineRoutes = setOf(
+            Route.Home.route,
+            Route.Libraries.route,
+            Route.Recommendations.route,
+            Route.Downloads.route,
+            Route.Calendar.route,
+            Route.SiloCastRemote.route,
+            Route.Player.ROUTE,
+        )
+        if (currentRoute !in castBarInlineRoutes) {
+            SiloCastMiniBar(
+                controller = siloCastController,
+                onOpenRemote = { navController.navigate(Route.SiloCastRemote.route) },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding(),
+            )
+        }
+
+        // Google Cast (Chromecast) mini controller — app-wide except the player,
+        // which shows the full cast takeover overlay instead. On tab routes it
+        // stacks above MainScreen's bottom nav menu.
+        val googleCastManager: SiloCastSessionManager = koinInject()
+        val googleCastState by googleCastManager.castState.collectAsState()
+        if (googleCastState.isConnected && currentRoute != Route.Player.ROUTE) {
+            val tabRoutes = setOf(
+                Route.Home.route,
+                Route.Libraries.route,
+                Route.Recommendations.route,
+                Route.Downloads.route,
+                Route.Calendar.route,
+            )
+            // Profile-wide video intervals; the mini bar's 30s/30s on older servers.
+            val castSeekIntervals = rememberVideoSeekIntervals(GOOGLE_CAST_LEGACY_SEEK_INTERVALS)
+            GoogleCastMiniBar(
+                castState = googleCastState,
+                onPlayPause = { googleCastManager.togglePlayback() },
+                onSkipBack = { googleCastManager.skipBy(-castSeekIntervals.backSeconds.toDouble()) },
+                onSkipForward = { googleCastManager.skipBy(castSeekIntervals.forwardSeconds.toDouble()) },
+                skipBackSeconds = castSeekIntervals.backSeconds,
+                skipForwardSeconds = castSeekIntervals.forwardSeconds,
+                onSelectSubtitle = { googleCastManager.selectSubtitleTrack(it) },
+                onStop = { googleCastManager.disconnect() },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = if (currentRoute in tabRoutes) 80.dp else 0.dp),
+            )
+        }
+
+        WatchPartySoloGuardDialog(externalSoloGuard)
+
+        // Nearby-TV offer, app-wide once signed in (iOS parity). Not over the
+        // sign-in chain, where the phone has no session to approve with, nor
+        // over playback or reading.
+        val companionHiddenRoutes = setOf(
+            Route.Login.route,
+            Route.ServerSetup.route,
+            Route.ServerSetupPrefilled.ROUTE,
+            Route.Setup.route,
+            Route.Signup.route,
+            Route.ProfileSelection.route,
+            Route.PasswordChange.route,
+            Route.CreateProfile.route,
+            Route.InviteClaim.ROUTE,
+            Route.PairDevice.ROUTE,
+            Route.Player.ROUTE,
+            Route.AudiobookPlayer.ROUTE,
+            Route.BookReader.ROUTE,
+            Route.SiloCastRemote.route,
+        )
+        org.siloserver.silo.android.ui.screens.pairing.CompanionPairingHost(
+            enabled = currentRoute != null && currentRoute !in companionHiddenRoutes,
+        )
+        org.siloserver.silo.android.ui.screens.profiles.HouseholdReverifyHost()
+
+        // While a profile switch pushes pending settings (bounded at a few
+        // seconds), show that it is under way and take input, so nothing else
+        // can be opened over a switch that is about to leave the shell.
+        if (profileSwitching) {
+            // System Back too: composed after the NavHost, this handler wins, so
+            // Back can neither pop the screen under the switch nor close the
+            // app and cancel it.
+            BackHandler {}
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.4f))
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }
+                    },
+            ) {
+                LoadingIndicator()
+            }
+        }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+}
+
+/** Route placeholder for a party player; the room, not the route, decides what plays. */
+private const val PARTY_PLAYER_PLACEHOLDER_ID = "watch-party"
+
+/**
+ * Exact player redelivery is idempotent. Navigating the same concrete route
+ * with launchSingleTop replaces the top entry and tears down active playback;
+ * a different content/file/quality/track route must still navigate normally.
+ */
+private fun NavHostController.isDisplayingExactPlayerRoute(
+    route: String,
+    currentPlayerTarget: MobilePlayerRouteTarget?,
+): Boolean {
+    val entry = currentBackStackEntry ?: return false
+    if (entry.destination.route != Route.Player.ROUTE) return false
+    val arguments = entry.arguments ?: return false
+    // A normal silo://play link is a solo-playback request. Never swallow it
+    // merely because a Watch Party room currently happens to play the same
+    // content/file.
+    if (!arguments.getString("roomId").isNullOrBlank()) return false
+    if (arguments.getString("libraryId") != null) return false
+    val requestedTarget = playerRouteIntentOrNull(route) ?: return false
+    return currentPlayerTarget?.let(requestedTarget::matches) == true
+}
+
+/**
+ * Opens a title picked from another title's "More like this" rail. The first
+ * hop from a title pushes, so Back returns to that title. A hop from a page
+ * such a rail opened replaces that page, so however many recommendations
+ * someone follows, two Backs leave the chain: one to the title it started
+ * from, one to wherever that title was opened. Picking the starting title
+ * again goes back to it instead of opening a second copy.
+ *
+ * Returns whether a new page opened, so the caller can drop what the tapped
+ * card handed to it otherwise.
+ */
+private fun NavHostController.navigateToRelatedItemDetail(contentId: String): Boolean {
+    val current = currentBackStackEntry
+    // A second tap on the same card, or on the title just returned to, can
+    // arrive while the page is still changing; it opens nothing.
+    if (current?.destination?.route == Route.ItemDetail.ROUTE && current.displayedDetailContentId() == contentId) {
+        return false
+    }
+    if (current?.savedStateHandle?.get<Boolean>(OpenedFromRelatedRailKey) == true) {
+        val start = previousBackStackEntry?.takeIf { it.destination.route == Route.ItemDetail.ROUTE }
+        if (start?.displayedDetailContentId() == contentId) {
+            popBackStack()
+            return false
+        }
+        navigate(Route.ItemDetail(contentId).route) {
+            popUpTo(Route.ItemDetail.ROUTE) { inclusive = true }
+        }
+    } else {
+        navigate(Route.ItemDetail(contentId).route)
+    }
+    currentBackStackEntry?.takeIf { it !== current }?.savedStateHandle?.set(OpenedFromRelatedRailKey, true)
+    return true
+}
+
+/**
+ * The route the newly active server must pass through before pairing is
+ * possible, or null when it can pair immediately.
+ *
+ * Same credential check `ServerListViewModel` uses to pick a switch
+ * destination, including its preference for the registry entry's profile id
+ * over the token manager's cached one.
+ */
+private suspend fun pairingAuthRouteOrNull(
+    tokenManager: TokenManager,
+    activeEntryProfileId: String?,
+): String? {
+    if (tokenManager.getAccessToken().isNullOrBlank()) return Route.Login.route
+    val profileId = activeEntryProfileId ?: tokenManager.getProfileId()
+    return if (profileId.isNullOrBlank()) Route.ProfileSelection.route else null
+}
+
+/**
+ * The Settings overview's back-stack entry, which owns the SettingsViewModel
+ * its sub-pages share. Falls back to the page's own entry should the overview
+ * ever be missing from the stack, so the page still renders.
+ */
+@Composable
+private fun settingsOwner(navController: NavHostController, entry: NavBackStackEntry): ViewModelStoreOwner =
+    remember(entry) {
+        runCatching { navController.getBackStackEntry(Route.Settings.route) }.getOrNull() ?: entry
+    }

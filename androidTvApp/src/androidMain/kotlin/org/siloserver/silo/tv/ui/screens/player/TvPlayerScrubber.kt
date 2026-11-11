@@ -1,0 +1,649 @@
+package org.siloserver.silo.tv.ui.screens.player
+
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.border
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import org.siloserver.silo.common.R as CommonR
+import android.os.SystemClock
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.requiredHeight
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.FastRewind
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.dp
+import androidx.tv.material3.Icon
+import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.Text
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.roundToInt
+import org.siloserver.silo.common.i18n.LocaleFormat
+import org.siloserver.silo.common.i18n.currentFormatLocale
+import org.siloserver.silo.common.i18n.isRightToLeftText
+
+/**
+ * Glass-capsule scrubber matching `iosApp/.../tvOS/TVPlayerScrubber.swift`.
+ *
+ * The Compose remote-key model differs from tvOS's `MoveCommand` /
+ * `PressCapture` split: ACTION_DOWN repeats fire while a key is held, so we
+ * derive "tap" vs "hold" from press duration (a single short press without
+ * a long-press timer firing = tap; a held press triggers timeline auto-seek).
+ *
+ * - **Tap left/right** (idle): ±10 s quick skip via [onSkipBack] / [onSkipForward].
+ * - **Tap left/right** (timeline scrub): ±10 s nudge of the in-flight preview.
+ * - **Hold left/right**: enter timeline auto-seek at 1x on the shared
+ *   [TvSeekRateLadder]; tap again to step the rate, as on tvOS.
+ * - **OK / Select**: commit an in-flight preview (or enter timeline scrub).
+ * - **Back / Down**: cancel the preview / move focus to transport.
+ *
+ * Visual layout follows the spec: 7 dp track unfocused → 12 dp during
+ * timeline scrub, 30 dp puck unfocused → 42 dp focused/scrubbing, chapter
+ * ticks rendered as 3 dp white verticals on top of the played fill.
+ */
+/**
+ * Lightweight chapter marker. Mirrors `PlayerCore.ChapterInfo` on tvOS — name
+ * + start time in seconds. Defined locally so the scrubber stays decoupled
+ * from any specific ExoPlayer/Media3 chapter representation.
+ */
+data class ChapterInfo(
+    val timeSec: Double,
+    val title: String? = null,
+)
+
+internal fun playerScrubberLabelPosition(
+    positionSec: Double,
+    scrubPreviewSec: Double,
+    isScrubbing: Boolean,
+): Double = if (isScrubbing) scrubPreviewSec else positionSec
+
+@Composable
+fun TvPlayerScrubber(
+    positionSec: Double,
+    durationSec: Double,
+    bufferedAheadSec: Double,
+    isScrubbing: Boolean,
+    scrubPreviewSec: Double,
+    chapters: List<ChapterInfo>,
+    cancelOnBlur: Boolean,
+    /** The server's preview of [scrubPreviewSec], shown above the puck while scrubbing; null keeps the bar alone. */
+    previewThumbnail: ImageBitmap? = null,
+    // Detected marker bands [startSec, endSec] drawn on the track when known.
+    // Null = no band. Mirrors tvOS TVPlayerScrubber.introRegion.
+    introRangeSec: ClosedRange<Double>? = null,
+    creditsRangeSec: ClosedRange<Double>? = null,
+    recapRangeSec: ClosedRange<Double>? = null,
+    previewRangeSec: ClosedRange<Double>? = null,
+    onSkipBack: () -> Unit,
+    onSkipForward: () -> Unit,
+    // Resolved video intervals; a tap while scrubbing nudges the preview by
+    // the same step the idle skip would take.
+    skipBackSeconds: Int = 10,
+    skipForwardSeconds: Int = 30,
+    onBeginScrub: () -> Unit,
+    onUpdateScrub: (Double) -> Unit,
+    onCommitScrub: () -> Unit,
+    onCancelScrub: () -> Unit,
+    onRequestFocus: FocusRequester,
+    /**
+     * Toggle play/pause. Center on the bar is bound to this, not to entering a
+     * scrub: the Google TV remote has no dedicated play/pause key, so Center
+     * with the overlay up is the only one-press pause a viewer has — and it is
+     * what every other TV player does. Scrubbing does not need it; Left/Right
+     * skip and long-press engages auto-seek.
+     */
+    onPlayPause: () -> Unit,
+    /** See TvPlayerIdleOverlay.canToggleAfterCommit. */
+    canToggleAfterCommit: Boolean = true,
+    /** The current rate, so the wall-clock finish time matches what the viewer will see. */
+    playbackSpeed: Double = 1.0,
+    onMoveDownToTransport: () -> Unit,
+    onExitWhenIdle: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+
+    // Live preview value. The auto-seek loop below runs across recompositions, so
+    // it must read the CURRENT preview (which onBeginScrub seeds from the playback
+    // position and each tick advances) instead of the closure-captured parameter
+    // value frozen at launch — otherwise continuous scanning never advances and a
+    // commit seeks to ~0.
+    val currentPreviewSec by rememberUpdatedState(scrubPreviewSec)
+
+    // Trailing-edge auto-seek state. tvOS owns this in the scrubber view too.
+    var isTimelineScrubbing by remember { mutableStateOf(false) }
+    var autoSeekRate by remember { mutableStateOf(0) }
+    val scope = rememberCoroutineScope()
+    var autoSeekJob by remember { mutableStateOf<Job?>(null) }
+    // Direction of a Left/Right press whose tap action is waiting for KeyUp.
+    // tvOS classifies tap versus hold from the release (TVPressCaptureView),
+    // so a hold never fires the ±10/30s skip on its way into auto-seek. The
+    // first repeat clears this and starts the hold instead.
+    var pendingTapDirection by remember { mutableStateOf(0) }
+
+    fun setRate(rate: Int) {
+        autoSeekRate = rate
+    }
+
+    fun stopAutoSeek() {
+        autoSeekJob?.cancel()
+        autoSeekJob = null
+        setRate(0)
+    }
+
+    fun beginAutoSeek(direction: Int) {
+        if (!isScrubbing) onBeginScrub()
+        isTimelineScrubbing = true
+        val sign = if (direction < 0) -1 else 1
+        setRate(TvSeekRateLadder.BASE_RATE * sign)
+        autoSeekJob?.cancel()
+        autoSeekJob = scope.launch {
+            // Delay first so onBeginScrub's position seed lands in
+            // currentPreviewSec before the loop reads it (otherwise the first
+            // update would overwrite the seed and scanning starts at ~0).
+            delay(TvSeekRateLadder.TICK_MILLIS)
+            // The loop owns the running position. Pulling the preview back
+            // through recomposition each tick meant every tick advanced from
+            // whatever the UI had last managed to draw — under 4K decode load
+            // that lagged several ticks, so a chip reading 128× travelled at a
+            // fraction of it. Mirrors the hidden-controls path, which keeps
+            // its own counter for the same reason.
+            var previewSec = currentPreviewSec
+            var lastTickAt = SystemClock.elapsedRealtime()
+            while (isActive) {
+                val rate = autoSeekRate
+                if (rate == 0) break
+                val now = SystemClock.elapsedRealtime()
+                previewSec = clampTvScrubPreview(
+                    previewSec + TvSeekRateLadder.elapsedSeconds(rate, now - lastTickAt),
+                    durationSec,
+                )
+                lastTickAt = now
+                onUpdateScrub(previewSec)
+                delay(TvSeekRateLadder.TICK_MILLIS)
+            }
+        }
+        // No sustained ramp on the focused bar: tvOS `beginTimelineAutoSeek`
+        // holds the rate the press started at and leaves speed to taps.
+    }
+
+    fun bumpRate(delta: Int) {
+        val next = TvSeekRateLadder.bumped(autoSeekRate, delta)
+        if (next != autoSeekRate) setRate(next)
+    }
+
+    // Cancel any in-flight scrub on focus loss when the shell asks us to
+    // (HUD opens, screen exit). Otherwise treat blur as commit.
+    LaunchedEffect(isFocused) {
+        if (!isFocused && (isScrubbing || isTimelineScrubbing)) {
+            isTimelineScrubbing = false
+            stopAutoSeek()
+            if (cancelOnBlur) onCancelScrub() else onCommitScrub()
+        }
+    }
+
+    // An external cancel (remote-key bridge Back, setControlsVisible(false))
+    // clears the VM's isScrubbing without any key event or blur reaching this
+    // composable — resync the local timeline state and kill the auto-seek loop
+    // so it can't keep advancing a preview the VM already dropped.
+    LaunchedEffect(isScrubbing) {
+        if (!isScrubbing && isTimelineScrubbing) {
+            isTimelineScrubbing = false
+            stopAutoSeek()
+        }
+    }
+
+    val totalProgress = if (durationSec > 0) {
+        ((if (isScrubbing) scrubPreviewSec else positionSec) / durationSec)
+            .toFloat().coerceIn(0f, 1f)
+    } else 0f
+    val labelPositionSec = playerScrubberLabelPosition(positionSec, scrubPreviewSec, isScrubbing)
+    val bufferedFrac = if (durationSec > 0) {
+        ((positionSec + bufferedAheadSec) / durationSec).toFloat().coerceIn(0f, 1f)
+    } else 0f
+
+    val trackHeight by animateDpAsState(
+        targetValue = when {
+            isTimelineScrubbing -> 7.dp
+            isFocused -> 5.dp
+            else -> 4.dp
+        },
+        animationSpec = tween(120),
+        label = "scrubberTrackHeight",
+    )
+    val puckSize by animateDpAsState(
+        targetValue = when {
+            isTimelineScrubbing -> 21.dp
+            isFocused -> 21.dp
+            else -> 15.dp
+        },
+        animationSpec = tween(120),
+        label = "scrubberPuckSize",
+    )
+
+    // The bar sits above its clock row, as on tvOS: elapsed on the left, time
+    // left and the wall-clock finish on the right.
+    val context = LocalContext.current
+    // In the formatting locale, with the device's 12/24-hour setting. Keyed on
+    // the configuration: the activity keeps its context across an in-place
+    // language change.
+    val configuration = LocalConfiguration.current
+    val formatLocale = currentFormatLocale()
+    val timeFormat = remember(context, configuration, formatLocale) {
+        val localized = context.createConfigurationContext(
+            android.content.res.Configuration(configuration).apply { setLocale(formatLocale) },
+        )
+        android.text.format.DateFormat.getTimeFormat(localized)
+    }
+    Column(modifier = modifier) {
+        Box(modifier = Modifier.fillMaxWidth().height(28.dp)) {
+
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.Center)
+                .requiredHeight(28.dp)
+                .focusRequester(onRequestFocus)
+                .onFocusChanged { /* state collected via interactionSource */ }
+                .focusable(interactionSource = interactionSource)
+                .onPreviewKeyEvent { event ->
+                    val isDown = event.type == KeyEventType.KeyDown
+                    val isUp = event.type == KeyEventType.KeyUp
+                    val nativeRepeat = event.nativeKeyEvent.repeatCount
+                    when (event.key) {
+                        Key.DirectionLeft, Key.DirectionRight -> {
+                            val direction = if (event.key == Key.DirectionLeft) -1 else 1
+                            if (isUp) {
+                                // Release before the first repeat: this was a
+                                // tap. An interval skip in idle, a nudge of the
+                                // in-flight preview, or a rate bump in auto-seek.
+                                if (pendingTapDirection == direction) {
+                                    pendingTapDirection = 0
+                                    when {
+                                        autoSeekRate != 0 -> bumpRate(direction)
+                                        // Nudges match the transport skips,
+                                        // mirroring tvOS scrubForwardStep /
+                                        // scrubBackwardStep.
+                                        isTimelineScrubbing -> onUpdateScrub(
+                                            scrubPreviewSec + if (direction < 0) {
+                                                -skipBackSeconds.toDouble()
+                                            } else {
+                                                skipForwardSeconds.toDouble()
+                                            },
+                                        )
+                                        direction < 0 -> onSkipBack()
+                                        else -> onSkipForward()
+                                    }
+                                    return@onPreviewKeyEvent true
+                                }
+                                return@onPreviewKeyEvent false
+                            }
+                            if (!isDown) return@onPreviewKeyEvent false
+                            // First repeat (count==1) marks "long-press": engage
+                            // timeline auto-seek and forget the pending tap so
+                            // the hold does not also skip on the way in.
+                            if (nativeRepeat == 1) {
+                                pendingTapDirection = 0
+                                if (autoSeekRate == 0) beginAutoSeek(direction)
+                                return@onPreviewKeyEvent true
+                            }
+                            if (nativeRepeat > 1) return@onPreviewKeyEvent true
+                            pendingTapDirection = direction
+                            true
+                        }
+                        Key.DirectionDown -> {
+                            if (isDown) {
+                                onMoveDownToTransport()
+                                true
+                            } else false
+                        }
+                        Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
+                            if (isUp) {
+                                stopAutoSeek()
+                                // Center means "here": land any scrub in
+                                // flight, then flip playback. Racing forward at
+                                // 32x it stops on the frame you asked for;
+                                // hunting a spot while paused it plays on from
+                                // it. Entering a scrub MODE here — what this
+                                // used to do — spent the viewer's only
+                                // one-press pause on something Left/Right
+                                // already do, and the Google TV remote has no
+                                // dedicated play/pause key to fall back on.
+                                val committed = isTimelineScrubbing || isScrubbing
+                                if (committed) {
+                                    isTimelineScrubbing = false
+                                    onCommitScrub()
+                                }
+                                if (!committed || canToggleAfterCommit) onPlayPause()
+                                true
+                            } else if (isDown) true else false
+                        }
+                        Key.Back, Key.Escape -> {
+                            if (isDown) {
+                                if (isTimelineScrubbing || isScrubbing) {
+                                    isTimelineScrubbing = false
+                                    stopAutoSeek()
+                                    onCancelScrub()
+                                    true
+                                } else {
+                                    onExitWhenIdle()
+                                    true
+                                }
+                            } else false
+                        }
+                        else -> false
+                    }
+                },
+        ) {
+            val barWidthDp = maxWidth
+            val density = LocalDensity.current
+            val barWidthPx = with(density) { barWidthDp.toPx() }
+            val puckSizePx = with(density) { puckSize.toPx() }
+
+            // Track, marker bands, buffered-ahead and played fill, drawn as one
+            // segmented bar: chapter starts become 2dp gaps rather than ticks.
+            val trackAlpha = when {
+                isTimelineScrubbing -> 0.45f
+                isFocused -> 0.32f
+                else -> 0.22f
+            }
+            val bandAlpha = if (isTimelineScrubbing || isFocused) 0.45f else 0.34f
+            val markerBands = if (durationSec > 0) {
+                listOfNotNull(
+                    introRangeSec?.let { it to Color(0xFF22D3EE) },
+                    recapRangeSec?.let { it to Color(0xFF8BC34A) },
+                    creditsRangeSec?.let { it to Color(0xFFFFB74D) },
+                    previewRangeSec?.let { it to Color(0xFFBA68C8) },
+                ).map { (range, color) ->
+                    Triple(
+                        (range.start / durationSec).toFloat().coerceIn(0f, 1f),
+                        (range.endInclusive / durationSec).toFloat().coerceIn(0f, 1f),
+                        color.copy(alpha = bandAlpha),
+                    )
+                }
+            } else {
+                emptyList()
+            }
+            val chapterFractions = if (durationSec > 0) {
+                chapters.map { (it.timeSec / durationSec).toFloat() }
+            } else {
+                emptyList()
+            }
+            Canvas(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(trackHeight)
+                    .align(Alignment.Center),
+            ) {
+                drawTvSegmentedTrack(
+                    chapterFractions = chapterFractions,
+                    trackColor = Color.White.copy(alpha = trackAlpha),
+                    bufferedColor = Color.White.copy(alpha = 0.20f),
+                    playedColor = TvPlayerChrome.Paper,
+                    playedFraction = totalProgress,
+                    bufferedFraction = bufferedFrac.coerceAtLeast(totalProgress),
+                    bands = markerBands,
+                )
+            }
+
+            // Puck — only while focused so the bar stays passive when
+            // attention is elsewhere on the overlay.
+            if (isFocused || isTimelineScrubbing) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .offset {
+                            IntOffset(
+                                x = (barWidthPx * totalProgress - puckSizePx / 2f).roundToInt(),
+                                y = 0,
+                            )
+                        }
+                        .size(puckSize)
+                        .shadow(8.dp, CircleShape, clip = false)
+                        .clip(CircleShape)
+                        .background(Color.White),
+                )
+            }
+
+            // Auto-seek chip, after tvOS `timelineAutoSeekChip`: a small white
+            // pill with the direction glyph and rate, riding above the puck so
+            // the eye stays on the playhead. Kept inside the bar's width so it
+            // never hangs off either end. The bar's puck and clocks already
+            // show where the preview is, so the full [TvHoldSeekIndicator]
+            // overlay stays reserved for the hidden-controls session where
+            // nothing else is on screen.
+            // The server's preview of the target in a card with its time,
+            // above the puck (and the auto-seek chip), after tvOS
+            // `TVScrubPreviewLayer`. It overlays the overlay's text rather
+            // than taking layout space, so it comes and goes without moving it.
+            if (isScrubbing && previewThumbnail != null) {
+                var cardSize by remember { mutableStateOf(IntSize.Zero) }
+                val liftPx = with(density) { (if (autoSeekRate != 0) 52.dp else 22.dp).toPx() }
+                val cardShape = RoundedCornerShape(10.dp)
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .wrapContentSize(unbounded = true)
+                        .onSizeChanged { cardSize = it }
+                        .offset {
+                            val maxX = (barWidthPx - cardSize.width).roundToInt().coerceAtLeast(0)
+                            val x = (barWidthPx * totalProgress - cardSize.width / 2f).roundToInt().coerceIn(0, maxX)
+                            // Centred on the bar before the offset: lift the
+                            // bottom edge [liftPx] above the bar's middle.
+                            IntOffset(x, -(liftPx + cardSize.height / 2f).roundToInt())
+                        }
+                        .shadow(9.dp, cardShape, clip = false)
+                        .clip(cardShape)
+                        .background(TvPlayerChrome.Smoke)
+                        .border(1.dp, TvPlayerChrome.PanelStroke, cardShape)
+                        .padding(5.dp),
+                ) {
+                    Image(
+                        bitmap = previewThumbnail,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .size(160.dp, 90.dp)
+                            .clip(RoundedCornerShape(7.dp)),
+                    )
+                    Text(
+                        text = formatScrubberTime(scrubPreviewSec),
+                        style = TvPlayerType.Time,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+            }
+
+            if (autoSeekRate != 0) {
+                var chipWidthPx by remember { mutableStateOf(0) }
+                val chipLiftPx = with(density) { 40.dp.roundToPx() }
+                TvScrubberAutoSeekChip(
+                    rate = autoSeekRate,
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .onSizeChanged { chipWidthPx = it.width }
+                        .offset {
+                            val maxX = (barWidthPx - chipWidthPx).roundToInt().coerceAtLeast(0)
+                            val x = (barWidthPx * totalProgress - chipWidthPx / 2f)
+                                .roundToInt()
+                                .coerceIn(0, maxX)
+                            IntOffset(x, -chipLiftPx)
+                        },
+                )
+            }
+        }
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = formatScrubberTime(labelPositionSec),
+                style = TvPlayerType.Time,
+                modifier = Modifier.weight(1f),
+            )
+            val remainingSec = (durationSec - labelPositionSec).coerceAtLeast(0.0)
+            val wallClockRemainingSec = if (playbackSpeed > 0.0) remainingSec / playbackSpeed else remainingSec
+            // In an Arabic sentence the "−" would move to the far end of the
+            // time, so right-to-left text keeps the time in its own run.
+            val remaining = formatRemainingTime(remainingSec)
+                .let { if (isRightToLeftText()) "\u2066$it\u2069" else it } // i18n-ignore: isolate marks
+            Text(
+                text = listOfNotNull(
+                    remaining,
+                    finishTimeLabel(timeFormat, wallClockRemainingSec)?.let {
+                        stringResource(CommonR.string.player_scrubber_endsAt, it)
+                    },
+                ).joinToString(" · "),
+                style = TvPlayerType.Time.copy(color = TvPlayerChrome.Graphite),
+            )
+        }
+    }
+}
+
+/**
+ * The bar as segments split at chapter starts. Gaps are dropped when a title
+ * has so many short chapters that the segments would stop reading as bars.
+ */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawTvSegmentedTrack(
+    chapterFractions: List<Float>,
+    trackColor: Color,
+    bufferedColor: Color,
+    playedColor: Color,
+    playedFraction: Float,
+    bufferedFraction: Float,
+    bands: List<Triple<Float, Float, Color>>,
+) {
+    val width = size.width
+    val height = size.height
+    val radius = androidx.compose.ui.geometry.CornerRadius(height / 2f)
+    val gap = 2.dp.toPx()
+    val boundaries = chapterFractions.filter { it > 0.001f && it < 0.999f }.sorted()
+    val edges = (listOf(0f) + boundaries + listOf(1f)).map { it * width }
+    val useGaps = boundaries.isNotEmpty() && edges.zipWithNext().all { (a, b) -> b - a >= height * 2f + gap }
+    val segments = if (useGaps) edges.zipWithNext() else listOf(0f to width)
+    segments.forEachIndexed { index, (rawStart, rawEnd) ->
+        val start = if (index == 0) rawStart else rawStart + gap / 2f
+        val end = if (index == segments.lastIndex) rawEnd else rawEnd - gap / 2f
+        val topLeft = androidx.compose.ui.geometry.Offset(start, 0f)
+        val segmentSize = androidx.compose.ui.geometry.Size(end - start, height)
+        fun fill(color: Color, untilX: Float, fromX: Float = start) {
+            if (untilX <= fromX) return
+            clipRect(left = fromX, top = 0f, right = untilX.coerceAtMost(end), bottom = height) {
+                drawRoundRect(color = color, topLeft = topLeft, size = segmentSize, cornerRadius = radius)
+            }
+        }
+        drawRoundRect(color = trackColor, topLeft = topLeft, size = segmentSize, cornerRadius = radius)
+        fill(bufferedColor, bufferedFraction * width)
+        bands.forEach { (from, to, color) -> fill(color, untilX = to * width, fromX = maxOf(start, from * width)) }
+        fill(playedColor, playedFraction * width)
+    }
+}
+
+/** "11:42 PM" in the device's 12/24-hour [timeFormat], [remainingSec] of wall-clock time from now. */
+private fun finishTimeLabel(timeFormat: java.text.DateFormat, remainingSec: Double): String? {
+    if (remainingSec <= 0.0 || !remainingSec.isFinite()) return null
+    val finish = java.util.Date(System.currentTimeMillis() + (remainingSec * 1000).toLong())
+    return timeFormat.format(finish)
+}
+
+@Composable
+private fun TvScrubberAutoSeekChip(rate: Int, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .shadow(8.dp, RoundedCornerShape(percent = 50), clip = false)
+            .clip(RoundedCornerShape(percent = 50))
+            .background(Color.White)
+            .padding(horizontal = 9.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Icon(
+            imageVector = if (rate < 0) Icons.Filled.FastRewind else Icons.Filled.FastForward,
+            contentDescription = null,
+            tint = Color.Black,
+            modifier = Modifier.size(12.dp),
+        )
+        Text(
+            text = "${abs(rate)}x", // i18n-ignore
+            color = Color.Black,
+            maxLines = 1,
+            softWrap = false,
+            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+        )
+    }
+}
+
+private fun formatScrubberTime(seconds: Double): String = formatTimelineClock(seconds)
+
+private fun formatRemainingTime(secondsRemaining: Double): String =
+    "−${formatTimelineClock(secondsRemaining.coerceAtLeast(0.0))}"
+
+private fun formatTimelineClock(seconds: Double): String {
+    if (seconds <= 0 || seconds.isNaN()) return LocaleFormat.clock(0, 0, 0)
+    val total = seconds.toInt()
+    val h = total / 3600
+    val m = (total % 3600) / 60
+    val s = total % 60
+    return LocaleFormat.clock(h, m, s)
+}

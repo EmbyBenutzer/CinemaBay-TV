@@ -1,0 +1,862 @@
+package org.siloserver.silo.common.player.video
+
+import org.siloserver.silo.common.player.Playability
+import org.siloserver.silo.model.playback.CLIENT_DV7_TO_HDR10
+import org.siloserver.silo.model.playback.PlayMethod
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+
+class PlaybackStartupStallDetectorTest {
+
+    @Test
+    fun directStartupTriggersFallbackAfterGraceWhenPlaybackNeverAdvances() {
+        val detector = PlaybackStartupStallDetector(startupGraceMs = 10_000)
+        detector.onMounted(
+            sessionKey = "session-1",
+            playMethod = PlayMethod.DIRECT,
+            startPositionMs = 1_767_000,
+            nowMs = 0,
+        )
+
+        assertNull(
+            detector.sample(
+                sessionKey = "session-1",
+                nowMs = 9_999,
+                playWhenReady = true,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 1_767_000,
+                bufferedPositionMs = 1_767_115,
+            ),
+        )
+
+        assertEquals(
+            Playability.StartupStalled(bufferedAheadMs = 115, stalledForMs = 10_001),
+            detector.sample(
+                sessionKey = "session-1",
+                nowMs = 10_001,
+                playWhenReady = true,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 1_767_000,
+                bufferedPositionMs = 1_767_115,
+            ),
+        )
+    }
+
+    @Test
+    fun aHandedOffStallIsReportedAgainAfterAnotherGrace() {
+        val detector = PlaybackStartupStallDetector(startupGraceMs = 10_000)
+        detector.onMounted(sessionKey = "session-1", playMethod = PlayMethod.TRANSCODE, startPositionMs = 0, nowMs = 0)
+        fun sample(nowMs: Long) = detector.sample(
+            sessionKey = "session-1",
+            nowMs = nowMs,
+            playWhenReady = true,
+            isPlaying = false,
+            isBuffering = true,
+            currentPositionMs = 0,
+            bufferedPositionMs = 100,
+        )
+
+        assertNotNull(sample(10_001))
+        // Unclaimed, the report latches for the rest of the mount.
+        assertNull(sample(30_000))
+
+        detector.onStallHandedOff(nowMs = 30_000)
+        assertNull(sample(40_000))
+        assertNotNull(sample(40_001))
+    }
+
+    @Test
+    fun playingOrPositionProgressDisarmsStartupFallback() {
+        val detector = PlaybackStartupStallDetector(startupGraceMs = 10_000)
+        detector.onMounted(
+            sessionKey = "session-1",
+            playMethod = PlayMethod.DIRECT,
+            startPositionMs = 90_000,
+            nowMs = 0,
+        )
+
+        assertNull(
+            detector.sample(
+                sessionKey = "session-1",
+                nowMs = 2_000,
+                playWhenReady = true,
+                isPlaying = true,
+                isBuffering = false,
+                currentPositionMs = 91_000,
+                bufferedPositionMs = 100_000,
+            ),
+        )
+
+        assertNull(
+            detector.sample(
+                sessionKey = "session-1",
+                nowMs = 20_000,
+                playWhenReady = true,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 91_000,
+                bufferedPositionMs = 91_500,
+            ),
+        )
+    }
+
+    @Test
+    fun nonDirectRouteStartupTriggersFallback() {
+        // Non-DIRECT routes (remux/transcode/HLS) that wedge at startup now
+        // trigger the fallback too (TV QA 2026-07-10: remuxes buffered forever).
+        val detector = PlaybackStartupStallDetector(startupGraceMs = 10_000)
+        detector.onMounted(
+            sessionKey = "session-1",
+            playMethod = PlayMethod.TRANSCODE,
+            startPositionMs = 0,
+            nowMs = 0,
+        )
+
+        assertNotNull(
+            detector.sample(
+                sessionKey = "session-1",
+                nowMs = 20_000,
+                playWhenReady = true,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 0,
+                bufferedPositionMs = 0,
+            ),
+        )
+    }
+
+    @Test
+    fun queuedInputWithZeroOutputIsClassifiedAsDecoderHang() {
+        val detector = PlaybackStartupStallDetector(startupGraceMs = 1_000)
+        detector.onMounted("decoder", PlayMethod.DIRECT, 0, 0)
+        val stalled = detector.sample(
+            sessionKey = "decoder",
+            nowMs = 1_001,
+            playWhenReady = true,
+            isPlaying = false,
+            isBuffering = true,
+            currentPositionMs = 0,
+            bufferedPositionMs = 5_000,
+            decoderInputBufferCount = 4,
+            decoderRenderedOutputBufferCount = 0,
+            decoderSkippedOutputBufferCount = 0,
+            decoderDroppedBufferCount = 0,
+        )
+        assertEquals("decoder_no_output", stalled?.classification)
+    }
+
+    @Test
+    fun noDecoderInputIsClassifiedAsTransportStall() {
+        val detector = PlaybackStartupStallDetector(startupGraceMs = 1_000)
+        detector.onMounted("transport", PlayMethod.DIRECT, 0, 0)
+        val stalled = detector.sample(
+            sessionKey = "transport",
+            nowMs = 1_001,
+            playWhenReady = true,
+            isPlaying = false,
+            isBuffering = true,
+            currentPositionMs = 0,
+            bufferedPositionMs = 0,
+        )
+        assertEquals("transport_stall", stalled?.classification)
+    }
+
+    @Test
+    fun audioProgressDoesNotDisarmVideoDecoderStartupDeadline() {
+        val detector = PlaybackStartupStallDetector(startupGraceMs = 1_000)
+        detector.onMounted("black-video", PlayMethod.DIRECT, 0, 0)
+
+        assertNull(
+            detector.sample(
+                sessionKey = "black-video",
+                nowMs = 100,
+                playWhenReady = true,
+                isPlaying = true,
+                isBuffering = false,
+                currentPositionMs = 100,
+                bufferedPositionMs = 5_000,
+                decoderInputBufferCount = 1,
+            ),
+        )
+        val stalled = detector.sample(
+            sessionKey = "black-video",
+            nowMs = 1_101,
+            playWhenReady = true,
+            isPlaying = true,
+            isBuffering = false,
+            currentPositionMs = 1_101,
+            bufferedPositionMs = 5_000,
+            decoderInputBufferCount = 8,
+        )
+        assertEquals("decoder_no_output", stalled?.classification)
+    }
+
+    @Test
+    fun starvedDecoderBeforeStartIsATransportStall() {
+        // The device trace: a throttled link, BUFFERING with 1.5 s ahead, the
+        // decoder holding a few samples and no first output. It is waiting on
+        // the network, so the transport clock reports it for the buffering
+        // controller rather than a decoder failure that races it.
+        val detector = PlaybackStartupStallDetector()
+        detector.onMounted("starved", PlayMethod.DIRECT, 0, 0)
+
+        for (nowMs in 1_000L..20_000L step 1_000L) {
+            assertNull(detector.sample("starved", nowMs, true, false, true, 0, 1_542, decoderInputBufferCount = 3))
+        }
+        assertEquals(
+            Playability.StartupStalled(bufferedAheadMs = 1_542, stalledForMs = 20_295, classification = "transport_stall"),
+            detector.sample("starved", 20_295, true, false, true, 0, 1_542, decoderInputBufferCount = 3),
+        )
+    }
+
+    @Test
+    fun starvedDecoderDoesNotRunTheDecoderStartupDeadline() {
+        // Audio started while the video decoder got its first sample, then the
+        // link throttled. The 30 s mid-stream clock leaves the decoder
+        // deadline visible on its own: 25 s starved must not trip it.
+        val detector = PlaybackStartupStallDetector(startupGraceMs = 20_000, midStreamGraceMs = 30_000)
+        detector.onMounted("starved-mid", PlayMethod.DIRECT, 0, 0)
+
+        assertNull(detector.sample("starved-mid", 1_000, true, true, false, 1_000, 2_500, decoderInputBufferCount = 1))
+        for (nowMs in 2_000L..27_000L step 1_000L) {
+            assertNull(
+                detector.sample("starved-mid", nowMs, true, false, true, 1_000, 2_542, decoderInputBufferCount = 3),
+                "a starved decoder at ${nowMs}ms is not a decoder failure",
+            )
+        }
+        assertEquals(
+            "transport_stall",
+            detector.sample("starved-mid", 31_001, true, false, true, 1_000, 2_542, decoderInputBufferCount = 3)
+                ?.classification,
+        )
+    }
+
+    @Test
+    fun fedDecoderWithoutOutputWhileBufferingStillFails() {
+        // Five seconds buffered is enough to have fed the decoder, so its
+        // silence is its own fault.
+        val detector = PlaybackStartupStallDetector(startupGraceMs = 20_000, midStreamGraceMs = 30_000)
+        detector.onMounted("fed", PlayMethod.DIRECT, 0, 0)
+
+        assertNull(detector.sample("fed", 1_000, true, true, false, 1_000, 2_500, decoderInputBufferCount = 1))
+        assertNull(detector.sample("fed", 2_000, true, false, true, 1_000, 6_000, decoderInputBufferCount = 3))
+        assertNull(detector.sample("fed", 21_000, true, false, true, 1_000, 6_000, decoderInputBufferCount = 3))
+        assertEquals(
+            Playability.StartupStalled(bufferedAheadMs = 5_000, stalledForMs = 20_001, classification = "decoder_no_output"),
+            detector.sample("fed", 21_001, true, false, true, 1_000, 6_000, decoderInputBufferCount = 3),
+        )
+    }
+
+    @Test
+    fun droppedOutputBeforeTheFirstFrameIsARenderStartupFailure() {
+        val droppedOutput = PlaybackStartupStallDetector(startupGraceMs = 1_000)
+        droppedOutput.onMounted("thin-dropped-video", PlayMethod.DIRECT, 0, 0)
+        assertNull(
+            droppedOutput.sample("thin-dropped-video", 100, true, true, false, 100, 1_600, decoderInputBufferCount = 1),
+        )
+        assertEquals(
+            "render_startup_failure",
+            droppedOutput.sample(
+                "thin-dropped-video", 1_101, true, true, false, 1_101, 2_600,
+                decoderInputBufferCount = 8,
+                decoderDroppedBufferCount = 4,
+            )?.classification,
+        )
+    }
+
+    @Test
+    fun decoderDeadlineRestartsOnTheSampleThatReturnsOwnershipFromTransport() {
+        // Started, then starved; no polls during the refill (a lifecycle gap),
+        // and the first poll after it finds 6 s buffered and still no output.
+        // The deadline counts from that hand-back, not from before the starved
+        // stretch or from its last sample.
+        val detector = PlaybackStartupStallDetector(startupGraceMs = 20_000, midStreamGraceMs = 60_000)
+        detector.onMounted("handback", PlayMethod.DIRECT, 0, 0)
+
+        assertNull(detector.sample("handback", 1_000, true, true, false, 1_000, 2_500, decoderInputBufferCount = 1))
+        assertNull(detector.sample("handback", 2_000, true, false, true, 1_000, 2_542, decoderInputBufferCount = 3))
+        assertNull(
+            detector.sample("handback", 17_000, true, false, true, 1_000, 7_000, decoderInputBufferCount = 3),
+            "the sample that hands ownership back to the decoder must not be blamed on it",
+        )
+        assertNull(detector.sample("handback", 22_001, true, false, true, 1_000, 7_000, decoderInputBufferCount = 3))
+        assertNull(detector.sample("handback", 37_000, true, false, true, 1_000, 7_000, decoderInputBufferCount = 3))
+        assertEquals(
+            Playability.StartupStalled(bufferedAheadMs = 6_000, stalledForMs = 20_001, classification = "decoder_no_output"),
+            detector.sample("handback", 37_001, true, false, true, 1_000, 7_000, decoderInputBufferCount = 3),
+        )
+    }
+
+    @Test
+    fun firstFrameDisarmsIndependentDecoderDeadline() {
+        val detector = PlaybackStartupStallDetector(startupGraceMs = 1_000)
+        detector.onMounted("rendered", PlayMethod.DIRECT, 0, 0)
+        detector.sample(
+            sessionKey = "rendered",
+            nowMs = 100,
+            playWhenReady = true,
+            isPlaying = true,
+            isBuffering = false,
+            currentPositionMs = 100,
+            bufferedPositionMs = 5_000,
+            decoderInputBufferCount = 1,
+        )
+        detector.onFirstFrameRendered()
+        assertNull(
+            detector.sample(
+                sessionKey = "rendered",
+                nowMs = 2_000,
+                playWhenReady = true,
+                isPlaying = true,
+                isBuffering = false,
+                currentPositionMs = 2_000,
+                bufferedPositionMs = 5_000,
+                decoderInputBufferCount = 10,
+            ),
+        )
+    }
+
+    @Test
+    fun pausedStartupDoesNotTriggerFallback() {
+        // playWhenReady=false (user paused) never triggers, even past the grace.
+        val detector = PlaybackStartupStallDetector(startupGraceMs = 10_000)
+        detector.onMounted(
+            sessionKey = "session-2",
+            playMethod = PlayMethod.DIRECT,
+            startPositionMs = 0,
+            nowMs = 0,
+        )
+
+        assertNull(
+            detector.sample(
+                sessionKey = "session-2",
+                nowMs = 20_000,
+                playWhenReady = false,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 0,
+                bufferedPositionMs = 0,
+            ),
+        )
+    }
+
+    @Test
+    fun resumeStartsAFreshDecoderStartupGracePeriod() {
+        val detector = PlaybackStartupStallDetector(startupGraceMs = 1_000)
+        detector.onMounted("paused-decoder", PlayMethod.DIRECT, 0, 0)
+
+        assertNull(
+            detector.sample(
+                sessionKey = "paused-decoder",
+                nowMs = 100,
+                playWhenReady = true,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 0,
+                bufferedPositionMs = 5_000,
+                decoderInputBufferCount = 1,
+            ),
+        )
+        assertNull(
+            detector.sample(
+                sessionKey = "paused-decoder",
+                nowMs = 900,
+                playWhenReady = false,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 0,
+                bufferedPositionMs = 5_000,
+                decoderInputBufferCount = 4,
+            ),
+        )
+        assertNull(
+            detector.sample(
+                sessionKey = "paused-decoder",
+                nowMs = 5_000,
+                playWhenReady = true,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 0,
+                bufferedPositionMs = 5_000,
+                decoderInputBufferCount = 4,
+            ),
+        )
+        assertNull(
+            detector.sample(
+                sessionKey = "paused-decoder",
+                nowMs = 5_999,
+                playWhenReady = true,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 0,
+                bufferedPositionMs = 5_000,
+                decoderInputBufferCount = 4,
+            ),
+        )
+        assertEquals(
+            "decoder_no_output",
+            detector.sample(
+                sessionKey = "paused-decoder",
+                nowMs = 6_001,
+                playWhenReady = true,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 0,
+                bufferedPositionMs = 5_000,
+                decoderInputBufferCount = 4,
+            )?.classification,
+        )
+    }
+
+    @Test
+    fun midStreamFreezeTriggersFallbackAfterStarted() {
+        // Playback starts and advances, then the position freezes while
+        // buffering → fires after the mid-stream grace, not before.
+        val detector = PlaybackStartupStallDetector(
+            startupGraceMs = 10_000,
+            midStreamGraceMs = 10_000,
+        )
+        detector.onMounted(
+            sessionKey = "session-3",
+            playMethod = PlayMethod.DIRECT,
+            startPositionMs = 0,
+            nowMs = 0,
+        )
+        // Progress: playing, position advanced — latches started + re-anchors.
+        assertNull(
+            detector.sample(
+                sessionKey = "session-3",
+                nowMs = 1_000,
+                playWhenReady = true,
+                isPlaying = true,
+                isBuffering = false,
+                currentPositionMs = 2_000,
+                bufferedPositionMs = 5_000,
+            ),
+        )
+        // Frozen (buffering, no progress) but still within the grace.
+        assertNull(
+            detector.sample(
+                sessionKey = "session-3",
+                nowMs = 5_000,
+                playWhenReady = true,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 2_000,
+                bufferedPositionMs = 2_000,
+            ),
+        )
+        // Still frozen past the mid-stream grace → fires.
+        assertNotNull(
+            detector.sample(
+                sessionKey = "session-3",
+                nowMs = 15_000,
+                playWhenReady = true,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 2_000,
+                bufferedPositionMs = 2_000,
+            ),
+        )
+    }
+
+    @Test
+    fun bufferedGrowthDoesNotMaskPostFirstFrameFreeze() {
+        val detector = PlaybackStartupStallDetector(
+            startupGraceMs = 10_000,
+            midStreamGraceMs = 1_000,
+            bufferedProgressMs = 100,
+        )
+        detector.onMounted("session", PlayMethod.DIRECT, 0, 0)
+        detector.sample("session", 100, true, true, false, 1_000, 5_000)
+        detector.onFirstFrameRendered()
+
+        assertNull(detector.sample("session", 900, true, false, true, 1_000, 6_000))
+        assertNotNull(detector.sample("session", 1_101, true, false, true, 1_000, 7_000))
+    }
+
+    @Test
+    fun dv7ClientTransformStallUsesDedicatedDeadlineAndClassification() {
+        val detector = PlaybackStartupStallDetector(
+            startupGraceMs = 20_000,
+            clientTransformGraceMs = 10_000,
+        )
+        detector.onMounted(
+            sessionKey = "dv7",
+            playMethod = PlayMethod.DIRECT,
+            startPositionMs = 0,
+            nowMs = 0,
+            clientTransformations = listOf(CLIENT_DV7_TO_HDR10),
+        )
+        detector.onFirstFrameRendered()
+
+        assertNull(
+            detector.sample(
+                sessionKey = "dv7",
+                nowMs = 100,
+                playWhenReady = true,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 0,
+                bufferedPositionMs = 20_000,
+                decoderInputBufferCount = 1,
+                decoderRenderedOutputBufferCount = 1,
+            ),
+        )
+        assertNull(detector.sample("dv7", 10_100, true, false, true, 0, 20_000, 1, 1))
+        assertEquals(
+            PlaybackStartupStallDetector.DV7_TRANSFORM_STALL_CLASSIFICATION,
+            detector.sample("dv7", 10_101, true, false, true, 0, 20_000, 1, 1)?.classification,
+        )
+    }
+
+    @Test
+    fun dv7ClientTransformProgressReanchorsDedicatedDeadline() {
+        val detector = PlaybackStartupStallDetector(
+            startupGraceMs = 30_000,
+            clientTransformGraceMs = 10_000,
+        )
+        detector.onMounted(
+            sessionKey = "dv7-progress",
+            playMethod = PlayMethod.DIRECT,
+            startPositionMs = 0,
+            nowMs = 0,
+            clientTransformations = listOf(CLIENT_DV7_TO_HDR10),
+        )
+        detector.onFirstFrameRendered()
+
+        assertNull(detector.sample("dv7-progress", 100, true, false, true, 0, 20_000, 1, 1))
+        assertNull(detector.sample("dv7-progress", 5_000, true, true, false, 1_600, 25_000, 5, 5))
+        assertNull(detector.sample("dv7-progress", 15_000, true, false, true, 1_600, 25_000, 5, 5))
+        assertEquals(
+            PlaybackStartupStallDetector.DV7_TRANSFORM_STALL_CLASSIFICATION,
+            detector.sample("dv7-progress", 15_001, true, false, true, 1_600, 25_000, 5, 5)
+                ?.classification,
+        )
+    }
+
+    @Test
+    fun dv7AudioPositionProgressDoesNotReanchorTransformDeadline() {
+        val detector = PlaybackStartupStallDetector(
+            startupGraceMs = 30_000,
+            clientTransformGraceMs = 10_000,
+        )
+        detector.onMounted(
+            sessionKey = "dv7-audio-only",
+            playMethod = PlayMethod.DIRECT,
+            startPositionMs = 0,
+            nowMs = 0,
+            clientTransformations = listOf(CLIENT_DV7_TO_HDR10),
+        )
+        detector.onFirstFrameRendered()
+
+        assertNull(detector.sample("dv7-audio-only", 100, true, true, false, 0, 20_000, 1, 1))
+        assertNull(detector.sample("dv7-audio-only", 5_000, true, true, false, 1_600, 21_000, 1, 1))
+        assertNull(detector.sample("dv7-audio-only", 10_100, true, true, false, 3_200, 22_000, 1, 1))
+        assertEquals(
+            PlaybackStartupStallDetector.DV7_TRANSFORM_STALL_CLASSIFICATION,
+            detector.sample("dv7-audio-only", 10_101, true, true, false, 4_800, 23_000, 1, 1)
+                ?.classification,
+        )
+    }
+
+    @Test
+    fun dv7BackwardSeekReanchorsTransformDeadlineWithoutDecoderProgress() {
+        val detector = PlaybackStartupStallDetector(
+            startupGraceMs = 30_000,
+            clientTransformGraceMs = 10_000,
+        )
+        detector.onMounted(
+            sessionKey = "dv7-backward-seek",
+            playMethod = PlayMethod.DIRECT,
+            startPositionMs = 0,
+            nowMs = 0,
+            clientTransformations = listOf(CLIENT_DV7_TO_HDR10),
+        )
+        detector.onFirstFrameRendered()
+
+        assertNull(detector.sample("dv7-backward-seek", 100, true, true, false, 5_000, 25_000, 1, 1))
+        assertNull(detector.sample("dv7-backward-seek", 9_000, true, true, false, 10_000, 30_000, 1, 1))
+        assertNull(detector.sample("dv7-backward-seek", 9_001, true, true, false, 2_000, 22_000, 1, 1))
+        assertNull(detector.sample("dv7-backward-seek", 19_001, true, true, false, 2_000, 22_000, 1, 1))
+        assertEquals(
+            PlaybackStartupStallDetector.DV7_TRANSFORM_STALL_CLASSIFICATION,
+            detector.sample("dv7-backward-seek", 19_002, true, true, false, 2_000, 22_000, 1, 1)
+                ?.classification,
+        )
+    }
+
+    @Test
+    fun dv7WedgeWhileAudioPlaysIsBlamedOnTheRecipeHoweverLittleIsBuffered() {
+        // The SM-F976U1 shape: one frame, then the video decoder goes silent
+        // while TrueHD keeps the position moving. The player is PLAYING, so
+        // input is reaching the pipeline; a thin buffer is not an excuse.
+        val detector = PlaybackStartupStallDetector(
+            startupGraceMs = 30_000,
+            clientTransformGraceMs = 10_000,
+            clientTransformMinBufferedAheadMs = 5_000,
+        )
+        detector.onMounted(
+            sessionKey = "dv7-thin-buffer-wedge",
+            playMethod = PlayMethod.DIRECT,
+            startPositionMs = 0,
+            nowMs = 0,
+            clientTransformations = listOf(CLIENT_DV7_TO_HDR10),
+        )
+        detector.onFirstFrameRendered()
+
+        assertNull(detector.sample("dv7-thin-buffer-wedge", 100, true, true, false, 0, 1_500, 1, 1))
+        assertNull(detector.sample("dv7-thin-buffer-wedge", 5_000, true, true, false, 4_900, 6_000, 1, 1))
+        assertNull(detector.sample("dv7-thin-buffer-wedge", 10_100, true, true, false, 10_000, 11_000, 1, 1))
+        assertEquals(
+            PlaybackStartupStallDetector.DV7_TRANSFORM_STALL_CLASSIFICATION,
+            detector.sample("dv7-thin-buffer-wedge", 10_101, true, true, false, 10_001, 11_000, 1, 1)
+                ?.classification,
+        )
+    }
+
+    @Test
+    fun dv7DrainedBufferIsANetworkRebufferNotATransformStall() {
+        // A 4K Profile 7 remux on Wi-Fi: the transform decoded frames, then
+        // the buffer ran dry and the player sits in BUFFERING with the decoder
+        // idle for want of input. That is the transport clock's stall, not
+        // the recipe's; blaming the recipe would quarantine a working route.
+        val detector = PlaybackStartupStallDetector(
+            startupGraceMs = 30_000,
+            midStreamGraceMs = 20_000,
+            clientTransformGraceMs = 10_000,
+            clientTransformMinBufferedAheadMs = 5_000,
+        )
+        detector.onMounted(
+            sessionKey = "dv7-rebuffer",
+            playMethod = PlayMethod.DIRECT,
+            startPositionMs = 0,
+            nowMs = 0,
+            clientTransformations = listOf(CLIENT_DV7_TO_HDR10),
+        )
+        detector.onFirstFrameRendered()
+
+        assertNull(detector.sample("dv7-rebuffer", 100, true, true, false, 0, 6_000, 10, 10))
+        assertNull(detector.sample("dv7-rebuffer", 5_000, true, true, false, 4_900, 6_000, 120, 120))
+        // Buffer drained; the decoder has nothing to chew on.
+        assertNull(detector.sample("dv7-rebuffer", 6_000, true, false, true, 6_000, 6_100, 145, 145))
+        assertNull(detector.sample("dv7-rebuffer", 16_100, true, false, true, 6_000, 6_500, 145, 145))
+        assertNull(detector.sample("dv7-rebuffer", 20_000, true, false, true, 6_000, 8_000, 145, 145))
+        // Twenty seconds without playback progress is the mid-stream transport
+        // stall, which reopens the same route rather than withdrawing it.
+        assertEquals(
+            "transport_stall",
+            detector.sample("dv7-rebuffer", 26_001, true, false, true, 6_000, 8_000, 145, 145)
+                ?.classification,
+        )
+    }
+
+    @Test
+    fun dv7TransformDeadlineRestartsWhenTheBufferRefillsAfterALongRebuffer() {
+        // Codex review on #289: a rebuffer longer than the transform grace
+        // used to leave the transform clock pointing at the last frame before
+        // the network stall. The first sample after the buffer refilled then
+        // blamed the recipe before the decoder had a chance to emit a frame,
+        // and the working route was quarantined for 14 days.
+        val detector = PlaybackStartupStallDetector(
+            startupGraceMs = 30_000,
+            midStreamGraceMs = 20_000,
+            clientTransformGraceMs = 10_000,
+            clientTransformMinBufferedAheadMs = 5_000,
+        )
+        detector.onMounted(
+            sessionKey = "dv7-refill",
+            playMethod = PlayMethod.DIRECT,
+            startPositionMs = 0,
+            nowMs = 0,
+            clientTransformations = listOf(CLIENT_DV7_TO_HDR10),
+        )
+        detector.onFirstFrameRendered()
+
+        assertNull(detector.sample("dv7-refill", 100, true, true, false, 0, 6_000, 10, 10))
+        assertNull(detector.sample("dv7-refill", 5_000, true, true, false, 4_900, 6_000, 120, 120))
+        // Buffer drains; transport owns the stall for twelve seconds.
+        assertNull(detector.sample("dv7-refill", 6_000, true, false, true, 6_000, 6_100, 145, 145))
+        assertNull(detector.sample("dv7-refill", 17_000, true, false, true, 6_000, 6_500, 145, 145))
+        // Refilled past the threshold, still BUFFERING, decoder not yet fed.
+        assertNull(
+            detector.sample("dv7-refill", 17_500, true, false, true, 6_000, 12_000, 145, 145),
+            "the first sample after a refill must not blame the recipe",
+        )
+        // Playback resumes and the decoder keeps producing frames.
+        assertNull(detector.sample("dv7-refill", 18_000, true, true, false, 6_100, 12_000, 150, 150))
+        assertNull(detector.sample("dv7-refill", 27_000, true, true, false, 15_000, 20_000, 400, 400))
+
+        // The clock restarted from the refill rather than being disabled: a
+        // real wedge after the rebuffer still trips the transform deadline.
+        assertNull(detector.sample("dv7-refill", 37_000, true, true, false, 25_000, 30_000, 400, 400))
+        assertEquals(
+            PlaybackStartupStallDetector.DV7_TRANSFORM_STALL_CLASSIFICATION,
+            detector.sample("dv7-refill", 37_001, true, true, false, 25_001, 30_000, 400, 400)
+                ?.classification,
+        )
+    }
+
+    @Test
+    fun dv7TransformDeadlineRestartsOnTheSampleThatReturnsOwnershipToTheTransform() {
+        // CodeRabbit on #289: if no poll lands while transport owns the stall
+        // (a lifecycle gap spanning the refill), the first transform-owned
+        // sample must not inherit a clock anchored at the last transport
+        // sample. The transition itself restarts the deadline.
+        val detector = PlaybackStartupStallDetector(
+            startupGraceMs = 30_000,
+            midStreamGraceMs = 20_000,
+            clientTransformGraceMs = 10_000,
+            clientTransformMinBufferedAheadMs = 5_000,
+        )
+        detector.onMounted(
+            sessionKey = "dv7-gap",
+            playMethod = PlayMethod.DIRECT,
+            startPositionMs = 0,
+            nowMs = 0,
+            clientTransformations = listOf(CLIENT_DV7_TO_HDR10),
+        )
+        detector.onFirstFrameRendered()
+
+        assertNull(detector.sample("dv7-gap", 5_000, true, true, false, 4_900, 6_000, 120, 120))
+        // One transport-owned sample as the buffer drains, then no polls at
+        // all until the buffer has refilled 11.5 s later.
+        assertNull(detector.sample("dv7-gap", 6_000, true, false, true, 6_000, 6_100, 145, 145))
+        assertNull(
+            detector.sample("dv7-gap", 17_500, true, false, true, 6_000, 12_000, 145, 145),
+            "the sample that hands ownership back to the transform must not be blamed on the recipe",
+        )
+        // Playback resumes on audio but the video decoder stays silent: the
+        // deadline that restarted at the hand-back trips ten seconds on.
+        assertNull(detector.sample("dv7-gap", 18_000, true, true, false, 6_100, 12_000, 145, 145))
+        assertNull(detector.sample("dv7-gap", 27_500, true, true, false, 15_000, 20_000, 145, 145))
+        assertEquals(
+            PlaybackStartupStallDetector.DV7_TRANSFORM_STALL_CLASSIFICATION,
+            detector.sample("dv7-gap", 27_501, true, true, false, 15_001, 20_000, 145, 145)
+                ?.classification,
+        )
+    }
+
+    @Test
+    fun dv7RouteWithoutDecoderEvidenceKeepsTransportDeadline() {
+        val detector = PlaybackStartupStallDetector(
+            startupGraceMs = 20_000,
+            clientTransformGraceMs = 10_000,
+        )
+        detector.onMounted(
+            sessionKey = "dv7-no-input",
+            playMethod = PlayMethod.DIRECT,
+            startPositionMs = 0,
+            nowMs = 0,
+            clientTransformations = listOf(CLIENT_DV7_TO_HDR10),
+        )
+
+        assertNull(detector.sample("dv7-no-input", 10_001, true, false, true, 0, 0))
+        assertEquals(
+            "transport_stall",
+            detector.sample("dv7-no-input", 20_001, true, false, true, 0, 0)?.classification,
+        )
+    }
+
+    @Test
+    fun newMountResetsSignalState() {
+        val detector = PlaybackStartupStallDetector(startupGraceMs = 10_000)
+        detector.onMounted(
+            sessionKey = "session-1",
+            playMethod = PlayMethod.DIRECT,
+            startPositionMs = 0,
+            nowMs = 0,
+        )
+        detector.sample(
+            sessionKey = "session-1",
+            nowMs = 20_000,
+            playWhenReady = true,
+            isPlaying = false,
+            isBuffering = true,
+            currentPositionMs = 0,
+            bufferedPositionMs = 0,
+        )
+
+        detector.onMounted(
+            sessionKey = "session-2",
+            playMethod = PlayMethod.DIRECT,
+            startPositionMs = 0,
+            nowMs = 30_000,
+        )
+
+        assertNull(
+            detector.sample(
+                sessionKey = "session-1",
+                nowMs = 39_999,
+                playWhenReady = true,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 0,
+                bufferedPositionMs = 0,
+            ),
+        )
+
+        assertEquals(
+            Playability.StartupStalled(bufferedAheadMs = 0, stalledForMs = 10_001),
+            detector.sample(
+                sessionKey = "session-2",
+                nowMs = 40_001,
+                playWhenReady = true,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 0,
+                bufferedPositionMs = 0,
+            ),
+        )
+    }
+
+    @Test
+    fun bufferedGrowthReanchorsTransportStallWithoutPretendingPlaybackStarted() {
+        val detector = PlaybackStartupStallDetector(startupGraceMs = 10_000)
+        detector.onMounted(
+            sessionKey = "session-buffering",
+            playMethod = PlayMethod.DIRECT,
+            startPositionMs = 0,
+            nowMs = 0,
+        )
+
+        assertNull(
+            detector.sample(
+                sessionKey = "session-buffering",
+                nowMs = 9_000,
+                playWhenReady = true,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 0,
+                bufferedPositionMs = 5_000,
+            ),
+        )
+        assertNull(
+            detector.sample(
+                sessionKey = "session-buffering",
+                nowMs = 15_000,
+                playWhenReady = true,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 0,
+                bufferedPositionMs = 5_000,
+            ),
+        )
+        assertEquals(
+            Playability.StartupStalled(bufferedAheadMs = 5_000, stalledForMs = 10_001),
+            detector.sample(
+                sessionKey = "session-buffering",
+                nowMs = 19_001,
+                playWhenReady = true,
+                isPlaying = false,
+                isBuffering = true,
+                currentPositionMs = 0,
+                bufferedPositionMs = 5_000,
+            ),
+        )
+    }
+}

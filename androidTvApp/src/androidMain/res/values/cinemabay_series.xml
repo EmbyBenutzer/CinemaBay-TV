@@ -1,0 +1,4 @@
+<resources>
+    <string name="cinemabay_series_episode_total">%1$d episodes</string>
+    <string name="cinemabay_series_episode_watched">%1$d watched</string>
+</resources>

@@ -1,0 +1,120 @@
+package org.siloserver.silo.common.downloads
+
+import org.siloserver.silo.common.data.db.entity.DownloadEntity
+import org.siloserver.silo.model.catalog.VersionChapter
+import org.siloserver.silo.model.catalog.LeafItemUserData
+import org.siloserver.silo.model.download.DownloadRecord
+import org.siloserver.silo.model.download.DownloadSidecar
+import org.siloserver.silo.model.download.OfflineTrackInfo
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+
+/**
+ * Maps between the on-the-wire-ish [DownloadSidecar] (the download's full local
+ * picture) and the Room [DownloadEntity] projection. Chapters serialize to a JSON
+ * column (no TypeConverter). `batchId`/`deliveryFormat`/`targetBitrateKbps` on
+ * [DownloadRecord] have no entity column and aren't read anywhere in the
+ * download/playback paths, so they round-trip as null.
+ *
+ * The server keys an episode's entry by its series (`contentId`) plus
+ * `episodeId`, while every local reader (offline playback, the Downloads list,
+ * watched state) looks a download up by the item it plays. The entity's
+ * `contentId` is therefore the episode for episodes; the series stays in
+ * `seriesContentId`.
+ */
+private val mappingJson = Json { ignoreUnknownKeys = true }
+
+fun DownloadSidecar.toEntity(serverId: String, accountId: String, profileId: String): DownloadEntity =
+    DownloadEntity(
+        serverId = serverId,
+        accountId = accountId,
+        profileId = profileId,
+        mediaFileId = record.mediaFileId,
+        recordId = record.id,
+        contentId = record.episodeId?.takeIf { it.isNotBlank() } ?: record.contentId,
+        title = title,
+        subtitle = subtitle,
+        posterUrl = posterUrl,
+        posterThumbhash = posterThumbhash,
+        posterIsEpisodeStill = posterIsEpisodeStill,
+        episodeUserDataJson = episodeUserData?.let { mappingJson.encodeToString(it) },
+        year = year,
+        seriesTitle = seriesTitle,
+        seriesContentId = seriesContentId,
+        seasonNumber = seasonNumber,
+        episodeNumber = episodeNumber,
+        fileName = fileName,
+        container = container,
+        localUri = localUri,
+        mediaType = mediaType,
+        overview = overview,
+        author = author,
+        narrator = narrator,
+        durationSeconds = durationSeconds,
+        chaptersJson = chapters?.let { mappingJson.encodeToString(it) },
+        resumeValidator = resumeValidator,
+        status = record.status,
+        kind = record.kind,
+        fileSize = record.fileSize,
+        bytesSent = record.bytesSent,
+        createdAt = record.createdAt,
+        completedAt = record.completedAt,
+        updatedAtMs = updatedAtMs,
+        quality = record.quality,
+        effectiveQuality = record.effectiveQuality,
+        revision = record.revision,
+        offlineTracksJson = offlineTracks?.let { mappingJson.encodeToString(it) },
+        offlinePosterPath = offlinePosterPath,
+        offlineSeriesPosterPath = offlineSeriesPosterPath,
+        seriesPosterThumbhash = seriesPosterThumbhash,
+    )
+
+fun DownloadEntity.toSidecar(): DownloadSidecar =
+    DownloadSidecar(
+        record = DownloadRecord(
+            id = recordId,
+            contentId = contentId,
+            episodeId = null,
+            batchId = null,
+            mediaFileId = mediaFileId,
+            fileSize = fileSize,
+            bytesSent = bytesSent,
+            kind = kind,
+            status = status,
+            createdAt = createdAt,
+            completedAt = completedAt,
+            quality = quality,
+            effectiveQuality = effectiveQuality,
+            revision = revision,
+        ),
+        title = title,
+        subtitle = subtitle,
+        posterUrl = posterUrl,
+        posterThumbhash = posterThumbhash,
+        posterIsEpisodeStill = posterIsEpisodeStill,
+        episodeUserData = episodeUserDataJson?.let {
+            runCatching { mappingJson.decodeFromString<LeafItemUserData>(it) }.getOrNull()
+        },
+        year = year,
+        seriesTitle = seriesTitle,
+        seriesContentId = seriesContentId,
+        seasonNumber = seasonNumber,
+        episodeNumber = episodeNumber,
+        fileName = fileName,
+        container = container,
+        localUri = localUri,
+        mediaType = mediaType,
+        overview = overview,
+        author = author,
+        narrator = narrator,
+        durationSeconds = durationSeconds,
+        chapters = chaptersJson?.let { runCatching { mappingJson.decodeFromString<List<VersionChapter>>(it) }.getOrNull() },
+        resumeValidator = resumeValidator,
+        offlineTracks = offlineTracksJson?.let {
+            runCatching { mappingJson.decodeFromString<OfflineTrackInfo>(it) }.getOrNull()
+        },
+        offlinePosterPath = offlinePosterPath,
+        offlineSeriesPosterPath = offlineSeriesPosterPath,
+        seriesPosterThumbhash = seriesPosterThumbhash,
+        updatedAtMs = updatedAtMs,
+    )

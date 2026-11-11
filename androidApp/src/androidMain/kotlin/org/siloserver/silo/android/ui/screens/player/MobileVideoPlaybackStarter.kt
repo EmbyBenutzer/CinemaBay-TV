@@ -1,0 +1,714 @@
+package org.siloserver.silo.android.ui.screens.player
+
+import org.siloserver.silo.common.R as CommonR
+import org.siloserver.silo.common.settings.reconcileStart
+import org.siloserver.silo.common.settings.audioResetToAutoPending
+import android.util.Log
+import org.siloserver.silo.common.network.ServerReachabilityMonitor
+import org.siloserver.silo.common.player.PlaybackCapabilityDetector
+import org.siloserver.silo.common.player.PlaybackNetworkEvidenceProvider
+import org.siloserver.silo.common.player.PlaybackSessionLifecycle
+import org.siloserver.silo.common.player.PlaybackSessionManager
+import org.siloserver.silo.common.player.StartParams
+import org.siloserver.silo.common.player.TrackSelectionPresets
+import org.siloserver.silo.common.player.VideoSessionStartV3
+import org.siloserver.silo.common.player.qualityPair
+import org.siloserver.silo.common.player.usesCellularQuality
+import org.siloserver.silo.common.player.video.VideoPlaybackStartRequest
+import org.siloserver.silo.common.player.video.VideoPlaybackStartResult
+import org.siloserver.silo.common.player.video.VideoPlaybackStarter
+import org.siloserver.silo.common.player.video.PlaybackDiagnosticsCode
+import org.siloserver.silo.common.player.video.resolvedPlaybackDelivery
+import org.siloserver.silo.common.player.video.SERVER_TERMINAL_FALLBACK_MESSAGE
+import org.siloserver.silo.common.player.video.serverTerminalUserMessage
+import org.siloserver.silo.common.player.video.terminalUserMessageRes
+import org.siloserver.silo.common.player.video.shouldReachServerForPlayback
+import org.siloserver.silo.common.settings.PlayerSettingsStore
+import org.siloserver.silo.common.settings.dolbyVisionPolicySnapshot
+import org.siloserver.silo.android.BuildConfig
+import org.siloserver.silo.model.catalog.WatchDetail
+import org.siloserver.silo.model.catalog.SubtitleTrack
+import org.siloserver.silo.model.playback.ClientCodecCapabilities
+import org.siloserver.silo.model.playback.ClientPlaybackContext
+import org.siloserver.silo.model.playback.PlaybackSessionResponse
+import org.siloserver.silo.model.playback.buildPlaybackSubtitleChoices
+import org.siloserver.silo.model.playback.enrichAuthoritativePlaybackSubtitleChoices
+import org.siloserver.silo.model.playback.combinedSubtitleSelectionIndexes
+import org.siloserver.silo.model.playback.applyResumeRewind
+import org.siloserver.silo.model.playback.resolvePlaybackStartRequestPosition
+import org.siloserver.silo.model.playback.resolvedSelectedSubtitleIndex
+import org.siloserver.silo.model.playback.videoQualityPreference
+import org.siloserver.silo.model.playback.withCarriedSeriesTrackChoices
+import org.siloserver.silo.model.playback.matchesSignature
+import org.siloserver.silo.network.ApiResult
+import org.siloserver.silo.playback.orNullIfBlank
+import org.siloserver.silo.playback.resolveCatalogSubtitlePreferenceOrdinal
+import org.siloserver.silo.playback.selectPlaybackVersion
+import org.siloserver.silo.repository.CatalogRepository
+import org.siloserver.silo.repository.ProfileRepository
+import org.siloserver.silo.repository.port.LocalTrackSelection
+import org.siloserver.silo.repository.port.UserItemStatePort
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
+
+internal data class MobileVideoSessionAllocation(
+    val fileId: Int,
+    val profileId: String,
+    val capabilities: ClientCodecCapabilities,
+    val clientPlaybackContext: ClientPlaybackContext,
+    val audioTrackIndex: Int?,
+    val subtitleTrackIndex: Int?,
+    val qualityPreference: String?,
+    val startPosition: Double?,
+    /** `playback.max_bitrate_kbps`; null is uncapped. */
+    val maxBitrateKbps: Int? = null,
+    val expectedMetadataOwner: org.siloserver.silo.network.AuthScopeSnapshot? = null,
+    val allowAlternateVersions: Boolean? = null,
+    val allowsLocalRoute: Boolean = false,
+)
+
+internal fun interface MobileVideoSessionAllocator {
+    suspend fun allocate(request: MobileVideoSessionAllocation): ApiResult<VideoSessionStartV3>
+}
+
+internal fun interface MobileVideoSessionAdopter {
+    suspend fun adopt(params: StartParams, session: PlaybackSessionResponse)
+}
+
+internal data class MobileInitialTrackSelection(
+    val audioTrackIndex: Int?,
+    val subtitleTrackIndex: Int?,
+)
+
+/**
+ * Resolves durable per-file choices before neutral-v3 allocates its first plan.
+ *
+ * Explicit request indexes are already playback-v3 indexes and must pass
+ * through unchanged, including internal recovery starts. Audio otherwise
+ * follows the server's effective track for the file ([serverAudioTrackIndex],
+ * which holds the profile's series choice); see
+ * [org.siloserver.silo.common.player.resolveStartAudioTrackOrdinal]. Persisted subtitle
+ * choices are stable catalog identities, so resolve only those onto the
+ * server's combined external-then-embedded index space. This lets restore
+ * happen in the first plan without reinterpreting a recovery index twice.
+ * Local/downloaded subtitle identities deliberately resolve to null and stay
+ * on the Media3-only restore path after the server plan is mounted.
+ */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+internal fun resolveMobileInitialTrackSelection(
+    explicitAudioTrackIndex: Int?,
+    explicitSubtitleTrackIndex: Int?,
+    audioTracks: List<org.siloserver.silo.model.catalog.AudioTrack>,
+    subtitleTracks: List<SubtitleTrack>,
+    persisted: LocalTrackSelection?,
+    preferredAudioLanguage: String? = null,
+    capabilities: ClientCodecCapabilities,
+    serverAudioTrackIndex: Int? = null,
+    audioResetToAuto: Boolean = false,
+): MobileInitialTrackSelection {
+    val audioTrackIndex = org.siloserver.silo.common.player.resolveStartAudioTrackOrdinal(
+        explicitOrdinal = explicitAudioTrackIndex,
+        tracks = audioTracks,
+        serverOrdinal = serverAudioTrackIndex,
+        localFingerprint = persisted?.audioFingerprint,
+        resetToAuto = audioResetToAuto,
+    ) {
+        // The phone keeps the file's default track when no language is set.
+        preferredAudioLanguage?.let { language ->
+            TrackSelectionPresets.selectBestCompatibleAudioTrackOrdinal(
+                tracks = audioTracks,
+                preferredAudioLanguage = language,
+                capabilities = capabilities,
+            )
+        }
+    }
+    val persistedSubtitleOrdinal = if (explicitSubtitleTrackIndex == null) {
+        resolveCatalogSubtitlePreferenceOrdinal(
+            subtitleTracks,
+            persisted?.subtitleFingerprint,
+        )
+    } else {
+        null
+    }
+    val subtitleTrackIndex = when {
+        explicitSubtitleTrackIndex != null -> explicitSubtitleTrackIndex
+        persistedSubtitleOrdinal == null -> null
+        persistedSubtitleOrdinal == -1 -> -1
+        else -> combinedSubtitleSelectionIndexes(subtitleTracks)
+            .getOrNull(persistedSubtitleOrdinal)
+    }
+    return MobileInitialTrackSelection(
+        audioTrackIndex = audioTrackIndex,
+        subtitleTrackIndex = subtitleTrackIndex,
+    )
+}
+
+internal class MobileVideoPlaybackStarter(
+    private val catalogRepository: CatalogRepository,
+    private val playbackSessionManager: PlaybackSessionManager,
+    private val profileRepository: ProfileRepository,
+    private val capabilityDetector: PlaybackCapabilityDetector,
+    private val playerSettingsStore: PlayerSettingsStore,
+    private val sessionLifecycle: PlaybackSessionLifecycle,
+    private val reachabilityMonitor: ServerReachabilityMonitor,
+    private val userItemStatePort: UserItemStatePort? = null,
+    private val sessionAllocator: MobileVideoSessionAllocator? = null,
+    private val sessionAdopter: MobileVideoSessionAdopter? = null,
+    /** Picks the cellular quality pair on mobile data or a metered network. */
+    private val networkEvidenceProvider: PlaybackNetworkEvidenceProvider = PlaybackNetworkEvidenceProvider.None,
+    /** Lays a series subtitle choice that has not landed yet over the server's answer. */
+    private val seriesTrackChoiceWriter: org.siloserver.silo.common.settings.SeriesTrackChoiceWriter? = null,
+) : VideoPlaybackStarter {
+
+    private suspend fun subtitleResetToAuto(detail: WatchDetail): Boolean {
+        val key = org.siloserver.silo.model.playback.seriesTrackChoiceKey(detail.seriesId, detail.contentId) ?: return false
+        return seriesTrackChoiceWriter?.subtitleResetToAuto(key) == true
+    }
+
+    override suspend fun start(request: VideoPlaybackStartRequest): VideoPlaybackStartResult {
+        // Pre-play gate: don't launch a doomed server session when the origin is
+        // unreachable (issue #33). Playable local downloads are already served by
+        // PlayerViewModel.tryLocalPlayback *before* this starter runs, so an
+        // Unreachable status here means no local copy exists.
+        if (!shouldReachServerForPlayback(reachabilityMonitor, request.force)) {
+            return VideoPlaybackStartResult.ServerUnreachable(request.contentId)
+        }
+        val expectedMetadataOwner = catalogRepository.captureWatchAuthority()
+            ?: return failure(request.contentId, MobilePlayerStartErrors.IDENTITY_UNAVAILABLE + MobilePlayerStartErrors.METADATA_NEEDS_PROFILE, diagnosticsCode = PlaybackDiagnosticsCode.NOT_AUTHENTICATED)
+        suspend fun ownerCurrent(): Boolean {
+            val valid = catalogRepository.isWatchAuthorityCurrent(expectedMetadataOwner)
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            return valid
+        }
+        val ownershipEpoch = sessionLifecycle.acquireOwnershipEpoch()
+        var allocatedButUnpublishedSessionId: String? = null
+        var lifecycleAdopted = false
+        return try {
+            var audioResetToAuto = false
+            val landedBefore = seriesTrackChoiceWriter?.landedWrites ?: 0L
+            val watchDetail = when (val r = catalogRepository.getWatchDetail(request.contentId, expectedMetadataOwner, request.libraryId)) {
+                is ApiResult.Success -> {
+                    // An Auto set here and not landed: checked before and after
+                    // the flush, which can land it after its overlay is taken.
+                    val key = org.siloserver.silo.model.playback.seriesTrackChoiceKey(r.data.seriesId, r.data.contentId)
+                    suspend fun resetPending() = key?.let { seriesTrackChoiceWriter?.audioResetToAutoPending(it) } == true
+                    audioResetToAuto = resetPending()
+                    val reconciled = seriesTrackChoiceWriter?.reconcileStart(landedBefore, r.data) {
+                        (catalogRepository.getWatchDetail(request.contentId, expectedMetadataOwner, request.libraryId) as? ApiResult.Success)?.data
+                    } ?: r.data
+                    audioResetToAuto = audioResetToAuto || resetPending()
+                    reconciled.withCarriedSeriesTrackChoices(request.carriedTrackChoices)
+                }
+                is ApiResult.Error -> return failure(
+                    request.contentId,
+                    MobilePlayerStartErrors.LOAD_FAILED_PREFIX + r.message,
+                    diagnosticsCode = PlaybackDiagnosticsCode.CATALOG,
+                )
+                is ApiResult.NetworkError -> return failure(
+                    request.contentId,
+                    MobilePlayerStartErrors.NETWORK_PREFIX + r.exception.message,
+                    r.exception,
+                    PlaybackDiagnosticsCode.NETWORK,
+                )
+            }
+            if (watchDetail.versions.isEmpty()) {
+                return failure(
+                    request.contentId,
+                    MobilePlayerStartErrors.NO_VERSIONS,
+                    diagnosticsCode = PlaybackDiagnosticsCode.NO_VERSIONS,
+                )
+            }
+
+            // The playback-focused /watch response currently omits artwork.
+            // Detail screens cache the full catalog item before playback in the
+            // normal flow. Keep this fallback cache-only so optional artwork can
+            // never add a network request to, or prevent, playback startup.
+            val cachedDetail = runCatching {
+                catalogRepository.getCachedItemDetail(request.contentId, request.libraryId)
+            }.onFailure { error ->
+                Log.w(TAG, "Could not read cached playback artwork", error)
+            }.getOrNull()
+            val artworkUrl = watchDetail.backdropUrl?.takeIf { it.isNotBlank() }
+                ?: watchDetail.posterUrl?.takeIf { it.isNotBlank() }
+                ?: cachedDetail?.backdropUrl?.takeIf { it.isNotBlank() }
+                ?: cachedDetail?.posterUrl?.takeIf { it.isNotBlank() }
+
+            val serverUrl = playbackSessionManager.getServerUrl()
+            // On mobile data or a metered network the cellular pair stands in
+            // for the main one; the player follows later network changes. A
+            // quality picked in the player or named by the route replaces only
+            // the resolution.
+            val qualityPair = playerSettingsStore.qualityPair(
+                cellular = networkEvidenceProvider.snapshot().usesCellularQuality,
+            )
+            // Never "original" for video: older servers read it as never convert.
+            val preferredQuality = videoQualityPreference(
+                request.preferredQualityOverride ?: qualityPair.qualityPreference,
+            )
+            val playbackQualityIntent = videoQualityPreference(request.playbackQualityIntent) ?: preferredQuality
+            // What a renewal may carry over: a quality picked in the player or
+            // named by the route, never one that came from the saved settings,
+            // which a renewal reads again for the connection it is on.
+            val carriedQuality = videoQualityPreference(request.playbackQualityIntent)
+                ?: videoQualityPreference(request.preferredQualityOverride)
+            // The bandwidth half of the quality choice. Quality is two axes and
+            // the server applies the cap only from what the request carries —
+            // nothing on the playback path reads the stored setting — so
+            // sending the resolution alone lets a capped preset ("1080p Low")
+            // stream at the bandwidth the user explicitly declined.
+            val maxBitrateKbps = qualityPair.bandwidthCapKbps
+            val configuredAudioLanguage = playerSettingsStore.audioLanguageFlow
+                .first().ifBlank { null }
+            val room = request.room
+            // A room plays exactly its file; never a preferred or remembered one.
+            val version = if (room != null) {
+                watchDetail.versions.firstOrNull { it.fileId == room.fileId }
+                    ?: return failure(
+                        request.contentId,
+                        MobilePlayerStartErrors.WATCH_PARTY_VERSION_UNAVAILABLE,
+                        diagnosticsCode = PlaybackDiagnosticsCode.NO_VERSIONS,
+                    )
+            } else {
+                request.preferredFileId
+                    ?.let { id -> watchDetail.versions.firstOrNull { it.fileId == id } }
+                    ?: selectPlaybackVersion(
+                        watchDetail.versions,
+                        watchDetail.userData?.lastFileId,
+                        preferredQuality,
+                    ).let { selected ->
+                        // A start from the beginning opens a multi-part item at its first part.
+                        if (org.siloserver.silo.model.playback.isExplicitStartOver(request.resumePositionOverride)) {
+                            org.siloserver.silo.playback.firstPlaybackPart(watchDetail.versions, selected)
+                        } else {
+                            selected
+                        }
+                    }
+            }
+            val allowAlternateVersions = request.allowAlternateVersions()
+            // The series subtitle choice as this file holds it, by signature.
+            val seriesSubtitleSignature = watchDetail.effectiveSubtitleTrackSignature
+                ?.takeUnless { watchDetail.effectiveSubtitleMode.equals("off", ignoreCase = true) }
+            val seriesSubtitleCandidate = seriesSubtitleSignature?.let { signature ->
+                org.siloserver.silo.model.playback.catalogAutoSubtitleCandidates(version.subtitleTracks.orEmpty())
+                    .firstOrNull { it.matchesSignature(signature) }
+            }
+            var restoredSeriesSubtitleIndex: Int? = null
+            val persistedTrackSelection = if (
+                userItemStatePort != null &&
+                (request.audioTrackIndex == null || request.subtitleTrackIndex == null)
+            ) {
+                userItemStatePort.localTrackSelection(request.contentId, version.fileId)
+                    ?.let { local ->
+                        // The series choice on the server outranks this
+                        // device's per-file memory (see the player's load).
+                        val agreeing = org.siloserver.silo.model.playback.localSubtitleMemoryForSeriesChoice(
+                            localPreference = local.subtitleFingerprint,
+                            serverChoiceKnown = true,
+                            signature = seriesSubtitleSignature,
+                            effectiveMode = watchDetail.effectiveSubtitleMode,
+                            resetToAuto = subtitleResetToAuto(watchDetail),
+                        )
+                        // A memory that agrees with the series choice restores
+                        // it — as the track the signature names, where the
+                        // file holds it, not a sibling the memory recorded.
+                        if (agreeing != null) restoredSeriesSubtitleIndex = seriesSubtitleCandidate?.selectionIndex
+                        local.copy(subtitleFingerprint = agreeing.takeIf { seriesSubtitleCandidate == null })
+                    }
+            } else {
+                null
+            }
+            val activeProfile = profileRepository.getActiveProfile()
+            val profileId = activeProfile?.id ?: profileRepository.getActiveProfileId()
+                ?: return failure(
+                    request.contentId,
+                    MobilePlayerStartErrors.NO_PROFILE,
+                    diagnosticsCode = PlaybackDiagnosticsCode.NO_ACTIVE_PROFILE,
+                )
+            val preferredAudioLanguage = configuredAudioLanguage
+                ?: activeProfile?.language.orNullIfBlank()
+            val accessToken = playbackSessionManager.getAccessToken()
+                ?: return failure(
+                    request.contentId,
+                    MobilePlayerStartErrors.NOT_AUTHENTICATED,
+                    diagnosticsCode = PlaybackDiagnosticsCode.NOT_AUTHENTICATED,
+                )
+            val dolbyVision = playerSettingsStore.dolbyVisionPolicySnapshot()
+            val capabilities = request.recoveryStartParams?.capabilities
+                ?: capabilityDetector.detect(dolbyVision = dolbyVision)
+            val playbackContext = request.recoveryStartParams?.clientPlaybackContext
+                ?: capabilityDetector.detectPlaybackContext(
+                    formFactor = "mobile",
+                    appVersion = BuildConfig.VERSION_NAME,
+                    dolbyVision = dolbyVision,
+                    capabilities = capabilities,
+                )
+            val initialTracks = resolveMobileInitialTrackSelection(
+                explicitAudioTrackIndex = request.audioTrackIndex,
+                explicitSubtitleTrackIndex = request.subtitleTrackIndex ?: restoredSeriesSubtitleIndex,
+                audioTracks = version.audioTracks.orEmpty(),
+                subtitleTracks = version.subtitleTracks.orEmpty(),
+                persisted = persistedTrackSelection,
+                preferredAudioLanguage = preferredAudioLanguage,
+                capabilities = capabilities,
+                serverAudioTrackIndex = version.effectiveAudioTrackIndex,
+                audioResetToAuto = audioResetToAuto,
+            )
+            // Skip-back-on-resume: nudge a genuine resume back a few seconds.
+            // Suppressed for Start Over / retry (request flag) and Watch Party
+            // (roomId — all participants must land on the synced anchor). The same
+            // rewound value drives BOTH the server seek and the player start, so
+            // a transcode cut and the player position never disagree.
+            val suppressRewind = request.suppressResumeRewind || request.roomId != null || room != null ||
+                org.siloserver.silo.model.playback.isExplicitStartOver(request.resumePositionOverride)
+            // Per-profile setting (default 7; 0 = off). Read once per start.
+            val rewindSeconds = playerSettingsStore.resumeRewindSecondsFlow.first().toDouble()
+            fun rewound(position: Double?): Double? = position?.let {
+                applyResumeRewind(
+                    resolvedStartPosition = it,
+                    isExplicitOverride = suppressRewind,
+                    rewindSeconds = rewindSeconds,
+                )
+            }
+            // A room starts at the room position, including an explicit zero;
+            // personal resume never applies.
+            val startRequestPosition = room?.positionSeconds ?: rewound(
+                resolvePlaybackStartRequestPosition(
+                    overridePosition = request.resumePositionOverride,
+                    detailPosition = watchDetail.userData?.positionSeconds,
+                ),
+            )
+
+            if (!ownerCurrent() || profileId != expectedMetadataOwner.profileId || serverUrl != expectedMetadataOwner.serverUrl)
+                return failure(request.contentId, MobilePlayerStartErrors.IDENTITY_CHANGED + MobilePlayerStartErrors.VIEWER_CHANGED_BEFORE_ADMISSION, diagnosticsCode = PlaybackDiagnosticsCode.START_REQUEST)
+            // Watch Party playback stays on the saved address, admission included.
+            val allowsLocalRoute = request.roomId.isNullOrBlank() && room == null
+            val v3Start = when (
+                val r = sessionAllocator?.allocate(
+                    MobileVideoSessionAllocation(
+                        fileId = version.fileId,
+                        profileId = profileId,
+                        capabilities = capabilities,
+                        clientPlaybackContext = playbackContext,
+                        audioTrackIndex = initialTracks.audioTrackIndex,
+                        subtitleTrackIndex = initialTracks.subtitleTrackIndex,
+                        qualityPreference = playbackQualityIntent,
+                        startPosition = startRequestPosition,
+                        maxBitrateKbps = maxBitrateKbps,
+                        expectedMetadataOwner = expectedMetadataOwner,
+                        allowAlternateVersions = allowAlternateVersions,
+                        allowsLocalRoute = allowsLocalRoute,
+                    ),
+                ) ?: playbackSessionManager.startVideoSessionV3(
+                    fileId = version.fileId,
+                    profileId = profileId,
+                    capabilities = capabilities,
+                    clientPlaybackContext = playbackContext,
+                    audioTrackIndex = initialTracks.audioTrackIndex,
+                    subtitleTrackIndex = initialTracks.subtitleTrackIndex,
+                    qualityPreference = playbackQualityIntent,
+                    startPosition = startRequestPosition,
+                    maxBitrateKbps = maxBitrateKbps,
+                    expectedMetadataOwner = expectedMetadataOwner,
+                    allowAlternateVersions = allowAlternateVersions,
+                    allowsLocalRoute = allowsLocalRoute,
+                )
+            ) {
+                is ApiResult.Success -> r.data
+                is ApiResult.Error -> return failure(
+                    request.contentId,
+                    MobilePlayerStartErrors.START_FAILED_PREFIX + r.message,
+                    diagnosticsCode = PlaybackDiagnosticsCode.START_REQUEST,
+                )
+                is ApiResult.NetworkError -> return failure(
+                    request.contentId,
+                    MobilePlayerStartErrors.NETWORK_PREFIX + r.exception.message,
+                    r.exception,
+                    PlaybackDiagnosticsCode.NETWORK,
+                )
+            }
+            val readyV3 = when (v3Start) {
+                is VideoSessionStartV3.Ready -> v3Start
+                is VideoSessionStartV3.Terminal -> return failure(
+                    request.contentId,
+                    serverTerminalUserMessage(v3Start.message),
+                    diagnosticsCode = PlaybackDiagnosticsCode.serverTerminal(v3Start.reason),
+                    terminalReason = v3Start.reason,
+                    messageRes = terminalUserMessageRes(v3Start),
+                )
+                VideoSessionStartV3.ServerUpgradeRequired -> return failure(
+                    request.contentId,
+                    MobilePlayerStartErrors.SERVER_UPGRADE_MEDIA3,
+                    diagnosticsCode = PlaybackDiagnosticsCode.SERVER_UPGRADE_REQUIRED,
+                )
+            }
+            val session = readyV3.session
+            val resolved = session
+            allocatedButUnpublishedSessionId = resolved.sessionId
+            if (!ownerCurrent()) {
+                stopAllocatedButUnpublishedSession(allocatedButUnpublishedSessionId)
+                allocatedButUnpublishedSessionId = null
+                return failure(request.contentId, MobilePlayerStartErrors.IDENTITY_CHANGED + MobilePlayerStartErrors.VIEWER_CHANGED_AFTER_ADMISSION, diagnosticsCode = PlaybackDiagnosticsCode.START_REQUEST)
+            }
+            val effectiveFileId = resolved.mediaFileId.takeIf { it > 0 }
+                ?: readyV3.plan.effectiveMediaFileId
+                ?: version.fileId
+            if (room != null && effectiveFileId != room.fileId) {
+                stopAllocatedButUnpublishedSession(allocatedButUnpublishedSessionId)
+                allocatedButUnpublishedSessionId = null
+                return failure(
+                    request.contentId,
+                    MobilePlayerStartErrors.WATCH_PARTY_VERSION_MISMATCH,
+                    diagnosticsCode = PlaybackDiagnosticsCode.START_REQUEST,
+                )
+            }
+            val effectiveVersion = watchDetail.versions.firstOrNull { it.fileId == effectiveFileId }
+            val resolvedDelivery = resolved.resolvedPlaybackDelivery()
+            val resolvedStreamUrl = resolved.playbackPlan?.stream?.url
+                ?.takeIf { it.isNotBlank() }
+                ?: resolved.streamUrl
+
+            // V3 distinguishes full movie time from the mounted player time.
+            // In particular, a copy-mode HLS stream may begin at movie time
+            // 3,000s while Media3 must mount it at 0s. Never feed the source
+            // position back into the shortened player timeline.
+            val playerStartPos = readyV3.plan.timeline.playerStartSeconds
+                .takeIf { it.isFinite() && it >= 0.0 }
+                ?: resolved.position.coerceAtLeast(0.0)
+            val sourceStartPos = readyV3.plan.timeline.sourceStartSeconds
+                .takeIf { it.isFinite() && it >= 0.0 }
+                ?: startRequestPosition
+                ?: playerStartPos
+
+            val startParams = StartParams(
+                contentId = request.contentId,
+                fileId = effectiveFileId,
+                capabilities = readyV3.capabilities,
+                audioTrackIndex = initialTracks.audioTrackIndex ?: resolved.audioTrackIndex,
+                subtitleTrackIndex = initialTracks.subtitleTrackIndex
+                    ?: readyV3.plan.resolvedSelectedSubtitleIndex(),
+                qualityPreference = carriedQuality,
+                startPosition = sourceStartPos,
+                clientPlaybackContext = readyV3.clientPlaybackContext,
+                allowAlternateVersions = allowAlternateVersions,
+            )
+            val adopted = if (sessionAdopter != null) {
+                sessionAdopter.adopt(startParams, resolved)
+                true
+            } else {
+                try {
+                    sessionLifecycle.adoptActiveSessionIfCurrent(
+                        params = startParams,
+                        session = resolved,
+                        expectedOwnershipEpoch = ownershipEpoch,
+                        expectedMetadataOwnerCurrent = ::ownerCurrent,
+                    )
+                } catch (cancellation: CancellationException) {
+                    // The lifecycle owns cancellation cleanup once adoption begins.
+                    allocatedButUnpublishedSessionId = null
+                    throw cancellation
+                }
+            }
+            if (!adopted) {
+                // Rejected lifecycle adoption closes the candidate itself.
+                allocatedButUnpublishedSessionId = null
+                return failure(
+                    request.contentId,
+                    MobilePlayerStartErrors.SUPERSEDED,
+                    diagnosticsCode = PlaybackDiagnosticsCode.START_REQUEST,
+                )
+            }
+
+            lifecycleAdopted = sessionAdopter == null
+            if (!ownerCurrent()) {
+                stopAllocatedButUnpublishedSession(allocatedButUnpublishedSessionId, lifecycleAdopted)
+                allocatedButUnpublishedSessionId = null
+                return failure(request.contentId, MobilePlayerStartErrors.IDENTITY_CHANGED + MobilePlayerStartErrors.VIEWER_CHANGED_DURING_ADOPTION, diagnosticsCode = PlaybackDiagnosticsCode.START_REQUEST)
+            }
+            val result = VideoPlaybackStartResult.Ready(
+                contentId = request.contentId,
+                fileId = effectiveFileId,
+                versions = watchDetail.versions,
+                fileResolution = effectiveVersion?.resolution
+                    ?: readyV3.plan.effectiveRecipe.height?.let { "${it}p" },
+                sessionId = resolved.sessionId,
+                streamUrl = resolvedStreamUrl,
+                playMethod = resolved.playMethod,
+                playbackPlan = resolved.playbackPlan,
+                playbackPlanV3 = readyV3.plan,
+                requestHeaders = readyV3.plan.stream.effectiveRequestHeaders,
+                delivery = resolvedDelivery,
+                container = readyV3.plan.stream.container ?: effectiveVersion?.container,
+                title = watchDetail.title,
+                subtitle = buildSubtitle(watchDetail).takeIf { it.isNotBlank() },
+                // Android's system media controls give artwork a wide canvas.
+                // Prefer the title backdrop there; portrait posters remain the
+                // fallback for catalog entries that do not have one.
+                artworkUrl = artworkUrl,
+                startPositionSeconds = playerStartPos,
+                sourceStartPositionSeconds = sourceStartPos,
+                serverUrl = serverUrl,
+                accessToken = accessToken,
+                mediaFileId = effectiveFileId,
+                audioTrackIndex = resolved.audioTrackIndex,
+                // Protocol v3 source duration is authoritative. Unknown stays
+                // unknown; catalog/player runtimes must not fill this field.
+                durationSeconds = resolved.durationSeconds,
+                subtitleUrls = enrichAuthoritativePlaybackSubtitleChoices(
+                    catalogTracks = effectiveVersion?.subtitleTracks.orEmpty(),
+                    plannedTracks = resolved.subtitleUrls.orEmpty(),
+                ),
+                preferredAudioLanguage = preferredAudioLanguage,
+                // Server-resolved first, exactly as TvVideoPlaybackStarter does.
+                // The settings screens write these three canonically now
+                // (`PUT /settings/values/{key}?scope=profile`) and nothing
+                // mirrors a canonical write back into `user_profiles`, so the
+                // profile columns go stale the moment the user changes a
+                // subtitle preference. `effective_*` is what the server would
+                // resolve for this item; the columns stay only as the fallback
+                // for a server too old to send them.
+                //
+                // Blank is normalized to null on every rung, matching the audio
+                // language above. A canonical row holding JSON null (the
+                // contract's spelling of "no preference") unmarshals to "" on
+                // the server and arrives here as a present-but-empty string, and
+                // `resolveMobileAutoSubtitleSelection` reads a non-null blank
+                // language as an explicit "subtitles off" — so passing it
+                // through would turn auto-selection off for a user who never
+                // chose a language.
+                preferredTextLanguage = watchDetail.effectiveSubtitleLanguage.orNullIfBlank()
+                    ?: activeProfile?.subtitleLanguage.orNullIfBlank(),
+                preferredSubtitleMode = watchDetail.effectiveSubtitleMode.orNullIfBlank()
+                    ?: activeProfile?.subtitleMode.orNullIfBlank(),
+                showForcedSubtitles = watchDetail.effectiveShowForcedSubtitles
+                    ?: activeProfile?.showForcedSubtitles
+                    ?: true,
+                intro = effectiveVersion?.intro,
+                credits = effectiveVersion?.credits,
+                recap = effectiveVersion?.recap,
+                preview = effectiveVersion?.preview,
+                markerSegments = effectiveVersion?.markerSegments,
+                chapters = effectiveVersion?.chapters.orEmpty(),
+                seriesId = watchDetail.seriesId,
+                seriesTitle = watchDetail.seriesTitle,
+                seasonNumber = watchDetail.seasonNumber,
+                episodeNumber = watchDetail.episodeNumber,
+            )
+            allocatedButUnpublishedSessionId = null
+            result
+        } catch (e: CancellationException) {
+            stopAllocatedButUnpublishedSession(allocatedButUnpublishedSessionId, lifecycleAdopted)
+            throw e
+        } catch (e: Exception) {
+            stopAllocatedButUnpublishedSession(allocatedButUnpublishedSessionId, lifecycleAdopted)
+            Log.e(TAG, "Error loading content", e)
+            failure(request.contentId, MobilePlayerStartErrors.UNEXPECTED_PREFIX + e.message, e, PlaybackDiagnosticsCode.UNEXPECTED)
+        }
+    }
+
+    private suspend fun stopAllocatedButUnpublishedSession(sessionId: String?, lifecycleAdopted: Boolean = false) {
+        val allocatedSessionId = sessionId?.takeIf { it.isNotBlank() } ?: return
+        withContext(NonCancellable) {
+            try {
+                if (!lifecycleAdopted || !sessionLifecycle.retireUnpublishedSession(allocatedSessionId)) {
+                    playbackSessionManager.stopSession(allocatedSessionId)
+                }
+            } catch (error: Exception) {
+                Log.w(TAG, "Could not stop unpublished playback session $allocatedSessionId", error)
+            }
+        }
+    }
+
+    private fun failure(
+        contentId: String,
+        message: String,
+        cause: Throwable? = null,
+        diagnosticsCode: PlaybackDiagnosticsCode? = null,
+        terminalReason: String? = null,
+        @androidx.annotation.StringRes messageRes: Int? = null,
+    ): VideoPlaybackStartResult.Error {
+        // Log the throwable here instead of stashing it on the (unread) result —
+        // the message already carries the human-facing detail.
+        if (cause != null) Log.w(TAG, "Playback start failed: $message", cause)
+        return VideoPlaybackStartResult.Error(
+            contentId = contentId,
+            message = message,
+            diagnosticsCode = diagnosticsCode,
+            terminalReason = terminalReason,
+            messageRes = messageRes,
+        )
+    }
+
+    private fun buildSubtitle(watchDetail: WatchDetail): String {
+        return if (watchDetail.seriesTitle != null && watchDetail.seasonNumber != null && watchDetail.episodeNumber != null) {
+            val seasonEp = "S${watchDetail.seasonNumber.toString().padStart(2, '0')}E${watchDetail.episodeNumber.toString().padStart(2, '0')}"
+            "${watchDetail.seriesTitle} - $seasonEp"
+        } else {
+            watchDetail.year?.toString() ?: ""
+        }
+    }
+
+    private companion object {
+        const val TAG = "MobileVideoPlaybackStarter"
+    }
+}
+
+/**
+ * The starter's failure messages. They travel as English text through the
+ * shared start result; [message] turns them back into catalog messages for
+ * the error screen, and passes anything else (a server's message) through.
+ */
+internal object MobilePlayerStartErrors {
+    // Codes some messages start with, shown as written.
+    const val IDENTITY_UNAVAILABLE = "identity_unavailable: "
+    const val IDENTITY_CHANGED = "identity_changed: "
+
+    const val METADATA_NEEDS_PROFILE = "Playback metadata needs an authenticated profile."
+    const val NO_VERSIONS = "No playable versions available"
+    const val WATCH_PARTY_VERSION_UNAVAILABLE = "The Watch Party's version of this title isn't available to this profile."
+    const val NO_PROFILE = "No active profile selected"
+    const val NOT_AUTHENTICATED = "Not authenticated"
+    const val VIEWER_CHANGED_BEFORE_ADMISSION = "The metadata viewer changed before playback admission."
+    const val SERVER_UPGRADE_MEDIA3 = "This Silo server must be updated to support the Media3 playback protocol."
+    const val VIEWER_CHANGED_AFTER_ADMISSION = "The metadata viewer changed after playback admission."
+    const val WATCH_PARTY_VERSION_MISMATCH = "The server offered a different version than the Watch Party's."
+    const val SUPERSEDED = "Playback start was superseded."
+    const val VIEWER_CHANGED_DURING_ADOPTION = "The metadata viewer changed during playback adoption."
+    const val LOAD_FAILED_PREFIX = "Failed to load content: "
+    const val NETWORK_PREFIX = "Network error: "
+    const val START_FAILED_PREFIX = "Failed to start playback: "
+    const val UNEXPECTED_PREFIX = "Unexpected error: "
+
+    private val fixed = mapOf(
+        METADATA_NEEDS_PROFILE to CommonR.string.player_error_metadataNeedsProfile,
+        NO_VERSIONS to CommonR.string.player_error_noVersions,
+        WATCH_PARTY_VERSION_UNAVAILABLE to CommonR.string.player_watchParty_versionUnavailable,
+        NO_PROFILE to CommonR.string.player_error_noProfile,
+        NOT_AUTHENTICATED to CommonR.string.player_error_notAuthenticated,
+        VIEWER_CHANGED_BEFORE_ADMISSION to CommonR.string.player_error_viewerChangedBeforeAdmission,
+        SERVER_UPGRADE_MEDIA3 to CommonR.string.player_error_serverUpgradeMedia3,
+        VIEWER_CHANGED_AFTER_ADMISSION to CommonR.string.player_error_viewerChangedAfterAdmission,
+        WATCH_PARTY_VERSION_MISMATCH to CommonR.string.player_watchParty_versionMismatch,
+        SUPERSEDED to CommonR.string.player_error_superseded,
+        SERVER_TERMINAL_FALLBACK_MESSAGE to CommonR.string.player_error_playbackUnavailable,
+        VIEWER_CHANGED_DURING_ADOPTION to CommonR.string.player_error_viewerChangedDuringAdoption,
+    )
+    private val prefixed = listOf(
+        LOAD_FAILED_PREFIX to CommonR.string.player_error_loadFailed,
+        NETWORK_PREFIX to CommonR.string.player_error_network,
+        START_FAILED_PREFIX to CommonR.string.player_error_startFailed,
+        UNEXPECTED_PREFIX to CommonR.string.player_error_unexpected,
+    )
+
+    fun message(text: String): PlayerMessage {
+        val code = listOf(IDENTITY_UNAVAILABLE, IDENTITY_CHANGED).firstOrNull(text::startsWith)
+        val body = code?.let { text.removePrefix(it) } ?: text
+        val res = fixed[body]?.let { PlayerMessage.Res(it) }
+            ?: prefixed.firstOrNull { (prefix, _) -> body.startsWith(prefix) }
+                ?.let { (prefix, id) -> PlayerMessage.Res(id, listOf(body.removePrefix(prefix))) }
+            ?: return PlayerMessage.Raw(text)
+        return if (code != null) PlayerMessage.Coded(code, res) else res
+    }
+}

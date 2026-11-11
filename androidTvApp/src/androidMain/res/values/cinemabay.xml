@@ -1,0 +1,36 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+  <string name="app_name">CinemaBay</string>
+  <string name="android_settings_appLanguageFooter">The language of CinemaBay’s menus and buttons for this profile, on every device. Audio, subtitle and metadata languages are separate settings.</string>
+  <plurals name="diagnostics_capture_hostedFooter">
+    <item quantity="one">Reports include the CinemaBay app version and build, Android version, device model, crash details, and diagnostic logs you review. A pseudonymous installation credential is not linked to an account on your self-hosted server. Username, email, profile, server address, and playback session IDs are omitted. Reports are never sent automatically and may be retained for up to %1$d day.</item>
+    <item quantity="other">Reports include the CinemaBay app version and build, Android version, device model, crash details, and diagnostic logs you review. A pseudonymous installation credential is not linked to an account on your self-hosted server. Username, email, profile, server address, and playback session IDs are omitted. Reports are never sent automatically and may be retained for up to %1$d days.</item>
+  </plurals>
+  <plurals name="diagnostics_capture_hostedFooterTv">
+    <item quantity="one">Reports include the CinemaBay app version and build, Android version, device model, crash details, and diagnostic logs you review. A pseudonymous installation credential is not linked to an account on your self-hosted server. Username, email, profile, server address, and playback session IDs are omitted. Reports are never sent automatically and may be retained for up to %1$d day. Full policy: %2$s</item>
+    <item quantity="other">Reports include the CinemaBay app version and build, Android version, device model, crash details, and diagnostic logs you review. A pseudonymous installation credential is not linked to an account on your self-hosted server. Username, email, profile, server address, and playback session IDs are omitted. Reports are never sent automatically and may be retained for up to %1$d days. Full policy: %2$s</item>
+  </plurals>
+  <string name="diagnostics_prompt_privacyNotice">The report includes the CinemaBay app version and build, Android version, device model, crash details, and diagnostic logs. Its pseudonymous credential is not linked to an account on your self-hosted server. Username, email, profile, server address, and playback session IDs are omitted. It never sends automatically and may be retained for up to 30 days.</string>
+  <string name="diagnostics_prompt_title">CinemaBay encountered a problem</string>
+  <string name="settings_bufferingQuality_description">What CinemaBay does on Auto when playback keeps buffering. CinemaBay always asks before lowering a quality you picked.</string>
+  <string name="settings_episodes_footer">Rewind on Resume skips back when you return to a partly watched title. Still Watching Prompt sets how many episodes play in a row before CinemaBay asks whether you\'re still watching.</string>
+  <string name="settings_notifications_inAppFooter">Show alerts inside CinemaBay as new releases arrive.</string>
+  <string name="settings_profileLaunch_afterOneHour_detail">Show Who\'s Watching when you\'ve been away from CinemaBay for 1 hour.</string>
+  <string name="settings_profileLaunch_afterTwelveHours_detail">Show Who\'s Watching when you\'ve been away from CinemaBay for 12 hours.</string>
+  <string name="settings_profileLaunch_askEveryLaunch_detail">Show Who\'s Watching whenever you return to CinemaBay.</string>
+  <string name="settings_profileSelection_footer">Choose when CinemaBay asks who\'s watching. This applies only to this device.</string>
+  <string name="settings_streaming_footer">%1$s Force HDR Passthrough allows HDR playback when this TV doesn\'t report support. It does not force the HDMI output into HDR; Android may still convert the picture to SDR. Enable it only if you\'ve confirmed your TV supports the source format. Unsupported formats may produce a black screen or incorrect colors. True Black Bars stops CinemaBay from drawing the bars around the picture during playback. Try it if they look grey in HDR or Dolby Vision, and turn it off again if they get lighter or show a thin line.</string>
+  <string name="settingsManifest_catalog_metadata_language_description">Fallback language CinemaBay prefers for titles, descriptions, and artwork.</string>
+  <string name="settingsManifest_playback_audio_language_description">Choose which spoken language CinemaBay should prefer first.</string>
+  <string name="settingsManifest_playback_auto_skip_intro_description">Jump past intros automatically when CinemaBay can detect them.</string>
+  <string name="settingsManifest_playback_auto_skip_recap_description">Skip \"previously on\" recaps automatically when CinemaBay can detect them.</string>
+  <string name="settingsManifest_playback_buffering_quality_mode_description">What CinemaBay does on Auto when playback keeps buffering. CinemaBay always asks before lowering a quality you picked.</string>
+  <string name="settingsManifest_playback_intro_skip_mode_description">What CinemaBay does when an intro starts: leave it alone, offer a Skip Intro button, or skip it and offer an undo.</string>
+  <string name="settingsManifest_playback_max_bitrate_kbps_description">Cap how much bandwidth playback may use. No cap means CinemaBay picks for the chosen resolution.</string>
+  <string name="settingsManifest_playback_preferred_quality_description">Pick the quality CinemaBay should prefer.</string>
+  <string name="settingsManifest_playback_subtitle_language_description">Choose which subtitle language CinemaBay should prefer first.</string>
+  <string name="settingsManifest_playback_subtitle_mode_description">When CinemaBay should turn subtitles on.</string>
+  <string name="settingsManifest_player_passout_threshold_description">How many episodes auto-play before CinemaBay asks whether you are still watching. 0 never asks.</string>
+  <string name="settingsManifest_subtitle_matches_device_description">Use the operating system\'s caption style instead of CinemaBay\'s.</string>
+  <string name="settingsManifest_ui_theme_description">Colour theme for the CinemaBay interface.</string>
+</resources>

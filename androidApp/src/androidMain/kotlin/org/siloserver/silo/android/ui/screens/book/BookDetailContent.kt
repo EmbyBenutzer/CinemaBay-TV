@@ -1,0 +1,441 @@
+package org.siloserver.silo.android.ui.screens.book
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import org.siloserver.silo.android.ui.screens.detail.CircleActionButton
+import org.siloserver.silo.common.i18n.LocaleFormat
+import org.siloserver.silo.common.ui.components.DefaultArtworkKind
+import org.siloserver.silo.common.ui.components.ThumbhashImage
+import org.siloserver.silo.model.book.BookFormat
+import org.siloserver.silo.model.catalog.FileVersion
+import org.siloserver.silo.model.catalog.ItemDetail
+import org.siloserver.silo.model.ebook.bookFormatFromEbookVersion
+import org.siloserver.silo.model.ebook.ebookFormatDisplayName
+import org.siloserver.silo.model.ebook.ebookFormatSupport
+import org.siloserver.silo.model.ebook.isSupportedEbookVersion
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.platform.LocalDensity
+import org.siloserver.silo.android.ui.screens.detail.HeaderSettledDp
+import org.siloserver.silo.android.ui.screens.detail.LocalDetailScrollState
+import org.siloserver.silo.common.ui.components.DeferImagePresentationWhileScrolling
+import androidx.compose.ui.res.stringResource
+import org.siloserver.silo.common.R as CommonR
+import androidx.compose.ui.res.pluralStringResource
+import org.siloserver.silo.common.i18n.stringResourceWithNames
+import org.siloserver.silo.common.i18n.text
+import org.siloserver.silo.common.i18n.currentNumberLocale
+
+/**
+ * Phone book detail. Tall cover on the left (2:3 like a movie poster
+ * since print covers share that ratio), author + format + page count
+ * on the right, then a Read button + overview.
+ */
+internal enum class BookDetailPrimaryAction {
+    None,
+    ReadInApp,
+    OpenExternally,
+}
+
+private const val BookCoverWidthDp = 168
+
+internal fun bookDetailPrimaryAction(
+    selectedVersion: FileVersion?,
+    canReadSelectedVersion: Boolean,
+    isDownloaded: Boolean,
+    canOpenExternal: Boolean,
+): BookDetailPrimaryAction = when {
+    selectedVersion == null -> BookDetailPrimaryAction.None
+    canReadSelectedVersion -> BookDetailPrimaryAction.ReadInApp
+    isDownloaded &&
+        canOpenExternal &&
+        selectedVersion.isSupportedEbookVersion() -> BookDetailPrimaryAction.OpenExternally
+    else -> BookDetailPrimaryAction.None
+}
+
+@Composable
+private fun bookDetailPrimaryActionLabel(
+    selectedVersion: FileVersion?,
+    canReadSelectedVersion: Boolean,
+    isDownloaded: Boolean,
+    canOpenExternal: Boolean,
+): String = when (
+    bookDetailPrimaryAction(
+        selectedVersion = selectedVersion,
+        canReadSelectedVersion = canReadSelectedVersion,
+        isDownloaded = isDownloaded,
+        canOpenExternal = canOpenExternal,
+    )
+) {
+    BookDetailPrimaryAction.ReadInApp -> stringResource(CommonR.string.reader_book_read)
+    BookDetailPrimaryAction.OpenExternally -> stringResource(CommonR.string.reader_book_openInReader)
+    BookDetailPrimaryAction.None -> when {
+        selectedVersion == null -> stringResource(CommonR.string.audiobook_detail_unavailable)
+        !canReadSelectedVersion && !isDownloaded -> stringResource(CommonR.string.reader_book_downloadToOpen)
+        else -> stringResource(CommonR.string.reader_book_openFromDownloads)
+    }
+}
+
+@Composable
+fun BookDetailContent(
+    detail: ItemDetail,
+    isFavorite: Boolean,
+    isInWatchlist: Boolean,
+    selectedVersionIndex: Int,
+    onVersionSelected: (Int) -> Unit,
+    canReadSelectedVersion: Boolean,
+    isDownloaded: Boolean = false,
+    downloadProgress: Float? = null,
+    onReadClick: (fileId: Int?) -> Unit,
+    onFavoriteClick: () -> Unit,
+    onWatchlistClick: () -> Unit,
+    onDownloadClick: (() -> Unit)? = null,
+    onOpenExternalClick: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+) {
+    val meta = detail.book
+    val ebook = detail.ebook
+    val selectedVersion = detail.versions.getOrNull(selectedVersionIndex)
+    val canDownloadSelectedVersion = selectedVersion?.isSupportedEbookVersion() == true && onDownloadClick != null
+    val selectedFormatSupport = selectedVersion?.ebookFormatSupport()
+    val primaryAction = bookDetailPrimaryAction(
+        selectedVersion = selectedVersion,
+        canReadSelectedVersion = canReadSelectedVersion,
+        isDownloaded = isDownloaded,
+        canOpenExternal = onOpenExternalClick != null,
+    )
+    val format = selectedVersion?.bookFormatFromEbookVersion()
+        ?: meta?.formatEnum()
+        ?: BookFormat.Unknown
+    val author = ebook?.authorNames ?: meta?.author
+    val publisher = ebook?.publisher ?: meta?.publisher
+    // Clear the status bar / camera cutout so the cover + title aren't tucked
+    // under it (matches the audiobook detail).
+    val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val feedState = rememberLazyListState()
+    // Feed the pinned header (see DetailScrollState).
+    val detailScroll = LocalDetailScrollState.current
+    if (detailScroll != null) {
+        val density = LocalDensity.current
+        LaunchedEffect(feedState, detailScroll, density) {
+            snapshotFlow {
+                if (feedState.firstVisibleItemIndex > 0) {
+                    HeaderSettledDp
+                } else {
+                    with(density) { feedState.firstVisibleItemScrollOffset.toDp().value }
+                }
+            }.collect { detailScroll.update(it) }
+        }
+    }
+    DeferImagePresentationWhileScrolling(feedState) {
+    LazyColumn(
+        state = feedState,
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+        contentPadding = PaddingValues(
+            start = 16.dp,
+            end = 16.dp,
+            bottom = 16.dp,
+            top = 32.dp + topInset,
+        ),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        item {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                ThumbhashImage(
+                    url = detail.posterUrl,
+                    thumbhash = detail.posterThumbhash,
+                    contentDescription = detail.title,
+                    modifier = Modifier
+                        .width(BookCoverWidthDp.dp)
+                        .aspectRatio(2f / 3f)
+                        .clip(RoundedCornerShape(12.dp)),
+                    defaultArtwork = DefaultArtworkKind.forItemType(detail.type),
+                )
+                Text(
+                    text = detail.title,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                author?.takeIf { it.isNotBlank() }?.let { authorName ->
+                    Text(
+                        text = stringResourceWithNames(CommonR.string.reader_book_byAuthor, authorName),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    FormatBadge(format)
+                    meta?.pageCount?.let {
+                        Text(
+                            "· " + pluralStringResource(CommonR.plurals.reader_book_pageCount, it, it, LocaleFormat.integer(it)),
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                }
+                publisher?.takeIf { it.isNotBlank() }?.let { publisherName ->
+                    Text(
+                        text = publisherName,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                ebook?.series?.name?.takeIf { it.isNotBlank() }?.let { seriesName ->
+                    Text(
+                        text = stringResourceWithNames(CommonR.string.reader_book_series, seriesName),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        }
+
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        when (primaryAction) {
+                            BookDetailPrimaryAction.ReadInApp -> selectedVersion?.let { onReadClick(it.fileId) }
+                            BookDetailPrimaryAction.OpenExternally -> onOpenExternalClick?.invoke()
+                            BookDetailPrimaryAction.None -> Unit
+                        }
+                    },
+                    enabled = primaryAction != BookDetailPrimaryAction.None,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        bookDetailPrimaryActionLabel(
+                            selectedVersion = selectedVersion,
+                            canReadSelectedVersion = canReadSelectedVersion,
+                            isDownloaded = isDownloaded,
+                            canOpenExternal = onOpenExternalClick != null,
+                        ),
+                    )
+                }
+                OutlinedButton(
+                    onClick = { onDownloadClick?.invoke() },
+                    enabled = canDownloadSelectedVersion && !isDownloaded,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(
+                        imageVector = if (isDownloaded) Icons.Filled.Check else Icons.Filled.Download,
+                        contentDescription = null,
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        when {
+                            isDownloaded -> stringResource(CommonR.string.audiobook_detail_downloaded)
+                            downloadProgress != null -> stringResource(CommonR.string.audiobook_detail_cancelDownload)
+                            canDownloadSelectedVersion -> stringResource(CommonR.string.audiobook_detail_download)
+                            else -> stringResource(CommonR.string.audiobook_detail_downloadUnavailable)
+                        },
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp, Alignment.CenterHorizontally),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircleActionButton(
+                        icon = Icons.Filled.FavoriteBorder,
+                        activeIcon = Icons.Filled.Favorite,
+                        isActive = isFavorite,
+                        contentDescription = if (isFavorite) {
+                            stringResource(CommonR.string.audiobook_detail_favoriteRemove)
+                        } else {
+                            stringResource(CommonR.string.audiobook_detail_favoriteAdd)
+                        },
+                        onClick = onFavoriteClick,
+                        activeTint = Color(0xFFEF5350),
+                        label = stringResource(CommonR.string.audiobook_detail_favorite),
+                    )
+                    CircleActionButton(
+                        icon = Icons.Filled.BookmarkBorder,
+                        activeIcon = Icons.Filled.Bookmark,
+                        isActive = isInWatchlist,
+                        contentDescription = if (isInWatchlist) {
+                            stringResource(CommonR.string.detail_watchlistRemove)
+                        } else {
+                            stringResource(CommonR.string.detail_watchlistAdd)
+                        },
+                        onClick = onWatchlistClick,
+                        label = stringResource(CommonR.string.detail_watchlist),
+                    )
+                }
+                downloadProgress?.let { progress ->
+                    LinearProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (selectedVersion != null && !canReadSelectedVersion) {
+                    Text(
+                        text = selectedFormatSupport?.reason
+                            ?: stringResource(CommonR.string.reader_book_downloadOnlyNote),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        // Only surface the Versions picker when there's an actual choice to
+        // make; a single-format book already shows its format via the header
+        // badge, so listing "Versions: EPUB" again is redundant.
+        if (detail.versions.size > 1) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = stringResource(CommonR.string.reader_book_versions),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    detail.versions.forEachIndexed { index, version ->
+                        val label = version.ebookFormatDisplayName()
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(
+                                    if (index == selectedVersionIndex) {
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                                    },
+                                )
+                                .clickable { onVersionSelected(index) }
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                text = stringResource(CommonR.string.reader_book_fileId, version.fileId.toString()),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        detail.overview?.takeIf { it.isNotBlank() }?.let { overview ->
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = stringResource(CommonR.string.reader_book_about),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = overview,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        ebook?.related?.alsoByAuthor
+            ?.filter { it.contentId.isNotBlank() }
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { related ->
+            item {
+                Text(
+                    text = stringResource(CommonR.string.reader_book_alsoByAuthor),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            items(related, key = { it.contentId }) { item ->
+                Text(
+                    text = listOfNotNull(item.title, item.year?.let { LocaleFormat.integer(it, currentNumberLocale()) }).joinToString(" · "),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        }
+    }
+    }
+}
+
+@Composable
+private fun FormatBadge(format: BookFormat) {
+    Text(
+        text = format.displayName.text(),
+        style = MaterialTheme.typography.labelSmall,
+        color = Color.White,
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(MaterialTheme.colorScheme.primary)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+    )
+}

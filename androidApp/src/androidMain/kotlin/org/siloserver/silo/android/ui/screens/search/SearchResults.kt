@@ -1,0 +1,218 @@
+package org.siloserver.silo.android.ui.screens.search
+
+import org.siloserver.silo.common.i18n.LocaleFormat
+import org.siloserver.silo.model.catalog.seriesHeroBackdrop
+import org.siloserver.silo.common.cards.LocalEpisodeSpoilerPrefs
+import org.siloserver.silo.model.settings.EpisodeSpoilers
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.unit.dp
+import org.siloserver.silo.android.ui.components.BoxSetCard
+import org.siloserver.silo.android.ui.components.MediaCard
+import org.siloserver.silo.android.ui.components.MediaGridDefaults
+import org.siloserver.silo.android.ui.components.rememberBrowseItemCardActions
+import org.siloserver.silo.common.ui.components.DeferImagePresentationWhileScrolling
+import org.siloserver.silo.model.catalog.BrowseItem
+import org.siloserver.silo.model.catalog.CatalogBoxSet
+import org.siloserver.silo.model.catalog.Person
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.res.pluralStringResource
+import org.siloserver.silo.common.R as CommonR
+
+/**
+ * Displays search results in a vertical grid of media cards.
+ *
+ * Supports infinite scroll to load additional results.
+ *
+ * @param results The search result items to display.
+ * @param boxSets Box sets matching the query, shown first, in the grid's own columns.
+ * @param people Cast and crew matching the query, shown above the titles.
+ * @param total Total number of matching results.
+ * @param isSearching Whether a search request is in flight.
+ * @param hasMore Whether more results are available.
+ * @param onItemClick Callback with content ID when a result card is tapped.
+ * @param onPersonClick Callback with person ID when a person is tapped.
+ * @param onLoadMore Callback to load the next page of results.
+ * @param modifier Compose modifier.
+ */
+@Composable
+fun SearchResults(
+    results: List<BrowseItem>,
+    boxSets: List<CatalogBoxSet> = emptyList(),
+    people: List<Person>,
+    total: Int,
+    totalExact: Boolean = true,
+    isSearching: Boolean,
+    hasMore: Boolean,
+    onItemClick: (String) -> Unit,
+    onBoxSetClick: (CatalogBoxSet) -> Unit = {},
+    onPersonClick: (Long) -> Unit,
+    onLoadMore: () -> Unit,
+    modifier: Modifier = Modifier,
+    footer: (@Composable () -> Unit)? = null,
+) {
+    val gridState = rememberLazyGridState()
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    // Scrolling the results is a clear signal the user is done typing: get the
+    // keyboard out of the way so more of the grid is visible.
+    LaunchedEffect(gridState.isScrollInProgress) {
+        if (gridState.isScrollInProgress) {
+            keyboardController?.hide()
+            focusManager.clearFocus()
+        }
+    }
+
+    // Trigger load more when scrolled near bottom. Keyed on the flags: a
+    // keyless remember would freeze their first-composition values inside the
+    // derived lambda (they are plain params, not snapshot state).
+    val shouldLoadMore by remember(hasMore, isSearching) {
+        derivedStateOf {
+            val lastVisible = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val totalItems = gridState.layoutInfo.totalItemsCount
+            hasMore && !isSearching && lastVisible >= totalItems - 6
+        }
+    }
+
+    LaunchedEffect(shouldLoadMore) {
+        if (shouldLoadMore) onLoadMore()
+    }
+
+    val gridCellMinWidth = MediaGridDefaults.scaledPosterGridMinWidth
+    DeferImagePresentationWhileScrolling(gridState) {
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(gridCellMinWidth),
+        state = gridState,
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
+        horizontalArrangement = Arrangement.spacedBy(MediaGridDefaults.PosterGridHorizontalSpacing),
+        verticalArrangement = Arrangement.spacedBy(MediaGridDefaults.PosterGridVerticalSpacing),
+        modifier = modifier,
+    ) {
+        if (boxSets.isNotEmpty()) {
+            item(span = { GridItemSpan(maxLineSpan) }, contentType = "search-section-title") {
+                Text(
+                    text = stringResource(CommonR.string.search_boxSets),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.padding(horizontal = 2.dp, vertical = 4.dp),
+                )
+            }
+            // One collection can come from two libraries; each opens its own.
+            items(
+                items = boxSets,
+                key = { "box-set:${it.libraryId}:${it.id}" },
+                contentType = { "search-box-set" },
+            ) { boxSet ->
+                BoxSetCard(
+                    boxSet = boxSet,
+                    onClick = { onBoxSetClick(boxSet) },
+                    width = gridCellMinWidth,
+                )
+            }
+        }
+
+        if (people.isNotEmpty()) {
+            item(span = { GridItemSpan(maxLineSpan) }, contentType = "search-people") {
+                SearchPeopleRow(
+                    people = people,
+                    onPersonClick = onPersonClick,
+                    modifier = Modifier.padding(horizontal = 2.dp, vertical = 4.dp),
+                )
+            }
+        }
+
+        // Result count header. A people-only answer has no titles to count.
+        if (results.isNotEmpty() || (people.isEmpty() && boxSets.isEmpty())) {
+            item(span = { GridItemSpan(maxLineSpan) }, contentType = "search-result-count") {
+                Text(
+                    text = if (totalExact) {
+                        pluralStringResource(CommonR.plurals.search_result, total, total)
+                    } else {
+                        pluralStringResource(CommonR.plurals.search_resultAbout, total, total, LocaleFormat.integer(total))
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    // The grid's own contentPadding supplies the 16.dp gutters, so
+                    // the header only needs to clear the first row of cards.
+                    modifier = Modifier.padding(horizontal = 2.dp, vertical = 4.dp),
+                )
+            }
+        }
+
+        items(
+            items = results,
+            key = { it.contentId },
+            contentType = { item -> item.type },
+        ) { item ->
+            val (actions, userState, positionSeconds) = rememberBrowseItemCardActions(item)
+            val spoilerPrefs = LocalEpisodeSpoilerPrefs.current
+            val hideArtwork = EpisodeSpoilers.hidesBrowseArtwork(item, spoilerPrefs, userState.played, positionSeconds = positionSeconds)
+            // An episode opens on its series page: hand off the series
+            // backdrop when the card carries it. It is never a still.
+            val seriesBackdrop = item.seriesHeroBackdrop()
+            val hideDetailArtwork = seriesBackdrop == null &&
+                EpisodeSpoilers.hidesBrowseArtwork(item, spoilerPrefs, userState.played, selectBackdrop = true, positionSeconds = positionSeconds)
+            MediaCard(
+                hideArtwork = hideArtwork,
+                hideDetailArtwork = hideDetailArtwork,
+                title = item.title,
+                posterUrl = item.posterUrl,
+                posterThumbhash = item.posterThumbhash,
+                detailBackdropUrl = seriesBackdrop?.url ?: item.backdropUrl,
+                detailBackdropThumbhash = if (seriesBackdrop != null) seriesBackdrop.thumbhash else item.backdropThumbhash,
+                year = item.year,
+                type = item.type,
+                userState = userState,
+                onClick = { onItemClick(item.contentId) },
+                width = gridCellMinWidth,
+                overlay = org.siloserver.silo.overlays.OverlayDataExtractor.fromBrowseItem(item),
+                actions = actions,
+            )
+        }
+
+        if (footer != null) {
+            item(span = { GridItemSpan(maxLineSpan) }, contentType = "search-footer") {
+                footer()
+            }
+        }
+
+        // Loading indicator
+        if (isSearching && results.isNotEmpty()) {
+            item(span = { GridItemSpan(maxLineSpan) }, contentType = "search-loading") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator(
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+            }
+        }
+    }
+    }
+}

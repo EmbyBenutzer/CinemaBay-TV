@@ -1,0 +1,90 @@
+# Google Play lanes for the Silo Android apps. release.yml builds the signed
+# App Bundles and runs `upload`; promote.yml runs `promote`. See
+# docs/releasing.md.
+#
+# Phone and TV share one applicationId, so they always ship together in one
+# Play release (phone versionCode = base*2, TV = base*2+1; see
+# scripts/release-version.py).
+#
+# Nothing secret is hardcoded — this file is safe to commit to a public repo.
+
+default_platform(:android)
+
+PACKAGE_NAME = "org.siloserver.silo"
+BUNDLES = %w[
+  androidApp/build/outputs/bundle/release/androidApp-release.aab
+  androidTvApp/build/outputs/bundle/release/androidTvApp-release.aab
+].map { |path| File.expand_path("../#{path}", __dir__) }
+# Play's "What's new", written by the workflow from the release notes.
+CHANGELOG = File.expand_path("metadata/android/en-US/changelogs/default.txt", __dir__)
+
+# The Play publisher service-account key: PLAY_SERVICE_ACCOUNT_JSON in CI, or
+# ~/.playstore/silo-play-publisher.json locally.
+def play_json_key_data
+  raw = ENV["PLAY_SERVICE_ACCOUNT_JSON"].to_s
+  return raw unless raw.strip.empty?
+
+  key_path = File.expand_path("~/.playstore/silo-play-publisher.json")
+  UI.user_error!(
+    "Play service-account key not found at #{key_path}. " \
+    "Either place the JSON key file there or set PLAY_SERVICE_ACCOUNT_JSON."
+  ) unless File.exist?(key_path)
+  File.read(key_path)
+end
+
+def required_env(name)
+  value = ENV[name].to_s.strip
+  UI.user_error!("#{name} must be set.") if value.empty?
+  value
+end
+
+def require_changelog!
+  UI.user_error!("Play release notes not found at #{CHANGELOG}.") unless File.file?(CHANGELOG)
+end
+
+# If Google rejects an edit with "changes cannot be sent for review
+# automatically", a manual step is pending in Play Console: finish it there and
+# re-run the job.
+platform :android do
+  desc "Upload the phone and TV App Bundles to a Play track as one release"
+  lane :upload do
+    BUNDLES.each { |path| UI.user_error!("App Bundle not found at #{path}.") unless File.file?(path) }
+    require_changelog!
+
+    upload_to_play_store(
+      package_name: PACKAGE_NAME,
+      json_key_data: play_json_key_data,
+      track: required_env("PLAY_TRACK"),
+      release_status: "completed",
+      # The release's name in Play Console, such as "1.1.0 (22)".
+      version_name: required_env("PLAY_RELEASE_NAME"),
+      aab_paths: BUNDLES,
+      skip_upload_apk: true,
+      skip_upload_metadata: true,
+      skip_upload_images: true,
+      skip_upload_screenshots: true,
+      timeout: 900,
+    )
+  end
+
+  desc "Copy a release to another Play track as a draft, without rebuilding"
+  lane :promote do
+    require_changelog!
+
+    upload_to_play_store(
+      package_name: PACKAGE_NAME,
+      json_key_data: play_json_key_data,
+      track: required_env("PLAY_TRACK"),
+      track_promote_to: required_env("PLAY_PROMOTE_TO"),
+      # A maintainer reviews the draft in Play Console and sends it for review.
+      track_promote_release_status: "draft",
+      # Picks the release that holds this build (its phone versionCode).
+      version_code: Integer(required_env("PLAY_VERSION_CODE"), 10),
+      skip_upload_apk: true,
+      skip_upload_aab: true,
+      skip_upload_metadata: true,
+      skip_upload_images: true,
+      skip_upload_screenshots: true,
+    )
+  end
+end

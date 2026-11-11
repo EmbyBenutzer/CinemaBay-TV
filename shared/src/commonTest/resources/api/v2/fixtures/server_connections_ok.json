@@ -1,0 +1,32 @@
+{
+  "revision": "f292d8cfafdfa2780dabab7bccc425dcee025b962fdf969d8ae5be40f3c9f294",
+  "state": "available",
+  "allowed": true,
+  "server_id": "3f2a9d5e-6b1c-4c7e-9a0d-2f4b8c1e7a35",
+  "current": {
+    "kind": "default"
+  },
+  "endpoints": [
+    {
+      "kind": "public",
+      "url": "https://silo.example.test"
+    },
+    {
+      "kind": "provider",
+      "provider": "down",
+      "display_name": "Down Overlay",
+      "state": "unavailable"
+    },
+    {
+      "kind": "provider",
+      "url": "https://silo.overlay.example.test",
+      "provider": "stub",
+      "display_name": "Stub Overlay",
+      "state": "connected"
+    }
+  ],
+  "local_route": {
+    "spki_sha256": "n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=",
+    "url": "http://silo.lan.example.test:8080"
+  }
+}

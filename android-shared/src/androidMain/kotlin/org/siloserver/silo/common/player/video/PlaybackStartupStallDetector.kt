@@ -1,0 +1,319 @@
+package org.siloserver.silo.common.player.video
+
+import org.siloserver.silo.common.player.Playability
+import org.siloserver.silo.model.playback.CLIENT_DV7_TO_DV81
+import org.siloserver.silo.model.playback.CLIENT_DV7_TO_HDR10
+import org.siloserver.silo.model.playback.PlayMethod
+
+/**
+ * Detects a playback session wedged in BUFFERING with no forward progress —
+ * both at STARTUP ("Media3 accepted this but playback never started") and
+ * MID-STREAM ("it was playing, then froze forever"). Preflight covers known
+ * unsupported tracks and player errors; this covers the silent buffer-forever
+ * case that never surfaces an error. Applies to ALL routes (direct, remux,
+ * transcode, HLS) — a wedged compatibility-route remux used to have no watchdog
+ * at all (TV QA 2026-07-10: some remuxes buffer indefinitely).
+ */
+class PlaybackStartupStallDetector(
+    private val startupGraceMs: Long = DEFAULT_STARTUP_GRACE_MS,
+    private val midStreamGraceMs: Long = DEFAULT_MID_STREAM_GRACE_MS,
+    private val clientTransformGraceMs: Long = DEFAULT_CLIENT_TRANSFORM_GRACE_MS,
+    private val clientTransformMinBufferedAheadMs: Long = DEFAULT_CLIENT_TRANSFORM_MIN_BUFFERED_AHEAD_MS,
+    private val startedProgressMs: Long = DEFAULT_STARTED_PROGRESS_MS,
+    private val bufferedProgressMs: Long = DEFAULT_BUFFERED_PROGRESS_MS,
+) {
+    private var sessionKey: String? = null
+    private var startPositionMs: Long = 0L
+    private var started = false
+    private var signaled = false
+    private var firstFrameRendered = false
+    private var decoderStartupAtMs: Long? = null
+    private var clientDolbyVisionTransform = false
+    private var clientTransformEvidenceAtMs: Long? = null
+    private var clientTransformPositionMs: Long = 0L
+    private var clientTransformDecoderOutputCount: Int = 0
+    private var clientTransformProgressAtMs: Long = 0L
+    private var clientTransformOwnedLastSample = true
+    private var decoderOwnedLastSample = true
+    private var paused = false
+    // Last time playback made forward progress (or the mount time before it
+    // starts). The stall is measured from here, so the same logic covers a
+    // never-started session and a mid-stream freeze.
+    private var lastProgressPositionMs: Long = 0L
+    private var lastBufferedPositionMs: Long = 0L
+    private var lastProgressAtMs: Long = 0L
+
+    fun onMounted(
+        sessionKey: String,
+        playMethod: PlayMethod,
+        startPositionMs: Long,
+        nowMs: Long,
+        clientTransformations: Collection<String> = emptyList(),
+    ) {
+        if (this.sessionKey == sessionKey) return
+        this.sessionKey = sessionKey
+        this.startPositionMs = startPositionMs.coerceAtLeast(0L)
+        this.started = false
+        this.signaled = false
+        this.firstFrameRendered = false
+        // Only the startup deadline is cleared here — this is NOT a counter
+        // baseline, despite the shape of the check in sample(). Taking one was
+        // tried and reverted: Media3 creates fresh DecoderCounters when a
+        // renderer is enabled, so a baseline captured at mount can be compared
+        // against a counter that restarted at zero, and a healthy stream then
+        // looks frozen until it has rendered as many frames again. That trades
+        // a rare missed freeze for a common invented one. The caller therefore
+        // correlates AnalyticsListener.onRenderedFirstFrame(EventTime) through
+        // the immutable mount key on the event's MediaItem. The counter remains
+        // only a fallback signal for devices that omit that analytics callback.
+        this.decoderStartupAtMs = null
+        this.clientDolbyVisionTransform = clientTransformations.any {
+            it == CLIENT_DV7_TO_DV81 || it == CLIENT_DV7_TO_HDR10
+        }
+        this.clientTransformEvidenceAtMs = null
+        this.clientTransformPositionMs = this.startPositionMs
+        this.clientTransformDecoderOutputCount = 0
+        this.clientTransformProgressAtMs = nowMs
+        this.clientTransformOwnedLastSample = true
+        this.decoderOwnedLastSample = true
+        this.paused = false
+        this.lastProgressPositionMs = this.startPositionMs
+        this.lastBufferedPositionMs = this.startPositionMs
+        this.lastProgressAtMs = nowMs
+    }
+
+    /**
+     * The buffering-quality controller took the last report: a slow plan that
+     * was still receiving data. Listens again, measuring the next stall from
+     * [nowMs], so a stream that later stops delivering at all is still
+     * reported, and recovered, within the grace period.
+     */
+    fun onStallHandedOff(nowMs: Long) {
+        signaled = false
+        lastProgressAtMs = nowMs
+    }
+
+    /** Marks a frame after the caller verifies the analytics event's immutable mount key. */
+    fun onFirstFrameRendered() {
+        firstFrameRendered = true
+        decoderStartupAtMs = null
+    }
+
+    fun sample(
+        sessionKey: String,
+        nowMs: Long,
+        playWhenReady: Boolean,
+        isPlaying: Boolean,
+        isBuffering: Boolean,
+        currentPositionMs: Long,
+        bufferedPositionMs: Long,
+        decoderInputBufferCount: Int = 0,
+        decoderRenderedOutputBufferCount: Int = 0,
+        decoderSkippedOutputBufferCount: Int = 0,
+        decoderDroppedBufferCount: Int = 0,
+    ): Playability.StartupStalled? {
+        if (sessionKey != this.sessionKey) return null
+
+        val decoderOutputCount = decoderRenderedOutputBufferCount +
+            decoderSkippedOutputBufferCount + decoderDroppedBufferCount
+        if (!firstFrameRendered && decoderRenderedOutputBufferCount > 0) {
+            firstFrameRendered = true
+            decoderStartupAtMs = null
+        }
+
+        if (!playWhenReady) {
+            paused = true
+            decoderStartupAtMs = null
+            lastProgressAtMs = nowMs
+            clientTransformProgressAtMs = nowMs
+            return null
+        }
+        if (paused) {
+            paused = false
+            // Resume begins a fresh startup/stall grace period; time spent
+            // paused is not evidence of a decoder or transport failure.
+            decoderStartupAtMs = null
+            lastProgressAtMs = nowMs
+            clientTransformProgressAtMs = nowMs
+        }
+
+        val hasClientTransformDecodeEvidence = clientDolbyVisionTransform &&
+            (firstFrameRendered || decoderInputBufferCount > 0 || decoderOutputCount > 0)
+        if (hasClientTransformDecodeEvidence && clientTransformEvidenceAtMs == null) {
+            clientTransformEvidenceAtMs = nowMs
+            clientTransformPositionMs = currentPositionMs
+            clientTransformDecoderOutputCount = decoderOutputCount
+            clientTransformProgressAtMs = nowMs
+        }
+        val clientTransformSeekedBackward = currentPositionMs < clientTransformPositionMs
+        clientTransformPositionMs = currentPositionMs
+        if (clientTransformSeekedBackward) {
+            // A seek or timeline replacement starts a fresh local-transform
+            // deadline just as it does for the transport progress clock.
+            clientTransformDecoderOutputCount = decoderOutputCount
+            clientTransformProgressAtMs = nowMs
+        } else if (
+            hasClientTransformDecodeEvidence &&
+            decoderOutputCount != clientTransformDecoderOutputCount
+        ) {
+            // Playback position can advance on audio alone while the video
+            // transform is wedged. Only decoded video output proves this local
+            // recipe is still making progress. A counter reset also starts a
+            // fresh deadline because Media3 may replace DecoderCounters with a
+            // new renderer instance during a timeline replacement.
+            clientTransformDecoderOutputCount = decoderOutputCount
+            clientTransformProgressAtMs = nowMs
+        }
+
+        // A Profile 7 client transform can consume bytes and emit an initial
+        // frame before wedging locally. Decoder output then makes the generic
+        // classifier call this a transport stall, causing the client to reopen
+        // the same doomed route before it ever asks the server for another
+        // recipe. Once the transform has reached the decoder, use a separate
+        // bounded progress deadline and identify the failed local recipe. This
+        // deliberately does not cover a route with zero decoder evidence: a
+        // genuine no-input network stall keeps the normal transport retry.
+        //
+        // A network rebuffer is not a wedged transform either: 4K Profile 7
+        // remuxes run at 70-110 Mbps, and a Shield on Wi-Fi drains its buffer
+        // and sits in BUFFERING with the decoder idle because it has nothing
+        // to decode. While BUFFERING, only call the recipe wedged when the
+        // player is holding enough media to have fed the decoder; otherwise
+        // the generic transport clock keeps ownership. A player that is
+        // PLAYING is a different case: audio is advancing from the same
+        // muxed source, so input is arriving and a silent video decoder is
+        // the recipe's fault however little is buffered. That is the shape
+        // of the SM-F976U1 wedge and must keep its dedicated deadline.
+        // Misclassifying a bandwidth stall as a recipe fault quarantines the
+        // route for 14 days and hands the title back to the server's
+        // AAC-converting HLS remux.
+        val bufferedAheadMs = (bufferedPositionMs - currentPositionMs).coerceAtLeast(0L)
+        val transformOwnsStall = isPlaying ||
+            (isBuffering && bufferedAheadMs >= clientTransformMinBufferedAheadMs)
+        if (!transformOwnsStall || !clientTransformOwnedLastSample) {
+            // While transport owns the stall the decoder is idle for want of
+            // input, so its silence is not evidence against the recipe. Keep
+            // the transform clock anchored here; otherwise a rebuffer longer
+            // than the transform grace would blame the recipe on the first
+            // sample after the buffer refilled, before the decoder had a
+            // chance to emit another frame. The deadline restarts from the
+            // sample on which ownership returns to the transform, so a gap
+            // between polls (a lifecycle pause, say) spanning the whole
+            // refill cannot leave the clock pointing into the rebuffer.
+            clientTransformProgressAtMs = nowMs
+        }
+        clientTransformOwnedLastSample = transformOwnsStall
+        if (!signaled && hasClientTransformDecodeEvidence &&
+            transformOwnsStall &&
+            nowMs - clientTransformProgressAtMs > clientTransformGraceMs
+        ) {
+            signaled = true
+            return Playability.StartupStalled(
+                bufferedAheadMs = bufferedAheadMs,
+                stalledForMs = nowMs - clientTransformProgressAtMs,
+                classification = DV7_TRANSFORM_STALL_CLASSIFICATION,
+            )
+        }
+
+        // Audio may advance the position and set isPlaying=true while video is
+        // wedged before its first output. This deadline is deliberately
+        // independent from the transport/buffering progress clock.
+        //
+        // The same ownership rule as the transform deadline above: a decoder
+        // that has had a few samples but sits in BUFFERING with a thin buffer
+        // is starved, not wedged. On a throttled link it holds some input and
+        // no first output for as long as the network takes, so while BUFFERING
+        // below the threshold transport owns the stall and this deadline stays
+        // anchored to now. The starved case then reaches the transport clock
+        // below as a transport stall, which the screens hand to the buffering
+        // controller instead of racing it with a failure replan. A player that
+        // is PLAYING keeps the deadline however little is buffered: audio is
+        // advancing from the same source, so a silent video decoder is at
+        // fault. The deadline restarts from the sample on which ownership
+        // returns to the decoder, so a gap between polls spanning the refill
+        // cannot leave it pointing into the starved stretch.
+        val transportOwnsDecoderStartup = isBuffering && !isPlaying &&
+            bufferedAheadMs < clientTransformMinBufferedAheadMs
+        if (!signaled && !firstFrameRendered && playWhenReady && decoderInputBufferCount > 0) {
+            if (transportOwnsDecoderStartup || !decoderOwnedLastSample) decoderStartupAtMs = nowMs
+            val decoderStart = decoderStartupAtMs ?: nowMs.also { decoderStartupAtMs = it }
+            val decoderStalledForMs = nowMs - decoderStart
+            if (decoderStalledForMs > startupGraceMs) {
+                signaled = true
+                return Playability.StartupStalled(
+                    bufferedAheadMs = bufferedAheadMs,
+                    stalledForMs = decoderStalledForMs,
+                    classification = if (decoderOutputCount == 0) {
+                        "decoder_no_output"
+                    } else {
+                        "render_startup_failure"
+                    },
+                )
+            }
+        }
+        decoderOwnedLastSample = !transportOwnsDecoderStartup
+
+        // Forward progress (actively playing, or position advanced meaningfully)
+        // re-anchors the stall clock and latches "started".
+        if (isPlaying || currentPositionMs - lastProgressPositionMs >= startedProgressMs) {
+            lastProgressPositionMs = currentPositionMs
+            lastProgressAtMs = nowMs
+            started = true
+        }
+
+        // Downloading media is transport progress before the first frame.
+        // After rendering starts, buffer growth alone must not hide a frozen
+        // decoder; only playback/output progress may re-anchor the clock.
+        if (!firstFrameRendered && decoderInputBufferCount == 0 &&
+            bufferedPositionMs - lastBufferedPositionMs >= bufferedProgressMs
+        ) {
+            lastBufferedPositionMs = bufferedPositionMs
+            lastProgressAtMs = nowMs
+        } else if (bufferedPositionMs < lastBufferedPositionMs) {
+            // A seek or timeline replacement can move the buffer backwards.
+            lastBufferedPositionMs = bufferedPositionMs
+        }
+
+        if (signaled) return null
+        if (!isBuffering) return null
+
+        // Longer grace before playback ever starts (initial handshake/buffer)
+        // than for a mid-stream freeze once it has been playing.
+        val stalledForMs = nowMs - lastProgressAtMs
+        if (stalledForMs <= (if (started) midStreamGraceMs else startupGraceMs)) return null
+
+        signaled = true
+        return Playability.StartupStalled(
+            bufferedAheadMs = bufferedAheadMs,
+            stalledForMs = stalledForMs,
+            // Input without output blames the decoder only when it has been
+            // fed; a starved one is the transport's stall (see above).
+            classification = if (
+                decoderInputBufferCount > 0 &&
+                decoderOutputCount == 0 &&
+                !transportOwnsDecoderStartup
+            ) {
+                "decoder_no_output"
+            } else {
+                "transport_stall"
+            },
+        )
+    }
+
+    companion object {
+        const val DEFAULT_STARTUP_GRACE_MS: Long = 20_000L
+        const val DEFAULT_MID_STREAM_GRACE_MS: Long = 20_000L
+        const val DEFAULT_CLIENT_TRANSFORM_GRACE_MS: Long = 10_000L
+
+        /**
+         * Media the player must be holding before a stalled client transform
+         * is blamed on the recipe. Matches the load control's post-rebuffer
+         * restart threshold: below it Media3 is legitimately waiting on the
+         * network and the decoder is idle for want of input.
+         */
+        const val DEFAULT_CLIENT_TRANSFORM_MIN_BUFFERED_AHEAD_MS: Long = 5_000L
+        const val DEFAULT_STARTED_PROGRESS_MS: Long = 1_500L
+        const val DEFAULT_BUFFERED_PROGRESS_MS: Long = 250L
+        const val DV7_TRANSFORM_STALL_CLASSIFICATION = "dv7_transform_stall"
+    }
+}

@@ -1,0 +1,572 @@
+package org.siloserver.silo.android.ui.screens.home
+
+import org.siloserver.silo.model.catalog.seriesHeroBackdrop
+import org.siloserver.silo.domain.settings.CatalogLanguageRevision
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import coil3.imageLoader
+import coil3.request.ImageRequest
+import org.siloserver.silo.android.ui.components.TabContentGap
+import org.siloserver.silo.android.ui.components.TabContentTop
+import org.siloserver.silo.android.ui.components.TabHeaderRowHeight
+import org.siloserver.silo.android.ui.components.TopBarEdgeMargin
+import org.siloserver.silo.android.ui.components.TopBarRemoteControl
+import org.siloserver.silo.android.ui.components.TopBarRowTopInset
+import org.siloserver.silo.android.ui.theme.siloPageBackdrop
+import org.siloserver.silo.android.ui.components.SiloWordmark
+import org.siloserver.silo.android.ui.components.TabTopBarActions
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.distinctUntilChanged
+import org.siloserver.silo.android.ui.components.EmptyStateView
+import org.siloserver.silo.android.ui.components.ErrorView
+import org.siloserver.silo.android.ui.components.MediaRowSkeleton
+import org.siloserver.silo.android.ui.components.ProfileMenu
+import org.siloserver.silo.android.ui.components.rememberShimmerProgress
+import org.siloserver.silo.android.ui.screens.profiles.ProfileAvatar
+import org.siloserver.silo.common.R as CommonR
+import org.siloserver.silo.common.diagnostics.DiagnosticsHomeContentState
+import org.siloserver.silo.common.diagnostics.DiagnosticsHomeLogger
+import org.siloserver.silo.common.diagnostics.DiagnosticsHomeScrollRegion
+import org.siloserver.silo.common.diagnostics.DiagnosticsListLogger
+import org.siloserver.silo.common.diagnostics.DiagnosticsListSnapshot
+import org.siloserver.silo.common.diagnostics.DiagnosticsListSurface
+import org.siloserver.silo.common.ui.components.DeferImagePresentationWhileScrolling
+import org.siloserver.silo.common.ui.components.avatarRef
+import org.siloserver.silo.model.catalog.isAudiobookItemType
+import org.siloserver.silo.model.profile.Profile
+import org.siloserver.silo.model.section.SectionItem
+import org.siloserver.silo.viewmodel.HomeViewModel
+import org.siloserver.silo.android.ui.navigation.LocalBottomChromeInset
+import org.siloserver.silo.android.ui.navigation.LocalHeroSourceHandoff
+import org.siloserver.silo.network.ServerRegistry
+import org.siloserver.silo.network.ApiResult
+import org.siloserver.silo.repository.CatalogRepository
+import org.koin.compose.koinInject
+import org.koin.compose.viewmodel.koinViewModel
+import org.siloserver.silo.common.i18n.text
+
+private data class SeriesWarmTarget(
+    val seriesId: String,
+    val seasonNumber: Int?,
+    val episodeContentId: String,
+)
+
+private data class WarmedSeriesArtwork(
+    val url: String?,
+    val thumbhash: String?,
+)
+
+/**
+ * Phone Home screen.
+ *
+ * Mirrors iOS `HomeView.swift` (phone) 1:1: the fixed charcoal page canvas (no hero —
+ * a `featured` section renders as an ordinary row in its server order; the
+ * phone apps have no hero surface at all), a runway spacer that
+ * reserves room under the floating chrome, the resume-first section rows, and
+ * a floating top chrome (wordmark + search + profile menu) that fades in a
+ * subtle glass surface as content scrolls underneath it. The screen owns its
+ * own top inset so the chrome floats over the status bar.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun HomeScreen(
+    onItemClick: (String) -> Unit,
+    onContinueWatchingItemClick: (SectionItem) -> Unit,
+    onPlayClick: (String, Double?) -> Unit,
+    /** Opens a row's full page ("Explore all"). */
+    onExploreSection: ((org.siloserver.silo.model.section.ResolvedSection) -> Unit)? = null,
+    onBottomNavMinimizedChange: (Boolean) -> Unit = {},
+    viewModel: HomeViewModel,
+    activeProfile: Profile?,
+    onSearchClick: () -> Unit,
+    remoteControl: TopBarRemoteControl,
+    onRequestsClick: (() -> Unit)?,
+    onWatchPartyClick: (() -> Unit)?,
+    onSettingsClick: () -> Unit,
+    onSwitchProfileClick: () -> Unit,
+    onChangeAccountClick: () -> Unit,
+    onSignOutClick: (removeServer: Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val state by viewModel.uiState.collectAsState()
+    val sectionPreferences: HomeSectionPreferencesStore = koinInject()
+    val preferenceRevision by sectionPreferences.revision.collectAsState()
+    val serverRegistry: ServerRegistry = koinInject()
+    val activeServerId by serverRegistry.activeServerId.collectAsState()
+    val activeEntry by serverRegistry.activeEntry.collectAsState()
+    val sections = state.sections
+    val profileScopeId = activeEntry?.profileId ?: activeProfile?.id
+    val activeAccountId = activeEntry?.accountId
+    val populatedServerSections = remember(sections) { sections.filter { it.items.isNotEmpty() } }
+    // No hero billboard on phone (matches iOS): a `featured` section is just
+    // another row, rendered in the order the server configured it.
+    val regularSections = remember(
+        sections,
+        preferenceRevision,
+        activeServerId,
+        activeAccountId,
+        profileScopeId,
+    ) {
+        sectionPreferences.arrangedSections(sections, profileId = profileScopeId)
+    }
+    val context = LocalContext.current
+    val catalogRepository: CatalogRepository = koinInject()
+    val catalogLanguage: CatalogLanguageRevision = koinInject()
+    val languageRevision by catalogLanguage.revision.collectAsState()
+    val heroHandoff = LocalHeroSourceHandoff.current
+    val tapWarmupScope = rememberCoroutineScope()
+    val seriesWarmTargets = remember(regularSections) {
+        regularSections
+            .asSequence()
+            .filter { section ->
+                section.sectionType == "continue_watching" ||
+                    section.sectionType == "in_progress" ||
+                    section.sectionType == "next_up"
+            }
+            .flatMap { it.items.asSequence() }
+            .mapNotNull { item ->
+                val seriesId = item.seriesId?.takeIf { it.isNotBlank() }
+                if (!item.type.equals("episode", ignoreCase = true) || seriesId == null) {
+                    null
+                } else {
+                    SeriesWarmTarget(
+                        seriesId = seriesId,
+                        seasonNumber = item.seasonNumber,
+                        episodeContentId = item.contentId,
+                    )
+                }
+            }
+            .distinctBy { it.seriesId }
+            // Warming the visible runway covers the row without turning Home
+            // into an unbounded metadata crawl for very large histories.
+            .take(4)
+            .toList()
+    }
+    var warmedSeriesArtwork by remember(activeServerId, activeAccountId, profileScopeId, languageRevision) {
+        mutableStateOf<Map<String, WarmedSeriesArtwork>>(emptyMap())
+    }
+    LaunchedEffect(activeServerId, activeAccountId, profileScopeId, languageRevision, seriesWarmTargets) {
+        // Warm each Continue Watching and Next Up series in row order. Within one
+        // title, its parent detail, exact episode and selector data run in
+        // parallel. CatalogRepository keeps these calls alive/single-flight if
+        // the user taps while this effect is still awaiting them.
+        for (target in seriesWarmTargets) {
+            coroutineScope {
+                val parentDetail = async {
+                    catalogRepository.warmItemDetail(target.seriesId)
+                }
+                val seasons = async {
+                    catalogRepository.warmSeasons(target.seriesId)
+                }
+                val episodes = async {
+                    target.seasonNumber?.let { seasonNumber ->
+                        catalogRepository.warmEpisodes(target.seriesId, seasonNumber)
+                    }
+                }
+                val episodeDetail = async {
+                    catalogRepository.warmItemDetail(target.episodeContentId)
+                }
+
+                val resolvedParent = when (val result = parentDetail.await()) {
+                    is ApiResult.Success -> result.data
+                    else -> null
+                }
+                if (resolvedParent != null) {
+                    val artwork = WarmedSeriesArtwork(
+                        url = resolvedParent.backdropUrl ?: resolvedParent.posterUrl,
+                        thumbhash = resolvedParent.backdropThumbhash
+                            ?: resolvedParent.posterThumbhash,
+                    )
+                    warmedSeriesArtwork = warmedSeriesArtwork + (target.seriesId to artwork)
+                    artwork.url?.takeIf { it.isNotBlank() }?.let { artworkUrl ->
+                        context.imageLoader.enqueue(
+                            ImageRequest.Builder(context)
+                                .data(artworkUrl)
+                                .size(
+                                    context.resources.displayMetrics.widthPixels.coerceAtLeast(1),
+                                    context.resources.displayMetrics.heightPixels.coerceAtLeast(1),
+                                )
+                                .build(),
+                        )
+                    }
+                }
+                seasons.await()
+                episodes.await()
+                episodeDetail.await()
+            }
+        }
+    }
+    // iOS Home no longer samples the centered Continue Watching artwork; it
+    // sits on the fixed page canvas so scrolling the row never recolors the
+    // page (silo-apple PR #222).
+    val diagnosticsContentState = when {
+        state.isLoading && regularSections.isEmpty() -> DiagnosticsHomeContentState.LOADING
+        state.error != null && regularSections.isEmpty() -> DiagnosticsHomeContentState.ERROR
+        regularSections.isEmpty() -> DiagnosticsHomeContentState.EMPTY
+        else -> DiagnosticsHomeContentState.READY
+    }
+    LaunchedEffect(diagnosticsContentState) {
+        DiagnosticsHomeLogger.content(diagnosticsContentState)
+    }
+    val diagnosticsListSnapshot = remember(regularSections, state.sectionsFullyResolved) {
+        DiagnosticsListSnapshot.fromKeys(
+            keys = regularSections.map { it.id },
+            rowKeys = regularSections.map { section -> section.items.map { it.contentId } },
+            fullyResolved = state.sectionsFullyResolved,
+        )
+    }
+    LaunchedEffect(diagnosticsListSnapshot, diagnosticsContentState) {
+        if (diagnosticsContentState == DiagnosticsHomeContentState.READY) {
+            DiagnosticsListLogger.snapshot(DiagnosticsListSurface.PHONE_HOME, diagnosticsListSnapshot)
+        }
+    }
+
+    val listState = rememberLazyListState()
+    val currentDiagnosticsSections by rememberUpdatedState(regularSections)
+    val currentBottomNavCallback by rememberUpdatedState(onBottomNavMinimizedChange)
+    LaunchedEffect(listState) {
+        var previousIndex = listState.firstVisibleItemIndex
+        var previousOffset = listState.firstVisibleItemScrollOffset
+        snapshotFlow {
+            Triple(
+                listState.firstVisibleItemIndex,
+                listState.firstVisibleItemScrollOffset,
+                listState.isScrollInProgress,
+            )
+        }.collect { (index, offset, isScrolling) ->
+            val isAtTop = index == 0 && offset == 0
+            if (isAtTop) {
+                currentBottomNavCallback(false)
+            } else if (isScrolling) {
+                val movingDown = index > previousIndex ||
+                    (index == previousIndex && offset > previousOffset)
+                if (movingDown) currentBottomNavCallback(true)
+            }
+            previousIndex = index
+            previousOffset = offset
+        }
+    }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }
+            .distinctUntilChanged()
+            .collect { scrolling ->
+                val currentSections = currentDiagnosticsSections
+                val sectionCount = currentSections.size
+                val firstVisibleItem = listState.firstVisibleItemIndex
+                val visibleRowOrdinal = (firstVisibleItem - 1).takeIf(currentSections.indices::contains)
+                val region = when {
+                    sectionCount == 0 -> DiagnosticsHomeScrollRegion.UNKNOWN
+                    firstVisibleItem <= 1 -> DiagnosticsHomeScrollRegion.TOP
+                    firstVisibleItem >= sectionCount -> DiagnosticsHomeScrollRegion.END
+                    else -> DiagnosticsHomeScrollRegion.CONTENT
+                }
+                DiagnosticsHomeLogger.scroll(
+                    scrolling = scrolling,
+                    region = region,
+                    visibleRowOrdinal = visibleRowOrdinal,
+                    rawSectionType = visibleRowOrdinal?.let { currentSections[it].sectionType },
+                )
+            }
+    }
+    // Home can show the same item in several rows at once. Each poster placement
+    // now carries a unique hero key (see MediaCard) so duplicates never collide
+    // in the shared-transition layout — no per-screen claim registry needed.
+    // iOS HomeView paints the shared SiloPageBackdrop; Home used to carry its
+    // own, much brighter wash instead (a 10%-white core against iOS's 3.5%,
+    // and a bottom edge that lightened where iOS darkens).
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .siloPageBackdrop(),
+    ) {
+        when {
+            state.isLoading && regularSections.isEmpty() -> HomeLoadingSkeleton()
+            state.error != null && regularSections.isEmpty() -> ErrorView(
+                message = state.error?.text() ?: stringResource(CommonR.string.status_errorGeneric),
+                onRetry = { viewModel.loadSections() },
+            )
+            regularSections.isEmpty() -> {
+                if (populatedServerSections.isNotEmpty()) {
+                    EmptyStateView(
+                        title = stringResource(CommonR.string.home_hiddenSections),
+                        subtitle = stringResource(CommonR.string.home_hiddenSectionsBody),
+                    )
+                } else {
+                    EmptyStateView(
+                        title = stringResource(CommonR.string.home_empty),
+                        subtitle = stringResource(CommonR.string.home_emptyBody),
+                    )
+                }
+            }
+            else -> PullToRefreshBox(
+                isRefreshing = state.isRefreshing,
+                onRefresh = { viewModel.refresh() },
+                // Background sits inside the source so the glass captures an
+                // opaque scene; a transparent capture composites the blur over
+                // the sharp content beneath instead of replacing it.
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Transparent),
+            ) {
+                // Feed-scoped: unloaded images hold their thumbhash until the
+                // vertical fling settles (rows add their own horizontal gate).
+                DeferImagePresentationWhileScrolling(listState) {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        // iOS `sectionSpacing` = SiloTheme.largePadding (24).
+                        verticalArrangement = Arrangement.spacedBy(24.dp),
+                    ) {
+                        // The wordmark sits in the header row; the space below
+                        // it covers the pill band Libraries and For You use, so
+                        // the first row starts at TabContentTop on every tab.
+                        item(key = "homeIdentity") {
+                            Box(
+                                modifier = Modifier
+                                    .windowInsetsPadding(WindowInsets.statusBars)
+                                    .fillMaxWidth()
+                                    .height(TabContentTop - TabContentGap),
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(TabHeaderRowHeight)
+                                        .padding(horizontal = TopBarEdgeMargin),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    SiloWordmark()
+                                }
+                            }
+                        }
+
+                        items(
+                            items = regularSections,
+                            key = { it.id },
+                            contentType = { "section-row" },
+                        ) { section ->
+                            val opensUnifiedSeriesDetail =
+                                section.sectionType == "continue_watching" ||
+                                    section.sectionType == "in_progress"
+                            HomeSectionRow(
+                                section = section,
+                                onItemClick = { contentId ->
+                                    val item = section.items.firstOrNull { it.contentId == contentId }
+                                    val seriesId = item
+                                        ?.takeIf { it.type.equals("episode", ignoreCase = true) }
+                                        ?.seriesId
+                                        ?.takeIf { it.isNotBlank() }
+                                    // An episode page only redirects to its series
+                                    // (seriesDetailRedirect), so open the series
+                                    // directly. Outside Continue Watching this needs
+                                    // the season number, which the redirect requires too.
+                                    if (
+                                        item != null && seriesId != null &&
+                                        (opensUnifiedSeriesDetail || item.seasonNumber != null)
+                                    ) {
+                                        val knownParent = regularSections
+                                            .asSequence()
+                                            .flatMap { it.items.asSequence() }
+                                            .firstOrNull { it.contentId == seriesId }
+                                        val artwork = warmedSeriesArtwork[seriesId]
+                                            ?: knownParent?.let {
+                                                WarmedSeriesArtwork(
+                                                    url = it.backdropUrl ?: it.posterUrl,
+                                                    thumbhash = it.backdropThumbhash
+                                                        ?: it.posterThumbhash,
+                                                )
+                                            }
+                                            ?: item.seriesHeroBackdrop()?.let {
+                                                WarmedSeriesArtwork(url = it.url, thumbhash = it.thumbhash)
+                                            }
+                                        // MediaRow hands off the episode still, which
+                                        // the series page never shows. Load with the
+                                        // series artwork instead, or with none until
+                                        // Home knows it, so the hero never swaps
+                                        // one picture for another.
+                                        heroHandoff?.pendingArtworkUrl = artwork?.url
+                                        heroHandoff?.pendingArtworkThumbhash = artwork?.thumbhash
+                                        // The series page reads this route cache-first,
+                                        // which only Home's warm-up keeps fresh. For a
+                                        // row it has not warmed, start those reads now
+                                        // so the page joins them.
+                                        val target = SeriesWarmTarget(seriesId, item.seasonNumber, item.contentId)
+                                        if (warmedSeriesArtwork[seriesId] == null || target !in seriesWarmTargets) {
+                                            tapWarmupScope.startSeriesWarmup(catalogRepository, target)
+                                        }
+                                        onContinueWatchingItemClick(item)
+                                    } else if (opensUnifiedSeriesDetail && item != null) {
+                                        onContinueWatchingItemClick(item)
+                                    } else {
+                                        onItemClick(contentId)
+                                    }
+                                },
+                                onItemPlay = { item ->
+                                    // Continue Watching can include audiobooks; the play
+                                    // glyph must not drop them into the video player. Home
+                                    // has no callback reaching Route.AudiobookPlayer (that
+                                    // route needs a fileId SectionItem doesn't carry), so
+                                    // send audiobooks to their detail page, which dispatches
+                                    // audiobook playback correctly.
+                                    if (isAudiobookItemType(item.type)) {
+                                        onItemClick(item.contentId)
+                                    } else {
+                                        onPlayClick(item.contentId, item.positionSeconds)
+                                    }
+                                },
+                                onSetWatched = viewModel::setWatched,
+                                onToggleFavorite = viewModel::toggleFavorite,
+                                onToggleWatchlist = viewModel::toggleWatchlist,
+                                onRemoveFromHome = viewModel::dismissFromHome,
+                                onExploreAllClick = onExploreSection?.let { open -> { open(section) } },
+                            )
+                        }
+
+                        // iOS bottom padding = SiloTheme.largePadding (24), plus the
+                        // translucent bottom chrome the content scrolls beneath.
+                        item(key = "bottomPad") {
+                            Spacer(modifier = Modifier.height(24.dp + LocalBottomChromeInset.current))
+                        }
+                    }
+                }
+            }
+        }
+
+        // Floating top chrome — fades in a glass surface as content scrolls under.
+        HomeFloatingChrome(
+            activeProfile = activeProfile,
+            onSearchClick = onSearchClick,
+            remoteControl = remoteControl,
+            onRequestsClick = onRequestsClick,
+            onWatchPartyClick = onWatchPartyClick,
+            onSettingsClick = onSettingsClick,
+            onSwitchProfileClick = onSwitchProfileClick,
+            onChangeAccountClick = onChangeAccountClick,
+            onSignOutClick = onSignOutClick,
+        )
+
+    }
+}
+
+@Composable
+private fun HomeLoadingSkeleton() {
+    val shimmer = rememberShimmerProgress()
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(24.dp),
+    ) {
+        Spacer(
+            modifier = Modifier
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .height(TabContentTop - TabContentGap),
+        )
+        repeat(4) {
+            MediaRowSkeleton(progress = shimmer)
+        }
+    }
+}
+
+@Composable
+private fun HomeFloatingChrome(
+    activeProfile: Profile?,
+    onSearchClick: () -> Unit,
+    remoteControl: TopBarRemoteControl,
+    onRequestsClick: (() -> Unit)?,
+    onWatchPartyClick: (() -> Unit)?,
+    onSettingsClick: () -> Unit,
+    onSwitchProfileClick: () -> Unit,
+    onChangeAccountClick: () -> Unit,
+    onSignOutClick: (removeServer: Boolean) -> Unit,
+) {
+    val statusBarPadding = WindowInsets.statusBars.asPaddingValues()
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Box(
+            modifier = Modifier
+                .padding(top = statusBarPadding.calculateTopPadding() + TopBarRowTopInset)
+                .padding(start = TopBarEdgeMargin, end = TopBarEdgeMargin)
+                .fillMaxWidth()
+                .height(TabHeaderRowHeight),
+        ) {
+            // The SILO identity scrolls with the feed; only utilities remain pinned.
+            TabTopBarActions(
+                modifier = Modifier.align(Alignment.CenterEnd),
+                activeProfile = activeProfile,
+                remoteControl = remoteControl,
+                onSearchClick = onSearchClick,
+                onRequestsClick = onRequestsClick,
+                onWatchPartyClick = onWatchPartyClick,
+                onSettingsClick = onSettingsClick,
+                onSwitchProfileClick = onSwitchProfileClick,
+                onChangeAccountClick = onChangeAccountClick,
+                onSignOutClick = onSignOutClick,
+            )
+        }
+    }
+}
+
+/**
+ * Starts [target]'s live reads ahead of navigation, so its series page joins
+ * them instead of reading an older cached copy. Each read registers before
+ * its first suspension unless another request holds the repository's lock,
+ * and the repository keeps it running after Home leaves composition.
+ */
+private fun CoroutineScope.startSeriesWarmup(catalogRepository: CatalogRepository, target: SeriesWarmTarget) {
+    launch(start = CoroutineStart.UNDISPATCHED) { catalogRepository.warmItemDetail(target.seriesId) }
+    launch(start = CoroutineStart.UNDISPATCHED) { catalogRepository.warmSeasons(target.seriesId) }
+    target.seasonNumber?.let { seasonNumber ->
+        launch(start = CoroutineStart.UNDISPATCHED) { catalogRepository.warmEpisodes(target.seriesId, seasonNumber) }
+    }
+    launch(start = CoroutineStart.UNDISPATCHED) { catalogRepository.warmItemDetail(target.episodeContentId) }
+}

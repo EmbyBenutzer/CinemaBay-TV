@@ -1,0 +1,1990 @@
+package org.siloserver.silo.android.ui.screens.libraries
+
+import org.siloserver.silo.common.i18n.LocaleFormat
+import org.siloserver.silo.common.i18n.UiText
+import org.siloserver.silo.common.i18n.currentFormatLocale
+import org.siloserver.silo.common.i18n.currentNumberLocale
+import org.siloserver.silo.common.i18n.text
+import org.siloserver.silo.common.i18n.errorText
+import org.siloserver.silo.common.i18n.detailedErrorText
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.filled.AutoStories
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Headphones
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.LocalMovies
+import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.filled.Tv
+import androidx.compose.material.icons.filled.VideoLibrary
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
+import androidx.annotation.StringRes
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.viewModelScope
+import org.siloserver.silo.android.ui.components.TabContentGap
+import org.siloserver.silo.android.ui.components.TabHeaderPillGap
+import org.siloserver.silo.android.ui.components.TabHeaderRowHeight
+import org.siloserver.silo.android.ui.components.TabPillRowHeight
+import org.siloserver.silo.android.ui.components.TopBarEdgeMargin
+import org.siloserver.silo.android.ui.components.TopBarGlassFadeDistance
+import org.siloserver.silo.android.ui.components.TopBarRemoteControl
+import org.siloserver.silo.android.ui.components.TopBarRowTopInset
+import org.siloserver.silo.android.ui.theme.siloPageBackdrop
+import org.siloserver.silo.android.ui.components.EmptyStateView
+import org.siloserver.silo.android.ui.components.ErrorView
+import org.siloserver.silo.android.ui.navigation.LocalBottomChromeInset
+import org.siloserver.silo.android.ui.components.MediaGridDefaults
+import org.siloserver.silo.android.ui.components.MediaRowsSkeleton
+import org.siloserver.silo.android.ui.components.PosterGridSkeleton
+import org.siloserver.silo.android.ui.components.TabTopBarActions
+import org.siloserver.silo.android.ui.components.SortFilterControlsRow
+import org.siloserver.silo.android.ui.components.SortMenuOption
+import org.siloserver.silo.android.ui.components.topBarGlass
+import dev.chrisbanes.haze.rememberHazeState
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.HazeState
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.runtime.mutableIntStateOf
+import org.siloserver.silo.android.ui.components.rememberShimmerProgress
+import androidx.compose.material.icons.filled.Cancel
+import org.siloserver.silo.common.settings.BrowsePrefsStore
+import org.siloserver.silo.android.ui.screens.browse.CatalogGrid
+import org.siloserver.silo.common.R as CommonR
+import org.siloserver.silo.android.ui.screens.browse.CatalogViewDensity
+import org.siloserver.silo.android.ui.screens.browse.FilterSheet
+import org.siloserver.silo.android.ui.screens.browse.facetValueLabel
+import org.siloserver.silo.android.ui.screens.browse.normalizeCatalogNamePrefix
+import org.siloserver.silo.catalog.filter.BrowseFacetMediaType
+import org.siloserver.silo.catalog.scopeLibrarySection
+import org.siloserver.silo.catalog.filter.CatalogFacet
+import org.siloserver.silo.catalog.filter.CatalogFilterQueryBuilder
+import org.siloserver.silo.catalog.filter.CatalogFilterState
+import org.siloserver.silo.common.cards.LocalCardPresentation
+import org.siloserver.silo.common.ui.components.DeferImagePresentationWhileScrolling
+import org.siloserver.silo.common.diagnostics.DiagnosticsListLogger
+import org.siloserver.silo.common.diagnostics.DiagnosticsListSnapshot
+import org.siloserver.silo.common.diagnostics.DiagnosticsListSurface
+import org.siloserver.silo.model.catalog.CatalogFiltersResponse
+import org.siloserver.silo.model.catalog.isAudiobookItemType
+import org.siloserver.silo.android.ui.screens.home.HomeSectionRow
+import org.siloserver.silo.android.ui.theme.SiloSurfaceElevated
+import org.siloserver.silo.android.ui.util.formatCardDate
+import org.siloserver.silo.common.ui.components.ThumbhashImage
+import org.siloserver.silo.model.catalog.BrowseItem
+import org.siloserver.silo.model.catalog.MediaItemUserState
+import org.siloserver.silo.model.personal.UserLibrary
+import org.siloserver.silo.model.profile.Profile
+import org.siloserver.silo.model.section.LibraryCollection
+import org.siloserver.silo.model.section.ResolvedSection
+import org.siloserver.silo.network.ApiResult
+import org.siloserver.silo.network.apiv2.CatalogContinuationV2
+import org.siloserver.silo.repository.CatalogRepository
+import org.siloserver.silo.repository.PersonalDataRepository
+import org.siloserver.silo.repository.SectionRepository
+import org.siloserver.silo.repository.port.canServeCache
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
+
+enum class LibrariesSubtab {
+    Recommended,
+    Browse,
+    Collections,
+}
+
+enum class LibraryBrowseSort(
+    @StringRes val labelRes: Int,
+    val sortField: String,
+    val sortOrder: String,
+) {
+    RecentlyAdded(CommonR.string.catalog_sort_recentlyAdded, "added_at", "desc"),
+    Title(CommonR.string.catalog_sort_title, "title", "asc"),
+    ReleaseDate(CommonR.string.catalog_sort_released, "release_date", "desc");
+
+    companion object {
+        /**
+         * The sort rides the persisted [CatalogFilterState] (same as
+         * BrowseViewModel), so restoring saved browse prefs also restores the
+         * chip label. [CatalogFilterState]'s own defaults are exactly
+         * [RecentlyAdded]'s pair, so a state saved before the sort travelled
+         * with it — or one naming a field this client does not offer — falls
+         * back to [RecentlyAdded].
+         */
+        fun fromFilterState(state: CatalogFilterState): LibraryBrowseSort =
+            entries.firstOrNull { it.sortField == state.sort && it.sortOrder == state.order }
+                ?: RecentlyAdded
+    }
+}
+
+data class LibrariesUiState(
+    val isLoadingLibraries: Boolean = true,
+    val libraries: List<UserLibrary> = emptyList(),
+    val selectedLibraryId: Int? = null,
+    val mediaScope: String? = null,
+    val selectedTab: LibrariesSubtab = LibrariesSubtab.Recommended,
+    val isLoadingSections: Boolean = false,
+    val sections: List<ResolvedSection> = emptyList(),
+    val sectionsError: UiText? = null,
+    val isLoadingCatalog: Boolean = false,
+    val isLoadingMoreCatalog: Boolean = false,
+    val catalogItems: List<BrowseItem> = emptyList(),
+    val catalogTotal: Int = 0,
+    val catalogHasMore: Boolean = false,
+    /** For an empty grid: false when the library itself is empty, true when filters hid everything, null when unknown (#451). */
+    val catalogLibraryHasItems: Boolean? = null,
+    // Full filter model shared with the standalone Browse screen: facets
+    // (genre/decade/rating/studio/language/series/...), match-all/any, and the
+    // available-filter vocabulary from the server. Genre is a Categories facet
+    // here — no more inline genre chip rail (L3).
+    val filterState: CatalogFilterState = CatalogFilterState(),
+    val availableFilters: CatalogFiltersResponse? = null,
+    val browseMediaType: BrowseFacetMediaType = BrowseFacetMediaType.Video,
+    val preserveFilters: Boolean = true,
+    val selectedNamePrefix: String? = null,
+    val catalogDensity: CatalogViewDensity = CatalogViewDensity.Normal,
+    val browseSort: LibraryBrowseSort = LibraryBrowseSort.RecentlyAdded,
+    val catalogError: UiText? = null,
+    val isLoadingCollections: Boolean = false,
+    val collections: List<LibraryCollection> = emptyList(),
+    val collectionsError: UiText? = null,
+    val librariesError: UiText? = null,
+)
+
+class LibrariesViewModel(
+    private val personalDataRepository: PersonalDataRepository,
+    private val sectionRepository: SectionRepository,
+    private val catalogRepository: CatalogRepository,
+    private val userItemState: org.siloserver.silo.repository.port.UserItemStatePort =
+        org.siloserver.silo.repository.port.NoOpUserItemStatePort,
+    private val playerSettingsStore: org.siloserver.silo.common.settings.PlayerSettingsStore? = null,
+    private val browsePrefs: BrowsePrefsStore? = null,
+    catalogLanguage: org.siloserver.silo.domain.settings.CatalogLanguageRevision? = null,
+) : ViewModel() {
+    /** Access changes this ViewModel has applied, kept while its screen is away. */
+    val accessChanges = org.siloserver.silo.network.AccessChangeCursor()
+
+    private val _uiState = MutableStateFlow(LibrariesUiState())
+    val uiState: StateFlow<LibrariesUiState> = _uiState.asStateFlow()
+    // iOS AppNavPreferences.showAudiobooks parity: audiobook libraries are
+    // hidden from the picker unless the user opts in under Settings > Library.
+    private var showAudiobooks = false
+    private var recommendedLoadedLibraryId: Int? = null
+    private var browseLoadedLibraryId: Int? = null
+    private var collectionsLoadedLibraryId: Int? = null
+    private var recommendedJob: Job? = null
+    private var recommendedRequestGeneration = 0L
+    private var catalogContinuation: CatalogContinuationV2? = null
+    private var catalogRequestGeneration = 0L
+    private var catalogQueryGeneration = 0L
+    private var collectionsRequestGeneration = 0L
+    // Library-list loads run one at a time, in order, so an older response
+    // can't overwrite a newer one (on screen or in the offline cache). A
+    // request made mid-load queues one follow-up pass.
+    private var librariesJob: Job? = null
+    private var librariesRecheckQueued = false
+    // The last library list the server confirmed, hidden audiobook
+    // libraries included. Later loads confirm a shrink against it, so a
+    // partial list can't hide libraries or reach the offline cache, and a
+    // transient failure re-shows it instead of the cache.
+    private var serverLibraries: List<UserLibrary> = emptyList()
+    private var pendingContentReload = false
+    private val pageSize = 42
+
+    /** Bumps when the profile hides or shows a library on another device. */
+    val hiddenLibrariesRevision: StateFlow<Int> = personalDataRepository.hiddenLibrariesRevision
+    private var seenHiddenLibrariesRevision = hiddenLibrariesRevision.value
+
+    init {
+        playerSettingsStore?.showAudiobooksFlow
+            ?.onEach { show ->
+                if (show != showAudiobooks) {
+                    showAudiobooks = show
+                    refresh()
+                }
+            }
+            ?.launchIn(viewModelScope)
+        // Titles and descriptions are localized per metadata language.
+        catalogLanguage?.revision
+            ?.drop(1)
+            ?.onEach { refreshAfterLanguageChange() }
+            ?.launchIn(viewModelScope)
+        refresh()
+    }
+
+    fun onHiddenLibrariesRevision(revision: Int) {
+        if (revision == seenHiddenLibrariesRevision) return
+        seenHiddenLibrariesRevision = revision
+        refreshLibraryList()
+    }
+
+    private fun isHiddenAudiobookLibrary(library: UserLibrary): Boolean =
+        !showAudiobooks && library.type.trim().lowercase() in setOf("audiobook", "audiobooks")
+
+    fun refresh() = loadLibraries(reloadContent = true)
+
+    /**
+     * Re-fetch the library list, reloading the open library's content only when
+     * the selection has to change. The screen calls this on every resume: this
+     * VM outlives tab switches, so a list that loaded short (a partial server
+     * response, or the cached fallback after a failed request) used to stay
+     * short — hiding the switcher and every other library — until the process
+     * died.
+     */
+    fun refreshLibraryList() = loadLibraries(reloadContent = false)
+
+    private fun loadLibraries(reloadContent: Boolean) {
+        if (reloadContent) pendingContentReload = true
+        if (librariesJob?.isActive == true) {
+            librariesRecheckQueued = true
+            return
+        }
+        librariesJob = viewModelScope.launch {
+            do {
+                librariesRecheckQueued = false
+                // Each pass takes the reload owed so far, so a background
+                // re-check never inherits a full refresh it didn't run.
+                val reload = pendingContentReload
+                pendingContentReload = false
+                loadLibrariesPass(reload)
+            } while (librariesRecheckQueued)
+        }
+    }
+
+    private suspend fun loadLibrariesPass(reload: Boolean) {
+        _uiState.update {
+            it.copy(
+                isLoadingLibraries = true,
+                librariesError = null,
+            )
+        }
+
+        // Once a list is known, every load confirms a shrink before trusting
+        // it (a short list is the failure this screen recovers from); a real
+        // removal (revoked access, deleted library) repeats and applies. Only
+        // the first load may fall back to the offline cache.
+        val known = serverLibraries
+        val fetched = if (reload && known.isEmpty()) {
+            personalDataRepository.listUserLibraries()
+        } else {
+            personalDataRepository.recheckUserLibraries(known.mapTo(mutableSetOf()) { it.id })
+        }
+        // A transient failure re-shows the known list, re-filtered so a Show
+        // Audiobooks change or a newly hidden library still applies. Auth
+        // failures fall through and clear it.
+        val result = if (fetched.canServeCache() && known.isNotEmpty()) {
+            ApiResult.Success(personalDataRepository.withoutHidden(known))
+        } else {
+            fetched
+        }
+        when (result) {
+            is ApiResult.Success -> {
+                serverLibraries = result.data
+                // Libraries is the unified hub for every library type
+                // (video / audio / reading). The selector lists them all
+                // and ItemDetail routes each item to the right player or
+                // reader by its type.
+                val libraries = result.data
+                    .filterNot(::isHiddenAudiobookLibrary)
+                    .sortedBy { library -> library.sortOrder }
+                // Recovering from an emptied list (an earlier failure
+                // cleared it, sections included) owes a content reload too.
+                val recovering = _uiState.value.libraries.isEmpty()
+                val previousLibraryId = _uiState.value.selectedLibraryId
+                val selectedLibraryId = previousLibraryId
+                    ?.takeIf { currentId -> libraries.any { it.id == currentId } }
+                    ?: libraries.firstOrNull()?.id
+                // A *new* selection (first load, or the prior library
+                // vanished) gets the same reset as selectLibrary. An
+                // unchanged selection keeps its rows and active filters.
+                // A mixed library keeps its Movies/Series scope across a list
+                // refresh; a library that stops being mixed drops it.
+                val previousScope = _uiState.value.mediaScope
+                val mediaScope = libraries.firstOrNull { it.id == selectedLibraryId }
+                    ?.let(::defaultMediaScope)
+                    ?.let { default -> if (selectedLibraryId == previousLibraryId) previousScope ?: default else default }
+                val selectionChanged = selectedLibraryId != previousLibraryId || mediaScope != previousScope
+                if (selectionChanged) resetForLibrary(selectedLibraryId, mediaScope)
+                _uiState.update {
+                    it.copy(
+                        isLoadingLibraries = false,
+                        libraries = libraries,
+                        librariesError = null,
+                    )
+                }
+
+                if (selectedLibraryId != null && (reload || selectionChanged || recovering)) {
+                    loadCurrentTab(selectedLibraryId, force = true)
+                }
+            }
+            is ApiResult.Error -> {
+                // Revoked access drops the baseline; a transient failure keeps
+                // it, since hidden libraries can outlive an empty screen.
+                if (!result.canServeCache()) serverLibraries = emptyList()
+                _uiState.update {
+                    it.copy(
+                        isLoadingLibraries = false,
+                        libraries = emptyList(),
+                        sections = emptyList(),
+                        librariesError = result.errorText(CommonR.string.library_error_loadLibraries),
+                    )
+                }
+            }
+            is ApiResult.NetworkError -> {
+                _uiState.update {
+                    it.copy(
+                        isLoadingLibraries = false,
+                        libraries = emptyList(),
+                        sections = emptyList(),
+                        librariesError = result.detailedErrorText(),
+                    )
+                }
+            }
+        }
+    }
+
+    private fun refreshAfterLanguageChange() {
+        recommendedJob?.cancel()
+        recommendedLoadedLibraryId = null
+        browseLoadedLibraryId = null
+        collectionsLoadedLibraryId = null
+        ++recommendedRequestGeneration
+        ++catalogRequestGeneration
+        ++catalogQueryGeneration
+        ++collectionsRequestGeneration
+        catalogContinuation = null
+        _uiState.update {
+            it.copy(
+                sections = emptyList(),
+                catalogItems = emptyList(),
+                collections = emptyList(),
+                availableFilters = null,
+                isLoadingSections = false,
+                isLoadingCatalog = false,
+                isLoadingMoreCatalog = false,
+                isLoadingCollections = false,
+            )
+        }
+        refresh()
+    }
+
+    /**
+     * The server reported an access change: the library list, sections,
+     * titles, facets, and collections may all differ under the new policy.
+     * Forget which subtabs are loaded and the cached facets, then reload the
+     * library list and the visible subtab; the others reload when opened.
+     */
+    fun refreshAfterAccessChange() {
+        recommendedLoadedLibraryId = null
+        browseLoadedLibraryId = null
+        collectionsLoadedLibraryId = null
+        // A facet load still in flight was answered under the old policy;
+        // without a new query generation it would refill the facets cleared
+        // here, and Browse would not fetch them again.
+        ++catalogQueryGeneration
+        _uiState.update { it.copy(availableFilters = null) }
+        refresh()
+    }
+
+    fun selectLibrary(libraryId: Int) {
+        if (_uiState.value.selectedLibraryId == libraryId) return
+        val library = _uiState.value.libraries.firstOrNull { it.id == libraryId }
+        resetForLibrary(libraryId, library?.let(::defaultMediaScope))
+        loadCurrentTab(libraryId, force = true)
+    }
+
+    fun selectMediaScope(mediaScope: String) {
+        val state = _uiState.value
+        if (mediaScope !in setOf("movie", "series") || state.mediaScope == null || state.mediaScope == mediaScope) return
+        val libraryId = state.selectedLibraryId ?: return
+        resetForLibrary(libraryId, mediaScope)
+        loadCurrentTab(libraryId, force = true)
+    }
+
+    /** A mixed library opens on Movies; other libraries have no media scope. */
+    private fun defaultMediaScope(library: UserLibrary): String? =
+        if (library.type.trim().lowercase() == "mixed") "movie" else null
+
+    /**
+     * Point the state at [libraryId] and [mediaScope], dropping the previous
+     * selection's rows, filter vocabulary and letter, and invalidating its
+     * in-flight requests. Restores this library and scope's persisted
+     * filter/sort state (iOS parity) so a preserved selection doesn't flash the
+     * unfiltered grid; defaults to a clean filter — and therefore
+     * RecentlyAdded — when nothing is saved.
+     */
+    private fun resetForLibrary(libraryId: Int?, mediaScope: String?) {
+        recommendedJob?.cancel()
+        recommendedLoadedLibraryId = null
+        browseLoadedLibraryId = null
+        collectionsLoadedLibraryId = null
+        ++recommendedRequestGeneration
+        ++catalogRequestGeneration
+        ++catalogQueryGeneration
+        ++collectionsRequestGeneration
+        catalogContinuation = null
+        val restoredFilterState = libraryId?.let { browsePrefs?.savedState(it, mediaScope) } ?: CatalogFilterState()
+        _uiState.update {
+            it.copy(
+                selectedLibraryId = libraryId,
+                mediaScope = mediaScope,
+                sections = emptyList(),
+                sectionsError = null,
+                isLoadingSections = false,
+                catalogItems = emptyList(),
+                catalogTotal = 0,
+                catalogHasMore = false,
+                isLoadingCatalog = false,
+                isLoadingMoreCatalog = false,
+                filterState = restoredFilterState,
+                browseSort = LibraryBrowseSort.fromFilterState(restoredFilterState),
+                availableFilters = null,
+                preserveFilters = libraryId?.let { id -> browsePrefs?.preserveEnabled(id, mediaScope) } ?: true,
+                selectedNamePrefix = null,
+                catalogError = null,
+                collections = emptyList(),
+                collectionsError = null,
+                isLoadingCollections = false,
+            )
+        }
+    }
+
+    fun selectTab(tab: LibrariesSubtab) {
+        if (_uiState.value.selectedTab == tab) return
+        _uiState.update { it.copy(selectedTab = tab) }
+        _uiState.value.selectedLibraryId?.let { loadCurrentTab(it, force = false) }
+    }
+
+    /** Apply a new facet/match filter selection, persist it (when preserve is
+     *  on), and reload the catalog. Mirrors BrowseViewModel.applyFilterState. */
+    fun applyFilterState(state: CatalogFilterState) {
+        val current = _uiState.value.filterState
+        // [selectBrowseSort] owns sort/order. Callers derive `state` from a
+        // composition snapshot that can be a frame stale — the Reset control
+        // changes the sort and clears the facets in the same frame — so take
+        // only the facet/match parts and keep the sort already committed here.
+        val reconciled = state.copy(sort = current.sort, order = current.order)
+        if (reconciled == current) return
+        _uiState.update {
+            it.copy(
+                filterState = reconciled,
+                catalogItems = emptyList(),
+                catalogTotal = 0,
+                catalogHasMore = false,
+            )
+        }
+        browsePrefs?.saveState(_uiState.value.selectedLibraryId, reconciled, _uiState.value.mediaScope)
+        _uiState.value.selectedLibraryId?.let { loadCatalog(it, reset = true, force = true) }
+    }
+
+    fun setPreserveFilters(enabled: Boolean) {
+        val libraryId = _uiState.value.selectedLibraryId
+        browsePrefs?.setPreserveEnabled(libraryId, enabled, _uiState.value.mediaScope)
+        _uiState.update { it.copy(preserveFilters = enabled) }
+        if (enabled) browsePrefs?.saveState(libraryId, _uiState.value.filterState, _uiState.value.mediaScope)
+    }
+
+    fun selectBrowseSort(sort: LibraryBrowseSort) {
+        // The sort rides the persisted filter state so "Preserve sort & filters"
+        // actually restores it, instead of the chips coming back while the sort
+        // snaps to Recently Added.
+        val nextFilterState = _uiState.value.filterState.copy(
+            sort = sort.sortField,
+            order = sort.sortOrder,
+        )
+        _uiState.update {
+            it.copy(
+                browseSort = sort,
+                filterState = nextFilterState,
+                catalogItems = emptyList(),
+                catalogTotal = 0,
+                catalogHasMore = false,
+            )
+        }
+        browsePrefs?.saveState(_uiState.value.selectedLibraryId, nextFilterState, _uiState.value.mediaScope)
+        _uiState.value.selectedLibraryId?.let { loadCatalog(it, reset = true, force = true) }
+    }
+
+    fun selectNamePrefix(prefix: String?) {
+        val normalizedPrefix = normalizeCatalogNamePrefix(prefix)
+        if (_uiState.value.selectedNamePrefix == normalizedPrefix) return
+        _uiState.update {
+            it.copy(
+                selectedNamePrefix = normalizedPrefix,
+                catalogItems = emptyList(),
+                catalogTotal = 0,
+                catalogHasMore = false,
+            )
+        }
+        _uiState.value.selectedLibraryId?.let { loadCatalog(it, reset = true, force = true) }
+    }
+
+    fun selectViewDensity(density: CatalogViewDensity) {
+        if (_uiState.value.catalogDensity == density) return
+        _uiState.update { it.copy(catalogDensity = density) }
+    }
+
+    fun loadMoreCatalog() {
+        val state = _uiState.value
+        val libraryId = state.selectedLibraryId ?: return
+        if (state.catalogError != null || state.isLoadingCatalog || state.isLoadingMoreCatalog || !state.catalogHasMore) return
+        loadCatalog(libraryId, reset = false, force = true)
+    }
+
+    private fun loadCurrentTab(libraryId: Int, force: Boolean) {
+        when (_uiState.value.selectedTab) {
+            LibrariesSubtab.Recommended -> loadRecommended(libraryId, force)
+            LibrariesSubtab.Browse -> loadCatalog(libraryId, reset = true, force = force)
+            LibrariesSubtab.Collections -> loadCollections(libraryId, force)
+        }
+    }
+
+    fun showBrowseFromRecommended() {
+        _uiState.update { it.copy(selectedTab = LibrariesSubtab.Browse) }
+        _uiState.value.selectedLibraryId?.let { loadCatalog(it, reset = true, force = false) }
+    }
+
+    fun retryCurrentTab() {
+        _uiState.value.selectedLibraryId?.let { loadCurrentTab(it, force = true) }
+    }
+
+    private fun loadRecommended(libraryId: Int, force: Boolean) {
+        if (!force && recommendedLoadedLibraryId == libraryId) return
+        recommendedLoadedLibraryId = libraryId
+        val mediaScope = _uiState.value.mediaScope
+        val requestGeneration = ++recommendedRequestGeneration
+        recommendedJob?.cancel()
+        recommendedJob = viewModelScope.launch {
+            if (!isRecommendedRequestCurrent(requestGeneration, libraryId)) return@launch
+            _uiState.update {
+                if (isRecommendedRequestCurrent(requestGeneration, libraryId, it)) {
+                    it.copy(
+                        isLoadingSections = true,
+                        sectionsError = null,
+                        sections = emptyList(),
+                    )
+                } else {
+                    it
+                }
+            }
+
+            val owner = sectionRepository.captureLibrarySectionAuthority()
+            if (!isRecommendedRequestCurrent(requestGeneration, libraryId)) return@launch
+            if (owner == null) {
+                recommendedLoadedLibraryId = null
+                _uiState.update { it.copy(isLoadingSections = false, sections = emptyList(), sectionsError = UiText.Res(CommonR.string.library_error_signInForSections)) }
+                return@launch
+            }
+            val result = sectionRepository.getLibrarySections(libraryId, owner)
+            val valid = sectionRepository.isLibrarySectionAuthorityCurrent(owner)
+            if (!isRecommendedRequestCurrent(requestGeneration, libraryId) || !kotlinx.coroutines.currentCoroutineContext().isActive) return@launch
+            if (!valid) {
+                recommendedLoadedLibraryId = null
+                _uiState.update { it.copy(isLoadingSections = false, sections = emptyList()) }
+                return@launch
+            }
+            when (result) {
+                is ApiResult.Success -> {
+                    val permits = Semaphore(3)
+                    val scoped = result.data.sections.map { section ->
+                        async {
+                            permits.withPermit {
+                                scopeLibrarySection(section, mediaScope) { cursor ->
+                                    currentCoroutineContext().ensureActive()
+                                    sectionRepository.getLibrarySectionCatalogItems(libraryId, section.id, owner, cursor)
+                                }
+                            }
+                        }
+                    }.awaitAll()
+                    if (!isRecommendedRequestCurrent(requestGeneration, libraryId)) return@launch
+                    if (!sectionRepository.isLibrarySectionAuthorityCurrent(owner)) {
+                        recommendedLoadedLibraryId = null
+                        _uiState.update { it.copy(isLoadingSections = false, sections = emptyList()) }
+                        return@launch
+                    }
+                    _uiState.update {
+                        if (isRecommendedRequestCurrent(requestGeneration, libraryId, it)) {
+                            it.copy(
+                                isLoadingSections = false,
+                                sections = scoped.map { it.section }.filter { it.items.isNotEmpty() },
+                                sectionsError = if (scoped.any { it.incomplete }) {
+                                    UiText.Res(CommonR.string.library_error_someShelves)
+                                } else {
+                                    null
+                                },
+                            )
+                        } else {
+                            it
+                        }
+                    }
+                }
+                is ApiResult.Error -> {
+                    if (!isRecommendedRequestCurrent(requestGeneration, libraryId)) return@launch
+                    _uiState.update {
+                        if (isRecommendedRequestCurrent(requestGeneration, libraryId, it)) {
+                            it.copy(
+                                isLoadingSections = false,
+                                sections = emptyList(),
+                                sectionsError = result.errorText(CommonR.string.library_error_loadRecommendations),
+                            )
+                        } else {
+                            it
+                        }
+                    }
+                }
+                is ApiResult.NetworkError -> {
+                    if (!isRecommendedRequestCurrent(requestGeneration, libraryId)) return@launch
+                    _uiState.update {
+                        if (isRecommendedRequestCurrent(requestGeneration, libraryId, it)) {
+                            it.copy(
+                                isLoadingSections = false,
+                                sections = emptyList(),
+                                sectionsError = result.detailedErrorText(),
+                            )
+                        } else {
+                            it
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun loadCatalog(libraryId: Int, reset: Boolean, force: Boolean) {
+        if (reset && !force && browseLoadedLibraryId == libraryId && _uiState.value.catalogItems.isNotEmpty()) {
+            return
+        }
+        browseLoadedLibraryId = libraryId
+        val requestState = _uiState.value
+        val requestIdentity = CatalogRequestIdentity(
+            libraryId = libraryId,
+            mediaScope = requestState.mediaScope,
+            browseSort = requestState.browseSort,
+            selectedNamePrefix = requestState.selectedNamePrefix,
+            filterState = requestState.filterState,
+        )
+        val requestGeneration = ++catalogRequestGeneration
+        val queryGeneration =
+            if (reset) ++catalogQueryGeneration else catalogQueryGeneration
+        val offset = if (reset) 0 else requestState.catalogItems.size
+        viewModelScope.launch {
+            if (!isCatalogRequestCurrent(requestGeneration, requestIdentity)) return@launch
+
+            if (reset && requestState.availableFilters == null) {
+                launch {
+                    // includeTechnical: resolution + audio/subtitle-language facets
+                    // are only fetched on request (iOS parity). Keep the FULL
+                    // response so the filter sheet has every facet, not just genres.
+                    when (val filters = catalogRepository.getFilters(libraryId, includeTechnical = true)) {
+                        is ApiResult.Success -> {
+                            if (!isCatalogQueryCurrent(queryGeneration, requestIdentity)) {
+                                return@launch
+                            }
+                            _uiState.update {
+                                if (isCatalogQueryCurrent(queryGeneration, requestIdentity, it)) {
+                                    it.copy(availableFilters = filters.data)
+                                } else {
+                                    it
+                                }
+                            }
+                        }
+                        else -> Unit
+                    }
+                }
+            }
+
+            _uiState.update {
+                if (!isCatalogRequestCurrent(requestGeneration, requestIdentity, it)) {
+                    it
+                } else if (reset) {
+                    it.copy(isLoadingCatalog = true, isLoadingMoreCatalog = false, catalogError = null, catalogLibraryHasItems = null)
+                } else {
+                    it.copy(isLoadingMoreCatalog = true, catalogError = null)
+                }
+            }
+
+            when (
+                val result = catalogRepository.browse(
+                    libraryId = libraryId,
+                    mediaType = requestState.mediaScope,
+                    sort = requestState.browseSort.sortField,
+                    order = requestState.browseSort.sortOrder,
+                    continuation = if (reset) null else catalogContinuation,
+                    limit = pageSize,
+                    namePrefix = requestState.selectedNamePrefix,
+                    // Full facet filtering (genre/decade/rating/studio/language/...)
+                    // via the shared query builder — replaces the single-genre param.
+                    queryGroups = CatalogFilterQueryBuilder.buildGroups(requestState.filterState),
+                    match = CatalogFilterQueryBuilder.matchParam(requestState.filterState)
+                        .takeIf { requestState.filterState.hasActiveFilters },
+                )
+            ) {
+                is ApiResult.Success -> {
+                    // Overlay local optimistic watched/favorite (mirrors Home/Browse).
+                    val overlaid = overlayLocalState(result.data.items)
+                    if (!isCatalogRequestCurrent(requestGeneration, requestIdentity)) return@launch
+                    // An empty first page only says this view matched nothing (#451).
+                    // With nothing narrowing it, the page was the whole library;
+                    // otherwise one unfiltered item decides. A Movies/Series view
+                    // of a mixed library asks within that type, as Apple does.
+                    // Loading stays up meanwhile, so the wrong message never flashes.
+                    val libraryHasItems = when {
+                        !reset || overlaid.isNotEmpty() -> null
+                        !requestState.filterState.hasActiveFilters && requestState.selectedNamePrefix == null -> false
+                        else -> catalogRepository.libraryHasItems(libraryId, requestState.mediaScope)
+                    }
+                    if (!isCatalogRequestCurrent(requestGeneration, requestIdentity)) return@launch
+                    catalogContinuation = result.data.continuation
+                    // Audiobook libraries expose book-native facets
+                    // (author/narrator/series) — detected from the first item.
+                    val detectedMediaType = overlaid.firstOrNull()?.let { first ->
+                        if (isAudiobookItemType(first.type)) {
+                            BrowseFacetMediaType.Audiobook
+                        } else {
+                            BrowseFacetMediaType.Video
+                        }
+                    }
+                    _uiState.update {
+                        if (isCatalogRequestCurrent(requestGeneration, requestIdentity, it)) {
+                            it.copy(
+                                isLoadingCatalog = false,
+                                isLoadingMoreCatalog = false,
+                                catalogItems = if (reset) overlaid else it.catalogItems + overlaid,
+                                catalogTotal = result.data.total,
+                                catalogHasMore = result.data.hasMore,
+                                catalogLibraryHasItems = if (reset) libraryHasItems else it.catalogLibraryHasItems,
+                                browseMediaType = detectedMediaType ?: it.browseMediaType,
+                                catalogError = null,
+                            )
+                        } else {
+                            it
+                        }
+                    }
+                }
+                is ApiResult.Error -> {
+                    if (!isCatalogRequestCurrent(requestGeneration, requestIdentity)) return@launch
+                    _uiState.update {
+                        if (isCatalogRequestCurrent(requestGeneration, requestIdentity, it)) {
+                            it.copy(
+                                isLoadingCatalog = false,
+                                isLoadingMoreCatalog = false,
+                                catalogError = result.errorText(CommonR.string.library_error_loadCatalog),
+                            )
+                        } else {
+                            it
+                        }
+                    }
+                }
+                is ApiResult.NetworkError -> {
+                    if (!isCatalogRequestCurrent(requestGeneration, requestIdentity)) return@launch
+                    _uiState.update {
+                        if (isCatalogRequestCurrent(requestGeneration, requestIdentity, it)) {
+                            it.copy(
+                                isLoadingCatalog = false,
+                                isLoadingMoreCatalog = false,
+                                catalogError = result.detailedErrorText(),
+                            )
+                        } else {
+                            it
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** Overlay local optimistic watched/favorite onto the library grid (local
+     *  non-null wins), so an offline mutation shows immediately. Mirrors Home/
+     *  Browse. No-op on the default port. */
+    private suspend fun overlayLocalState(items: List<BrowseItem>): List<BrowseItem> {
+        val ids = items.map { it.contentId }.distinct()
+        if (ids.isEmpty()) return items
+        val local = userItemState.localContentStates(ids)
+        if (local.isEmpty()) return items
+        return items.map { item ->
+            val ls = local[item.contentId] ?: return@map item
+            val base = item.userState ?: MediaItemUserState()
+            item.copy(
+                userState = base.copy(
+                    played = ls.watched ?: base.played,
+                    isFavorite = ls.favorite ?: base.isFavorite,
+                ),
+            )
+        }
+    }
+
+    private fun loadCollections(libraryId: Int, force: Boolean) {
+        if (!force && collectionsLoadedLibraryId == libraryId && _uiState.value.collections.isNotEmpty()) {
+            return
+        }
+        collectionsLoadedLibraryId = libraryId
+        val requestGeneration = ++collectionsRequestGeneration
+        viewModelScope.launch {
+            if (!isCollectionsRequestCurrent(requestGeneration, libraryId)) return@launch
+            _uiState.update {
+                if (isCollectionsRequestCurrent(requestGeneration, libraryId, it)) {
+                    it.copy(
+                        isLoadingCollections = true,
+                        collectionsError = null,
+                        collections = emptyList(),
+                    )
+                } else {
+                    it
+                }
+            }
+            when (val result = sectionRepository.getLibraryCollections(libraryId)) {
+                is ApiResult.Success -> {
+                    if (!isCollectionsRequestCurrent(requestGeneration, libraryId)) return@launch
+                    _uiState.update {
+                        if (isCollectionsRequestCurrent(requestGeneration, libraryId, it)) {
+                            it.copy(
+                                isLoadingCollections = false,
+                                collections = result.data,
+                                collectionsError = null,
+                            )
+                        } else {
+                            it
+                        }
+                    }
+                }
+                is ApiResult.Error -> {
+                    if (!isCollectionsRequestCurrent(requestGeneration, libraryId)) return@launch
+                    _uiState.update {
+                        if (isCollectionsRequestCurrent(requestGeneration, libraryId, it)) {
+                            it.copy(
+                                isLoadingCollections = false,
+                                collectionsError = result.errorText(CommonR.string.collections_error_loadCollections),
+                            )
+                        } else {
+                            it
+                        }
+                    }
+                }
+                is ApiResult.NetworkError -> {
+                    if (!isCollectionsRequestCurrent(requestGeneration, libraryId)) return@launch
+                    _uiState.update {
+                        if (isCollectionsRequestCurrent(requestGeneration, libraryId, it)) {
+                            it.copy(
+                                isLoadingCollections = false,
+                                collectionsError = result.detailedErrorText(),
+                            )
+                        } else {
+                            it
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun isRecommendedRequestCurrent(
+        generation: Long,
+        libraryId: Int,
+        state: LibrariesUiState = _uiState.value,
+    ): Boolean =
+        generation == recommendedRequestGeneration && state.selectedLibraryId == libraryId
+
+    private fun isCatalogRequestCurrent(
+        generation: Long,
+        identity: CatalogRequestIdentity,
+        state: LibrariesUiState = _uiState.value,
+    ): Boolean =
+        generation == catalogRequestGeneration &&
+            identity.matches(state)
+
+    private fun isCatalogQueryCurrent(
+        generation: Long,
+        identity: CatalogRequestIdentity,
+        state: LibrariesUiState = _uiState.value,
+    ): Boolean =
+        generation == catalogQueryGeneration &&
+            identity.matches(state)
+
+    private fun CatalogRequestIdentity.matches(state: LibrariesUiState): Boolean =
+        state.selectedLibraryId == libraryId &&
+            state.mediaScope == mediaScope &&
+            state.browseSort == browseSort &&
+            state.selectedNamePrefix == selectedNamePrefix &&
+            state.filterState == filterState
+
+    private fun isCollectionsRequestCurrent(
+        generation: Long,
+        libraryId: Int,
+        state: LibrariesUiState = _uiState.value,
+    ): Boolean =
+        generation == collectionsRequestGeneration && state.selectedLibraryId == libraryId
+
+    private data class CatalogRequestIdentity(
+        val libraryId: Int,
+        val mediaScope: String?,
+        val browseSort: LibraryBrowseSort,
+        val selectedNamePrefix: String?,
+        val filterState: CatalogFilterState,
+    )
+}
+
+@Composable
+fun LibrariesScreen(
+    onItemClick: (String, Int?) -> Unit,
+    onCollectionClick: (LibraryCollection, Int, String?) -> Unit,
+    /** Opens a Recommended row's full page: the row, its library, and the Movies/Series scope. */
+    onExploreSection: ((ResolvedSection, Int, String?) -> Unit)? = null,
+    viewModel: LibrariesViewModel,
+    activeProfile: Profile?,
+    remoteControl: TopBarRemoteControl,
+    onLibrarySelectorClick: () -> Unit,
+    onSearchClick: () -> Unit,
+    onRequestsClick: (() -> Unit)?,
+    onWatchPartyClick: (() -> Unit)?,
+    onSettingsClick: () -> Unit,
+    onSwitchProfileClick: () -> Unit,
+    onChangeAccountClick: () -> Unit,
+    onSignOutClick: (removeServer: Boolean) -> Unit,
+    shuffleLauncher: org.siloserver.silo.common.ui.ShuffleLauncher? = null,
+    modifier: Modifier = Modifier,
+) {
+    val state by viewModel.uiState.collectAsState()
+    val selectedLibrary = state.libraries.firstOrNull { it.id == state.selectedLibraryId }
+    // Movie, TV, and mixed libraries shuffle from the Browse tab when the
+    // server offers it.
+    // A Movies- or Series-scoped mixed library offers no shuffle: a shuffle
+    // request carries no media type, so it would draw from both.
+    val onShuffle = selectedLibrary
+        ?.takeIf { state.selectedTab == LibrariesSubtab.Browse }
+        ?.takeIf { state.mediaScope == null }
+        ?.takeIf { org.siloserver.silo.model.shuffle.isShuffleLibraryType(it.type) }
+        ?.takeIf { shuffleLauncher?.supports(org.siloserver.silo.model.shuffle.ShuffleScopeKind.LIBRARY) == true }
+        ?.let { library ->
+            {
+                shuffleLauncher?.start(org.siloserver.silo.model.shuffle.ShuffleScopeKind.LIBRARY, library.id.toString())
+                Unit
+            }
+        }
+
+    // Re-check the library list on every resume: entering the tab (the observer
+    // replays ON_RESUME when added) and returning to the app. The VM loads once
+    // and outlives tab switches, so a short list otherwise stuck until restart.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, viewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) viewModel.refreshLibraryList()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    // A library hidden or shown on another device lands on foreground, which
+    // can be after this resume's re-check; re-check again when it does.
+    val hiddenLibrariesRevision by viewModel.hiddenLibrariesRevision.collectAsState()
+    LaunchedEffect(viewModel, hiddenLibrariesRevision) {
+        viewModel.onHiddenLibrariesRevision(hiddenLibrariesRevision)
+    }
+
+    // Recommended tab scroll state — drives the chrome scrim opacity so the
+    // header fades in its scrim once the user scrolls the rows underneath it.
+    val recommendedListState = rememberLazyListState()
+    LaunchedEffect(state.selectedLibraryId, state.mediaScope) { recommendedListState.scrollToItem(0) }
+    val density = LocalDensity.current
+    val chromeFadePx = remember(density) {
+        with(density) { TopBarGlassFadeDistance.toPx() }
+    }
+    val recommendedScrollProgress by remember(chromeFadePx) {
+        derivedStateOf {
+            if (recommendedListState.firstVisibleItemIndex > 0) {
+                1f
+            } else {
+                (recommendedListState.firstVisibleItemScrollOffset / chromeFadePx).coerceIn(0f, 1f)
+            }
+        }
+    }
+    val chromeScrimProgress = if (state.selectedTab == LibrariesSubtab.Recommended) {
+        recommendedScrollProgress
+    } else {
+        1f
+    }
+
+    // The chrome floats over the content, which scrolls up beneath its
+    // feathered glass edge. Its height is measured (the selector wraps to two
+    // lines) and handed to each subtab as the inset its own top must clear.
+    val chromeHaze = rememberHazeState()
+    var chromeHeightPx by remember { mutableIntStateOf(0) }
+    val chromeHeight = with(density) { chromeHeightPx.toDp() }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+    ) {
+        LibraryContentViewport(
+            modifier = Modifier
+                .fillMaxSize()
+                // Background inside the source so the glass captures an
+                // opaque scene rather than compositing over the sharp content.
+                .hazeSource(chromeHaze)
+                .siloPageBackdrop()
+                .clipToBounds(),
+        ) {
+            // Hold content until the chrome has been measured once so the
+            // first frame does not lay rows out under the header and jump.
+            if (chromeHeightPx > 0) {
+                val topInset = chromeHeight
+                when {
+                    state.isLoadingLibraries && state.libraries.isEmpty() -> {
+                        Box(
+                            modifier = Modifier.fillMaxSize().padding(top = topInset),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            CircularProgressIndicator()
+                        }
+                    }
+                    state.librariesError != null && state.libraries.isEmpty() -> {
+                        ErrorView(
+                            message = state.librariesError?.text() ?: stringResource(CommonR.string.library_error_loadLibraries),
+                            onRetry = viewModel::refresh,
+                            modifier = Modifier.fillMaxSize().padding(top = topInset),
+                        )
+                    }
+                    selectedLibrary == null -> {
+                        EmptyStateView(
+                            title = stringResource(CommonR.string.library_noLibraries),
+                            subtitle = stringResource(CommonR.string.library_noLibrariesBody),
+                            icon = Icons.Default.VideoLibrary,
+                            modifier = Modifier.fillMaxSize().padding(top = topInset),
+                        )
+                    }
+                    state.selectedTab == LibrariesSubtab.Recommended -> {
+                        RecommendedTabContent(
+                            state = state,
+                            listState = recommendedListState,
+                            topInset = topInset,
+                            onItemClick = { onItemClick(it, state.selectedLibraryId) },
+                            onRetry = viewModel::retryCurrentTab,
+                            onExploreSection = state.selectedLibraryId?.let { libraryId ->
+                                onExploreSection?.let { open -> { section -> open(section, libraryId, state.mediaScope) } }
+                            },
+                        )
+                    }
+                    state.selectedTab == LibrariesSubtab.Browse -> {
+                        BrowseTabContent(
+                            state = state,
+                            topInset = topInset,
+                            onItemClick = { onItemClick(it, state.selectedLibraryId) },
+                            onRetry = viewModel::retryCurrentTab,
+                            onLoadMore = viewModel::loadMoreCatalog,
+                            onSortChanged = viewModel::selectBrowseSort,
+                            onNamePrefixChanged = viewModel::selectNamePrefix,
+                            onDensityChanged = viewModel::selectViewDensity,
+                            onApplyFilter = viewModel::applyFilterState,
+                            onSetPreserve = viewModel::setPreserveFilters,
+                        )
+                    }
+                    else -> {
+                        CollectionsTabContent(
+                            state = state,
+                            topInset = topInset,
+                            onCollectionClick = { collection ->
+                                state.selectedLibraryId?.let { libraryId ->
+                                    onCollectionClick(collection, libraryId, state.mediaScope)
+                                }
+                            },
+                            onRetry = viewModel::retryCurrentTab,
+                        )
+                    }
+                }
+            }
+        }
+
+        LibrariesFloatingChrome(
+            scrimProgress = chromeScrimProgress,
+            hazeState = chromeHaze,
+            selectedLibrary = selectedLibrary,
+            canSwitch = state.libraries.size > 1,
+            activeProfile = activeProfile,
+            remoteControl = remoteControl,
+            selectedTab = state.selectedTab,
+            mediaScope = state.mediaScope,
+            onMediaScopeSelected = viewModel::selectMediaScope,
+            onLibrarySelectorClick = onLibrarySelectorClick,
+            onTabSelected = viewModel::selectTab,
+            onSearchClick = onSearchClick,
+            onRequestsClick = onRequestsClick,
+            onWatchPartyClick = onWatchPartyClick,
+            onSettingsClick = onSettingsClick,
+            onSwitchProfileClick = onSwitchProfileClick,
+            onChangeAccountClick = onChangeAccountClick,
+            onSignOutClick = onSignOutClick,
+            onShuffleClick = onShuffle,
+            shuffleEnabled = shuffleLauncher?.isStarting != true,
+            modifier = Modifier.onSizeChanged { chromeHeightPx = it.height },
+        )
+    }
+}
+
+@Composable
+private fun LibraryContentViewport(
+    modifier: Modifier = Modifier,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    Box(
+        modifier = modifier.fillMaxWidth(),
+        content = content,
+    )
+}
+
+@Composable
+private fun RecommendedTabContent(
+    state: LibrariesUiState,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    topInset: Dp,
+    onItemClick: (String) -> Unit,
+    onRetry: () -> Unit,
+    onExploreSection: ((ResolvedSection) -> Unit)? = null,
+) {
+    val diagnosticsListSnapshot = remember(state.sections) {
+        DiagnosticsListSnapshot.fromKeys(
+            keys = state.sections.map { it.id },
+            rowKeys = state.sections.map { section -> section.items.map { it.contentId } },
+        )
+    }
+    LaunchedEffect(diagnosticsListSnapshot, state.isLoadingSections) {
+        if (!state.isLoadingSections && state.sections.isNotEmpty()) {
+            DiagnosticsListLogger.snapshot(
+                DiagnosticsListSurface.PHONE_LIBRARY_RECOMMENDED,
+                diagnosticsListSnapshot,
+            )
+        }
+    }
+    when {
+        state.isLoadingSections && state.sections.isEmpty() -> {
+            MediaRowsSkeleton(
+                modifier = Modifier.fillMaxSize().padding(top = topInset),
+            )
+        }
+        state.sectionsError != null && state.sections.isEmpty() -> {
+            ErrorView(
+                message = state.sectionsError?.text() ?: stringResource(CommonR.string.library_error_loadRecommendations),
+                onRetry = onRetry,
+                modifier = Modifier.fillMaxSize().padding(top = topInset),
+            )
+        }
+        state.sections.isEmpty() -> {
+            EmptyStateView(
+                title = stringResource(CommonR.string.library_noRecommendations),
+                subtitle = stringResource(CommonR.string.library_noRecommendationsBody),
+                icon = libraryIcon(state.libraries.firstOrNull { it.id == state.selectedLibraryId }?.type.orEmpty()),
+                modifier = Modifier.fillMaxSize().padding(top = topInset),
+            )
+        }
+        else -> {
+            // No hero carousel (matches iOS): a `featured` section is just
+            // another row, kept in the order the server configured it.
+            // iOS `LibraryRecommendedView`: LazyVStack(spacing: largePadding = 24)
+            // between section rows.
+            DeferImagePresentationWhileScrolling(listState) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                // Rows start below the floating chrome and scroll up under it.
+                // The chrome already ends at TabContentTop, where Home's first
+                // row sits.
+                contentPadding = PaddingValues(top = topInset),
+                verticalArrangement = Arrangement.spacedBy(24.dp),
+            ) {
+
+                state.sectionsError?.let { sectionsError ->
+                    item(key = "scope-load-error") {
+                        Column(Modifier.padding(horizontal = 16.dp)) {
+                            Text(sectionsError.text(), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            TextButton(onClick = onRetry) { Text(stringResource(CommonR.string.common_retry)) }
+                        }
+                    }
+                }
+                items(
+                    items = state.sections,
+                    key = { section -> section.id },
+                ) { section ->
+                    HomeSectionRow(
+                        section = section,
+                        onItemClick = onItemClick,
+                        onExploreAllClick = onExploreSection?.let { open -> { open(section) } },
+                    )
+                }
+
+                item {
+                    Spacer(modifier = Modifier.height(24.dp + LocalBottomChromeInset.current))
+                }
+            }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BrowseTabContent(
+    state: LibrariesUiState,
+    topInset: Dp,
+    onItemClick: (String) -> Unit,
+    onRetry: () -> Unit,
+    onLoadMore: () -> Unit,
+    onSortChanged: (LibraryBrowseSort) -> Unit,
+    onNamePrefixChanged: (String?) -> Unit,
+    onDensityChanged: (CatalogViewDensity) -> Unit,
+    onApplyFilter: (CatalogFilterState) -> Unit,
+    onSetPreserve: (Boolean) -> Unit,
+) {
+    var showFilterSheet by remember { mutableStateOf(false) }
+    val isCustomised = state.browseSort != LibraryBrowseSort.RecentlyAdded ||
+        state.filterState.hasActiveFilters ||
+        state.selectedNamePrefix != null
+
+    // Sort ▾ / Filter (n) / Reset — the same control row as the saved lists —
+    // plus removable chips for active facets. Rendered as the grid's header
+    // so it scrolls with the content under the chrome's glass.
+    val controlsHeader: @Composable () -> Unit = {
+        Column(modifier = Modifier.padding(bottom = 4.dp)) {
+            SortFilterControlsRow(
+                sortLabel = stringResource(state.browseSort.labelRes),
+                sortActive = state.browseSort != LibraryBrowseSort.RecentlyAdded,
+                sortOptions = LibraryBrowseSort.entries.map { SortMenuOption(id = it.name, label = stringResource(it.labelRes)) },
+                selectedSortId = state.browseSort.name,
+                onSelectSort = { id -> onSortChanged(LibraryBrowseSort.valueOf(id)) },
+                filterCount = state.filterState.activeFacetCount,
+                onOpenFilters = { showFilterSheet = true },
+                showReset = isCustomised,
+                onReset = {
+                    onSortChanged(LibraryBrowseSort.RecentlyAdded)
+                    onApplyFilter(state.filterState.resetFilters())
+                    onNamePrefixChanged(null)
+                },
+            )
+            if (state.filterState.hasActiveFilters) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(top = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    CatalogFacet.available(state.browseMediaType).forEach { facet ->
+                        state.filterState.valuesFor(facet).sorted().forEach { value ->
+                            LibraryActiveFilterChip(
+                                label = facetValueLabel(facet, value),
+                                onRemove = { onApplyFilter(state.filterState.toggle(facet, value)) },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        when {
+            state.isLoadingCatalog && state.catalogItems.isEmpty() -> {
+                PosterGridSkeleton(
+                    progress = rememberShimmerProgress(),
+                    modifier = Modifier.fillMaxSize().padding(top = topInset),
+                )
+            }
+            state.catalogError != null -> {
+                // Controls stay mounted so a rejected sort/filter/letter can be
+                // changed from here rather than only retried.
+                Column(modifier = Modifier.fillMaxSize().padding(top = topInset)) {
+                    Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) { controlsHeader() }
+                    ErrorView(
+                        message = state.catalogError?.text() ?: stringResource(CommonR.string.library_error_loadCatalog),
+                        onRetry = onRetry,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            state.catalogItems.isEmpty() -> {
+                Column(modifier = Modifier.fillMaxSize().padding(top = topInset)) {
+                    Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) { controlsHeader() }
+                    EmptyStateView(
+                        title = stringResource(
+                            when (state.catalogLibraryHasItems) {
+                                false -> CommonR.string.library_empty
+                                true -> CommonR.string.library_noMatchesShort
+                                null -> if (isCustomised) CommonR.string.library_noMatchesShort else CommonR.string.library_noItems
+                            },
+                        ),
+                        subtitle = stringResource(
+                            when (state.catalogLibraryHasItems) {
+                                false -> CommonR.string.library_emptyBody
+                                true -> CommonR.string.library_noTitlesMatchFilters
+                                null -> if (isCustomised) {
+                                    CommonR.string.library_noTitlesMatchSortOrFilters
+                                } else {
+                                    CommonR.string.library_trySwitchingLibraries
+                                }
+                            },
+                        ),
+                        icon = libraryIcon(state.libraries.firstOrNull { it.id == state.selectedLibraryId }?.type.orEmpty()),
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            else -> {
+                val dateLocale = currentFormatLocale()
+                CatalogGrid(
+                    items = state.catalogItems,
+                    isLoadingMore = state.isLoadingMoreCatalog,
+                    hasMore = state.catalogHasMore,
+                    onItemClick = onItemClick,
+                    onLoadMore = onLoadMore,
+                    // Date sorts surface the sorted-by date under each card
+                    // (mirrors the standalone BrowseScreen), Jim QA 2026-07-09.
+                    cardSubtitle = when (state.browseSort.sortField) {
+                        "added_at" -> { item -> formatCardDate(item.addedAt, dateLocale) }
+                        "release_date" -> { item -> formatCardDate(item.releaseDate, dateLocale) }
+                        else -> null
+                    },
+                    selectedNamePrefix = state.selectedNamePrefix,
+                    onNamePrefixSelected = onNamePrefixChanged,
+                    viewDensity = state.catalogDensity,
+                    bottomContentInset = LocalBottomChromeInset.current,
+                    topContentInset = topInset,
+                    header = controlsHeader,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+    }
+
+    if (showFilterSheet) {
+        FilterSheet(
+            viewDensity = state.catalogDensity,
+            onSelectDensity = onDensityChanged,
+            currentFilters = state.filterState,
+            availableFilters = state.availableFilters,
+            mediaType = state.browseMediaType,
+            preserveFilters = state.preserveFilters,
+            onCommit = onApplyFilter,
+            onSetPreserve = onSetPreserve,
+            onDismiss = { showFilterSheet = false },
+        )
+    }
+}
+
+/**
+ * Removable active-filter capsule chip for the Libraries browse tab (mirrors the
+ * standalone Browse screen's private chip). Removing a chip toggles that one
+ * facet value off.
+ */
+@Composable
+private fun LibraryActiveFilterChip(
+    label: String,
+    onRemove: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Icon(
+            imageVector = Icons.Filled.Cancel,
+            contentDescription = stringResource(CommonR.string.filters_remove),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .size(14.dp)
+                .clickable(onClick = onRemove),
+        )
+    }
+}
+
+@Composable
+private fun CollectionsTabContent(
+    state: LibrariesUiState,
+    topInset: Dp,
+    onCollectionClick: (LibraryCollection) -> Unit,
+    onRetry: () -> Unit,
+) {
+    when {
+        state.isLoadingCollections && state.collections.isEmpty() -> {
+            PosterGridSkeleton(
+                progress = rememberShimmerProgress(),
+                modifier = Modifier.fillMaxSize().padding(top = topInset),
+            )
+        }
+        state.collectionsError != null && state.collections.isEmpty() -> {
+            ErrorView(
+                message = state.collectionsError?.text() ?: stringResource(CommonR.string.collections_error_loadCollections),
+                onRetry = onRetry,
+                modifier = Modifier.fillMaxSize().padding(top = topInset),
+            )
+        }
+        state.collections.isEmpty() -> {
+            EmptyStateView(
+                title = stringResource(CommonR.string.library_noCollections),
+                subtitle = stringResource(CommonR.string.library_noCollectionsBody),
+                icon = Icons.Default.VideoLibrary,
+                modifier = Modifier.fillMaxSize().padding(top = topInset),
+            )
+        }
+        else -> {
+            // iOS `LibraryCollectionsView`: adaptive poster grid with shared
+            // column/row spacing and 16pt padding insets. Follows the Library
+            // grid's view density so both tabs show the same column count.
+            val gridState = rememberLazyGridState()
+            DeferImagePresentationWhileScrolling(gridState) {
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(
+                    state.catalogDensity.minCardWidth *
+                        LocalCardPresentation.current.posterSize.posterScale,
+                ),
+                state = gridState,
+                horizontalArrangement = Arrangement.spacedBy(MediaGridDefaults.PosterGridHorizontalSpacing),
+                verticalArrangement = Arrangement.spacedBy(MediaGridDefaults.PosterGridVerticalSpacing),
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(
+                    start = 16.dp,
+                    end = 16.dp,
+                    top = topInset,
+                    bottom = 24.dp + LocalBottomChromeInset.current,
+                ),
+            ) {
+                items(
+                    items = state.collections,
+                    key = { it.id },
+                    contentType = { "library-collection" },
+                ) { collection ->
+                    InlineLibraryCollectionCard(
+                        collection = collection,
+                        showItemCount = state.mediaScope == null,
+                        onClick = { onCollectionClick(collection) },
+                    )
+                }
+            }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InlineLibraryCollectionCard(
+    collection: LibraryCollection,
+    showItemCount: Boolean,
+    onClick: () -> Unit,
+) {
+    // iOS `LibraryCollectionCard`: VStack(spacing: 6) of a 2:3.3 poster
+    // (smallCornerRadius = 6) carrying a bottom-trailing count badge, a
+    // siloCaption (12) name (2 lines), and a siloSmall (11) secondary
+    // type label; the count badge rides the artwork.
+    Column(
+        modifier = Modifier.clickable(onClick = onClick),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f))
+                .aspectRatio(2f / 3.3f),
+        ) {
+            ThumbhashImage(
+                url = collection.posterUrl,
+                thumbhash = collection.posterThumbhash,
+                contentDescription = collection.name,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+            if (showItemCount) Text(
+                text = collection.itemCount?.takeIf { it > 0 }?.let { LocaleFormat.integer(it, currentNumberLocale()) } ?: stringResource(CommonR.string.collections_type_smart),
+                fontSize = 12.sp,
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(8.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(Color.Black.copy(alpha = 0.65f))
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
+            )
+        }
+        Text(
+            text = collection.name,
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = collection.itemCount?.takeIf { showItemCount }
+                ?.let { pluralStringResource(CommonR.plurals.collections_itemCount, it, it, LocaleFormat.integer(it)) }
+                ?: stringResource(CommonR.string.collections_collection),
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun LibrariesFloatingChrome(
+    scrimProgress: Float,
+    hazeState: HazeState,
+    selectedLibrary: UserLibrary?,
+    canSwitch: Boolean,
+    activeProfile: Profile?,
+    remoteControl: TopBarRemoteControl,
+    selectedTab: LibrariesSubtab,
+    mediaScope: String?,
+    onMediaScopeSelected: (String) -> Unit,
+    onLibrarySelectorClick: () -> Unit,
+    onTabSelected: (LibrariesSubtab) -> Unit,
+    onSearchClick: () -> Unit,
+    onRequestsClick: (() -> Unit)?,
+    onWatchPartyClick: (() -> Unit)?,
+    onSettingsClick: () -> Unit,
+    onSwitchProfileClick: () -> Unit,
+    onChangeAccountClick: () -> Unit,
+    onSignOutClick: (removeServer: Boolean) -> Unit,
+    onShuffleClick: (() -> Unit)? = null,
+    shuffleEnabled: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
+    val statusBarPadding = WindowInsets.statusBars.asPaddingValues()
+    val animatedFill by animateFloatAsState(
+        targetValue = scrimProgress,
+        label = "librariesChromeFill",
+    )
+
+    Box(modifier = modifier.fillMaxWidth()) {
+        // Progressive glass, faded in by the scroll-driven opacity on the
+        // Recommended tab and always on for Browse / Collections. Its bottom
+        // edge feathers to clear so rows dissolve into the chrome.
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .graphicsLayer { alpha = animatedFill }
+                .topBarGlass(hazeState, progressive = true),
+        )
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = statusBarPadding.calculateTopPadding() + TopBarRowTopInset),
+        ) {
+        // Top row: library selector on the left, action icons on the right.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(TabHeaderRowHeight)
+                .padding(horizontal = TopBarEdgeMargin),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            LibrarySelectorButton(
+                library = selectedLibrary,
+                canSwitch = canSwitch,
+                onClick = onLibrarySelectorClick,
+                modifier = Modifier.weight(1f),
+            )
+
+            TabTopBarActions(
+                activeProfile = activeProfile,
+                remoteControl = remoteControl,
+                onSearchClick = onSearchClick,
+                onRequestsClick = onRequestsClick,
+                onWatchPartyClick = onWatchPartyClick,
+                onSettingsClick = onSettingsClick,
+                onSwitchProfileClick = onSwitchProfileClick,
+                onChangeAccountClick = onChangeAccountClick,
+                onSignOutClick = onSignOutClick,
+            )
+        }
+
+        Spacer(modifier = Modifier.height(TabHeaderPillGap))
+
+        if (mediaScope != null) {
+            Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = mediaScope == "movie", onClick = { onMediaScopeSelected("movie") }, label = { Text(stringResource(CommonR.string.filters_value_movie)) })
+                FilterChip(selected = mediaScope == "series", onClick = { onMediaScopeSelected("series") }, label = { Text(stringResource(CommonR.string.filters_value_series)) })
+            }
+        }
+
+        Box(
+            modifier = Modifier.height(TabPillRowHeight),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            LibrarySubtabRow(
+                selectedTab = selectedTab,
+                onRecommendedClick = { onTabSelected(LibrariesSubtab.Recommended) },
+                onBrowseClick = { onTabSelected(LibrariesSubtab.Browse) },
+                onCollectionsClick = { onTabSelected(LibrariesSubtab.Collections) },
+                onShuffleClick = onShuffleClick,
+                shuffleEnabled = shuffleEnabled,
+                modifier = Modifier.padding(horizontal = TopBarEdgeMargin),
+            )
+        }
+
+            Spacer(modifier = Modifier.height(TabContentGap))
+        }
+    }
+}
+
+/**
+ * Compact text-based library selector that mirrors iOS
+ * `LibrarySelectorButton` — library name with a small chevron stacked above
+ * a secondary type label. Tapping opens the picker sheet.
+ */
+@Composable
+private fun LibrarySelectorButton(
+    library: UserLibrary?,
+    canSwitch: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // iOS `LibrarySelectorButton`: VStack(spacing: 1) of a name+chevron row
+    // (siloTitle = 18pt bold) above a siloCaption (12pt) type label.
+    Column(
+        modifier = modifier
+            .clickable(enabled = canSwitch && library != null, onClick = onClick)
+            .padding(vertical = 2.dp),
+        verticalArrangement = Arrangement.spacedBy(1.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = library?.name ?: stringResource(CommonR.string.library_libraries),
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            if (canSwitch && library != null) {
+                Icon(
+                    imageVector = Icons.Default.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
+        }
+        Text(
+            text = library?.typeLabel() ?: stringResource(CommonR.string.library_chooseLibrary),
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun LibrariesSelectorSheet(
+    libraries: List<UserLibrary>,
+    selectedLibraryId: Int?,
+    onSelectLibrary: (Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val selectorSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = selectorSheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+    ) {
+        // iOS `LibraryPickerSheet`: a large "Libraries" navigation title above a
+        // ScrollView of VStack(spacing: 8) rows, with h/v padding = padding (16).
+        // The title stays put and the rows scroll, so every library is reachable
+        // when the list is taller than the screen.
+        Text(
+            text = stringResource(CommonR.string.library_libraries),
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(start = 16.dp, top = 16.dp, end = 16.dp),
+        )
+        Spacer(modifier = Modifier.height(24.dp))
+
+        LazyColumn(
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 48.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(libraries, key = { it.id }) { library ->
+                LibrarySelectorRow(
+                    library = library,
+                    isSelected = library.id == selectedLibraryId,
+                    onClick = { onSelectLibrary(library.id) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LibrarySubtabRow(
+    selectedTab: LibrariesSubtab,
+    onRecommendedClick: () -> Unit,
+    onBrowseClick: () -> Unit,
+    onCollectionsClick: () -> Unit,
+    onShuffleClick: (() -> Unit)? = null,
+    shuffleEnabled: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        LibrarySubtabChip(
+            label = stringResource(CommonR.string.library_recommended),
+            selected = selectedTab == LibrariesSubtab.Recommended,
+            onClick = onRecommendedClick,
+        )
+        LibrarySubtabChip(
+            label = stringResource(CommonR.string.library_libraryTab),
+            selected = selectedTab == LibrariesSubtab.Browse,
+            onClick = onBrowseClick,
+        )
+        LibrarySubtabChip(
+            label = stringResource(CommonR.string.library_collections),
+            selected = selectedTab == LibrariesSubtab.Collections,
+            onClick = onCollectionsClick,
+        )
+        if (onShuffleClick != null) {
+            // Starts a shuffle of the whole library; drawn as a chip so it
+            // matches the tabs beside it.
+            Surface(
+                onClick = onShuffleClick,
+                enabled = shuffleEnabled,
+                shape = RoundedCornerShape(999.dp),
+                color = SiloSurfaceElevated,
+                contentColor = MaterialTheme.colorScheme.onSurface,
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Shuffle,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Text(text = stringResource(CommonR.string.library_shufflePill), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LibrarySubtabChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    // iOS `LibraryPageTabSelector` chip: Capsule, siloCaption (12pt),
+    // selected = onSurface (white #EDEDED) fill / background (black) label and
+    // semibold weight; unselected = surfaceElevated (#15171C) fill / secondary
+    // label and regular weight. Padding h16 v8.
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(999.dp),
+        color = if (selected) {
+            MaterialTheme.colorScheme.onSurface
+        } else {
+            SiloSurfaceElevated
+        },
+        contentColor = if (selected) {
+            MaterialTheme.colorScheme.background
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        },
+    ) {
+        Text(
+            text = label,
+            fontSize = 12.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        )
+    }
+}
+
+@Composable
+private fun LibrarySelectorRow(
+    library: UserLibrary,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+) {
+    // iOS `LibraryPickerRow`: cornerRadius (8) card, selected fill onSurface@10%
+    // else surfaceElevated, hairline siloOutline (white@12%) border. Row
+    // padding h16 v14; circle 40 onSurface@12% with an 18pt icon; name
+    // siloHeadline (16) above a siloCaption (12) secondary label;
+    // a 14pt checkmark on the selected row.
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(8.dp),
+        color = if (isSelected) {
+            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f)
+        } else {
+            SiloSurfaceElevated
+        },
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        border = BorderStroke(
+            width = 1.dp,
+            color = MaterialTheme.colorScheme.outline,
+        ),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = libraryIcon(library.type),
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = library.name,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = library.typeLabel(),
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            if (isSelected) {
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
+        }
+    }
+}
+
+internal fun libraryIcon(type: String): ImageVector = when (type.lowercase()) {
+    "movies", "movie" -> Icons.Default.LocalMovies
+    "series", "tv", "shows" -> Icons.Default.Tv
+    "audiobook", "audiobooks" -> Icons.Default.Headphones
+    "book", "books", "ebook", "ebooks" -> Icons.AutoMirrored.Filled.MenuBook
+    "comic", "comics", "manga" -> Icons.Default.AutoStories
+    else -> Icons.Default.VideoLibrary
+}
+
+@Composable
+private fun UserLibrary.typeLabel(): String = stringResource(
+    when (type.lowercase()) {
+        "movies", "movie" -> CommonR.string.library_type_movies
+        "series", "tv", "shows" -> CommonR.string.library_type_tv
+        "audiobook", "audiobooks" -> CommonR.string.library_type_audiobooks
+        "book", "books", "ebook", "ebooks" -> CommonR.string.library_type_books
+        "comic", "comics", "manga" -> CommonR.string.library_type_comics
+        else -> CommonR.string.library_type_generic
+    },
+)

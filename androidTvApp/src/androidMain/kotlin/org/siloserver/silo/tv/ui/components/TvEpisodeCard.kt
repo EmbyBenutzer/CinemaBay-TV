@@ -1,0 +1,243 @@
+package org.siloserver.silo.tv.ui.components
+
+import org.siloserver.silo.common.ui.components.SpoilerImage
+import org.siloserver.silo.common.ui.components.DefaultArtworkKind
+import org.siloserver.silo.common.ui.components.ThumbhashImage
+import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.tv.material3.Card
+import androidx.tv.material3.CardDefaults
+import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.Text
+import org.siloserver.silo.common.overlays.CardOverlayVariant
+import org.siloserver.silo.common.overlays.CardOverlays
+import org.siloserver.silo.common.overlays.LocalCardOverlayUiState
+import org.siloserver.silo.overlays.OverlayData
+import org.siloserver.silo.tv.ui.theme.ProgressFill
+import org.siloserver.silo.tv.ui.theme.ProgressTrack
+import org.siloserver.silo.tv.ui.theme.RowDimens
+import org.siloserver.silo.tv.ui.theme.cardScaled
+import org.siloserver.silo.tv.ui.theme.siloCardDefaults
+import org.siloserver.silo.common.i18n.LocaleFormat
+import org.siloserver.silo.common.i18n.currentNumberLocale
+
+/**
+ * 16:9 thumbnail card for "Continue Watching", "Next Up", and episode list rows.
+ *
+ * Uses the same focus treatment as [TvMediaCard]: [siloCardDefaults] lifts and
+ * outlines the still; the caption brightens on focus.
+ * The play-button circle is an affordance rather than a hit target — the whole
+ * card is clickable and the D-pad OK button triggers [onClick].
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+fun TvEpisodeCard(
+    title: String,
+    stillUrl: String?,
+    stillThumbhash: String?,
+    onClick: () -> Unit,
+    /** Spoiler protection: blur the still of an episode not yet started. */
+    hideStill: Boolean = false,
+    modifier: Modifier = Modifier,
+    seriesTitle: String? = null,
+    year: Int? = null,
+    seasonNumber: Int? = null,
+    episodeNumber: Int? = null,
+    /** Catalog item type; picks the mark on the default artwork. */
+    mediaType: String? = null,
+    progress: Float? = null,
+    width: Dp = tvEpisodeCardWidth(),
+    focusRequester: FocusRequester? = null,
+    cardModifier: Modifier = Modifier,
+    userState: org.siloserver.silo.model.catalog.MediaItemUserState? = null,
+    overlay: OverlayData? = null,
+    actions: TvMediaCardActions = TvMediaCardActions(),
+    /**
+     * The item the card shows. A row can keep a card while its item changes;
+     * a new item closes the menu, whose actions belong to the old one.
+     */
+    contentKey: Any? = null,
+    onLongClick: (() -> Unit)? = null,
+) {
+    val overlayState = LocalCardOverlayUiState.current
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+
+    val cardShape = TvEpisodeCardShape
+    val cardFocus = siloCardDefaults(shape = cardShape)
+
+    var menuExpanded by remember(contentKey) { mutableStateOf(false) }
+
+    Column(
+        modifier = modifier.width(width),
+    ) {
+        TvMediaCardContextMenu(
+            expanded = menuExpanded,
+            onDismiss = { menuExpanded = false },
+            actions = actions,
+            isPlayed = userState?.played == true,
+            isFavorite = userState?.isFavorite == true,
+            isInWatchlist = userState?.inWatchlist == true,
+        )
+
+        Card(
+            onClick = onClick,
+            onLongClick = onLongClick ?: if (actions.isEmpty) null else { { menuExpanded = true } },
+            interactionSource = interactionSource,
+            shape = CardDefaults.shape(shape = cardShape),
+            scale = cardFocus.scale,
+            border = cardFocus.border,
+            glow = cardFocus.glow,
+            modifier = cardModifier
+                .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+                .fillMaxWidth()
+                .aspectRatio(16f / 9f),
+        ) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                SpoilerImage(
+                    url = stillUrl,
+                    thumbhash = stillThumbhash,
+                    hidden = hideStill,
+                    contentDescription = title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                    defaultArtwork = DefaultArtworkKind.forItemType(mediaType),
+                )
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                0f to Color.Transparent,
+                                0.5f to Color.Transparent,
+                                1f to Color(0x99000000),
+                            ),
+                        ),
+                )
+
+                // Card-overlay badge layer. Over the still + scrim, under the
+                // play affordance + progress bar. Never intercepts focus.
+                // The bottom inset matches the side inset plus the 3dp progress
+                // bar so the lower badges sit in the corner like the upper ones.
+                if (overlayState.enabled && overlay != null) {
+                    CardOverlays(
+                        data = overlay,
+                        prefs = overlayState.prefs,
+                        variant = CardOverlayVariant.Wide,
+                        scale = TvCardOverlayScale,
+                        forceOpaqueBackground = false,
+                        bottomInset = TvEpisodeCardOverlayBottomInset,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+
+                if (progress != null && progress > 0f) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(3.dp)
+                            .align(Alignment.BottomStart)
+                            .background(ProgressTrack),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(progress.coerceIn(0f, 1f))
+                                .height(3.dp)
+                                .background(ProgressFill),
+                        )
+                    }
+                }
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 7.dp),
+            horizontalAlignment = Alignment.Start,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = seriesTitle ?: title,
+                style = MaterialTheme.typography.titleSmall.copy(
+                    fontSize = 15.5.sp,
+                    lineHeight = 18.5.sp,
+                ),
+                color = if (isFocused) Color.White else Color.White.copy(alpha = 0.78f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            val episodeTag = tvEpisodeTag(seasonNumber, episodeNumber)
+            // With the series on the line above, the episode number is what
+            // separates two same-named episodes in a rail, so it leads.
+            val secondaryLine = when {
+                seriesTitle != null -> tvEpisodeTitleLine(seasonNumber, episodeNumber, title)
+                episodeTag != null -> episodeTag
+                else -> year?.let { LocaleFormat.integer(it, currentNumberLocale()) }
+            }
+            if (secondaryLine != null) {
+                Text(
+                    text = secondaryLine,
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontSize = 14.sp,
+                        lineHeight = 18.sp,
+                    ),
+                    color = Color.White.copy(alpha = 0.75f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Start,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+
+    }
+}
+
+/**
+ * Default width for episode / next-up cards. tvOS uses 360×200pt; Skyline maps
+ * that to Android TV as 180×100dp.
+ */
+val TvEpisodeCardWidth: Dp = RowDimens.BackdropWidth
+
+/** [TvEpisodeCardWidth] scaled by the active poster-size preference. */
+@Composable
+fun tvEpisodeCardWidth(): Dp = TvEpisodeCardWidth.cardScaled()
+
+/** Hoisted so every card shares one instance instead of allocating a shape per composition. */
+private val TvEpisodeCardShape = RoundedCornerShape(8.dp)
+
+/** Unscaled: 8dp side inset + 3dp progress bar, scaled by [TvCardOverlayScale]. */
+private val TvEpisodeCardOverlayBottomInset = 12.dp

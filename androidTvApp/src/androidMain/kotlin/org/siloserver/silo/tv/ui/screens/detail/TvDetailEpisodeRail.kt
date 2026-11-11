@@ -1,0 +1,706 @@
+package org.siloserver.silo.tv.ui.screens.detail
+
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
+import kotlinx.coroutines.delay
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDirection
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.tv.material3.Icon
+import androidx.tv.material3.Text
+import org.siloserver.silo.common.cards.LocalEpisodeSpoilerPrefs
+import org.siloserver.silo.common.i18n.currentFormatLocale
+import org.siloserver.silo.common.ui.components.SpoilerImage
+import org.siloserver.silo.common.ui.components.DefaultArtworkKind
+import org.siloserver.silo.common.ui.components.ThumbhashImage
+import org.siloserver.silo.model.catalog.EpisodeListItem
+import org.siloserver.silo.model.catalog.EpisodeCardCaption
+import org.siloserver.silo.model.catalog.hasMachineTranslatedOverview
+import org.siloserver.silo.model.settings.EpisodeSpoilers
+import org.siloserver.silo.tv.ui.components.TvMediaCardActions
+import org.siloserver.silo.tv.ui.components.TvMediaCardContextMenu
+import org.siloserver.silo.tv.ui.components.bidiIsolated
+import org.siloserver.silo.tv.ui.components.tvEpisodeCardWidth
+import org.siloserver.silo.tv.ui.focus.requestFocusUntilObserved
+import org.siloserver.silo.tv.ui.theme.TvRailScrollBehavior
+import org.siloserver.silo.tv.ui.theme.tvRailPinOnFocus
+import org.siloserver.silo.tv.ui.theme.SiloOnSurface
+import org.siloserver.silo.tv.ui.theme.SiloSecondaryText
+import org.siloserver.silo.tv.ui.theme.DarkSurfaceElevated
+import org.siloserver.silo.tv.ui.theme.ProgressFill
+import org.siloserver.silo.tv.ui.theme.InterFamily
+import org.siloserver.silo.tv.ui.theme.CardOutline
+import org.siloserver.silo.tv.ui.theme.cardFocusedScale
+import org.siloserver.silo.tv.ui.theme.cardScaled
+import androidx.compose.ui.res.stringResource
+import org.siloserver.silo.common.R as CommonR
+import org.siloserver.silo.common.i18n.text
+import org.siloserver.silo.common.i18n.localizedResources
+import androidx.compose.ui.platform.LocalConfiguration
+import java.util.Locale
+import org.siloserver.silo.common.i18n.isRightToLeftText
+
+/** Includes the still, the two-line caption, and vertical rail padding from the first frame. */
+@Composable
+internal fun tvSeriesEpisodeRailHeight(): Dp {
+    val captionHeight = with(LocalDensity.current) {
+        SeriesStillToCaption + SeriesCaptionTitleStyle.lineHeight.toDp() +
+            SeriesCaptionLineGap + SeriesCaptionMetadataStyle.lineHeight.toDp()
+    }
+    return tvEpisodeCardWidth() * (9f / 16f) + captionHeight + 12.dp
+}
+
+@Composable
+internal fun TvSeriesEpisodeRailSkeleton() {
+    val cardWidth = tvEpisodeCardWidth()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(tvSeriesEpisodeRailHeight())
+            .clipToBounds()
+            .padding(horizontal = TvDetailHorizontalInset, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(20.dp),
+    ) {
+        repeat(5) {
+            Column(
+                modifier = Modifier.width(cardWidth),
+                verticalArrangement = Arrangement.spacedBy(SeriesStillToCaption),
+            ) {
+                Box(
+                    Modifier.width(cardWidth).height(cardWidth * (9f / 16f))
+                        .background(DarkSurfaceElevated, RoundedCornerShape(8.dp)),
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(SeriesCaptionLineGap)) {
+                    Box(
+                        Modifier.fillMaxWidth(0.65f)
+                            .height(with(LocalDensity.current) { SeriesCaptionTitleStyle.lineHeight.toDp() })
+                            .background(DarkSurfaceElevated, RoundedCornerShape(3.dp)),
+                    )
+                    Box(
+                        Modifier.fillMaxWidth(0.45f)
+                            .height(with(LocalDensity.current) { SeriesCaptionMetadataStyle.lineHeight.toDp() })
+                            .background(DarkSurfaceElevated, RoundedCornerShape(3.dp)),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Horizontal rail of episode cards for the series/season/episode detail
+ * screens — a direct port of tvOS `TVEpisodeRail`. Pressing OK on a card
+ * navigates to that episode's own detail page (where the user picks a
+ * version, marks watched and starts playback). Container detail pages may use
+ * the rail as a browser; the combined Series page uses OK as direct playback,
+ * matching tvOS without pushing a second episode-detail page.
+ *
+ * When `currentContentId` is non-null the matching card is highlighted
+ * (white 2dp ring + full-color title), scrolled to the horizontal center
+ * on first appearance, and made the default focus target so d-padding down
+ * into the rail lands on the episode the user is already viewing.
+ */
+@OptIn(ExperimentalComposeUiApi::class, ExperimentalFoundationApi::class)
+@Composable
+internal fun TvDetailEpisodeRail(
+    episodes: List<EpisodeListItem>,
+    onEpisodeSelected: (EpisodeListItem) -> Unit,
+    favoriteStates: Map<String, Boolean>,
+    onSetWatched: (contentId: String, watched: Boolean) -> Unit,
+    onSetFavorite: (contentId: String, favorite: Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    currentContentId: String? = null,
+    onEpisodeFocused: ((EpisodeListItem) -> Unit)? = null,
+    onDirectionUp: (() -> Boolean)? = null,
+    usesSeriesGeometry: Boolean = false,
+    carouselJump: TvEpisodeCarouselJump? = null,
+    hasPreviousEpisodes: Boolean = false,
+    hasNextEpisodes: Boolean = false,
+    carouselLoadError: Boolean = false,
+    onCarouselEdgeRequested: (String, Int) -> Unit = { _, _ -> },
+    onCarouselFocusLost: () -> Unit = {},
+) {
+    if (episodes.isEmpty()) return
+
+    val layoutDirection = LocalLayoutDirection.current
+    val listState = rememberLazyListState()
+    val currentIndex = remember(currentContentId, episodes) {
+        episodes.indexOfFirst { it.contentId == currentContentId }.takeIf { it >= 0 }
+    }
+    // The first entry uses next-up/current. Once the viewer browses sideways,
+    // retain that exact episode for every Up/Down round-trip through the
+    // selector and supporting rails. Keying by the first episode resets this
+    // memory on legacy routes. Series keeps it across prepends and appends.
+    val episodeSetKey = if (usesSeriesGeometry) "continuous-series" else episodes.first().contentId
+    var rememberedFocusedContentId by remember(episodeSetKey) { mutableStateOf<String?>(null) }
+    val entryIndex = remember(rememberedFocusedContentId, currentContentId, episodes) {
+        val targetId = rememberedFocusedContentId
+            ?.takeIf { remembered -> episodes.any { it.contentId == remembered } }
+            ?: currentContentId
+        episodes.indexOfFirst { it.contentId == targetId }.takeIf { it >= 0 }
+    }
+    // Default focus target: the remembered episode, falling back to current.
+    // Mirrors tvOS's focusedEpisodeContentId plus its suggestedEpisode entry.
+    val defaultFocusRequester = remember { FocusRequester() }
+    var observedFocusedContentId by remember { mutableStateOf<String?>(null) }
+
+    // The jump can arrive before its season joins the continuous rail (the
+    // selected season publishes ahead of the carousel window). Key on whether
+    // the target is present so the jump still lands once that season arrives.
+    val jumpTargetPresent = carouselJump != null &&
+        episodes.any { it.contentId == carouselJump.contentId }
+    LaunchedEffect(carouselJump, jumpTargetPresent) {
+        val jump = carouselJump ?: return@LaunchedEffect
+        val index = episodes.indexOfFirst { it.contentId == jump.contentId }
+        if (index < 0) return@LaunchedEffect
+        rememberedFocusedContentId = jump.contentId
+        listState.scrollToItem(index + if (hasPreviousEpisodes) 1 else 0)
+        if (jump.requestFocus) {
+            requestFocusUntilObserved(
+                maxAttempts = 8,
+                awaitAttempt = { withFrameNanos { } },
+                requestFocus = defaultFocusRequester::requestFocus,
+                isFocused = { observedFocusedContentId == jump.contentId },
+            )
+        }
+    }
+
+    // Auto-center the suggested episode ONCE when this season's rail appears
+    // (parity with tvOS `scrollTo(..., anchor: .center)`). Do not key this on
+    // currentContentId: Series focus intentionally updates that id for every
+    // Left/Right step. Re-running this centering animation would race the
+    // one-shot tvRailPinOnFocus glide and make Right visually travel backward
+    // even though focus reached the correct episode.
+    //
+    // The rail can mount before the suggested episode is in it: a Continue
+    // Watching entry into Season 2 may first show a cached or default Season 1,
+    // and Season 2 joins the continuous rail later. Wait for the target to
+    // appear instead of giving up, but center at most once, and never after the
+    // viewer has started browsing the rail.
+    var initialCenterDone by remember(episodeSetKey) { mutableStateOf(false) }
+    LaunchedEffect(episodeSetKey, currentIndex != null) {
+        if (initialCenterDone || rememberedFocusedContentId != null) return@LaunchedEffect
+        val target = currentIndex ?: return@LaunchedEffect
+        initialCenterDone = true
+        val itemIndex = target + if (hasPreviousEpisodes) 1 else 0
+        listState.scrollToItem(itemIndex)
+        val info = listState.layoutInfo
+        val item = info.visibleItemsInfo.firstOrNull { it.index == itemIndex }
+            ?: return@LaunchedEffect
+        val viewportCenter = (info.viewportStartOffset + info.viewportEndOffset) / 2f
+        val itemCenter = item.offset + item.size / 2f
+        // Instant: the rail is only just appearing, so a slide reads as a jump.
+        listState.scrollBy(itemCenter - viewportCenter)
+    }
+
+    // When the previous season loads it replaces the "Loading episodes…"
+    // placeholder. LazyRow keeps its place by the first visible item's key, so
+    // if that was the placeholder it would fall back to index 0 and snap the
+    // rail to the series' first episode. Put the episode that replaces the
+    // placeholder in the placeholder's exact slot instead, so nothing moves.
+    val lastFirstEpisodeId = remember { arrayOfNulls<String>(1) }
+    SideEffect {
+        val newFirstId = episodes.first().contentId
+        val oldFirstId = lastFirstEpisodeId[0]
+        lastFirstEpisodeId[0] = newFirstId
+        if (oldFirstId == null || oldFirstId == newFirstId) return@SideEffect
+        if (listState.layoutInfo.visibleItemsInfo.firstOrNull()?.key != PreviousSeasonPlaceholderKey) {
+            return@SideEffect
+        }
+        val oldFirstIndex = episodes.indexOfFirst { it.contentId == oldFirstId }
+        if (oldFirstIndex <= 0) return@SideEffect
+        listState.requestScrollToItem(
+            index = oldFirstIndex - 1 + if (hasPreviousEpisodes) 1 else 0,
+            scrollOffset = listState.firstVisibleItemScrollOffset,
+        )
+    }
+
+    // Series only, on first appearance: keep the skeleton up until the
+    // starting episode and the season before it are in the rail, so the rail
+    // appears already in place. Otherwise it shows a half-loaded row (a
+    // "Loading episodes…" card and a couple of episodes), then slides when the
+    // earlier season fills in. Capped so a slow season load can't hide it.
+    var revealed by remember(episodeSetKey) { mutableStateOf(!usesSeriesGeometry) }
+    val startSettled = (currentContentId == null || currentIndex != null) && !hasPreviousEpisodes
+    LaunchedEffect(revealed) {
+        if (revealed) return@LaunchedEffect
+        delay(InitialRevealTimeoutMillis)
+        revealed = true
+    }
+    LaunchedEffect(revealed, startSettled) {
+        if (revealed || !startSettled) return@LaunchedEffect
+        // Let the centering scroll above land before the rail shows.
+        repeat(2) { withFrameNanos { } }
+        revealed = true
+    }
+
+    TvRailScrollBehavior {
+    Box {
+    LazyRow(
+        modifier = modifier
+            .graphicsLayer { alpha = if (revealed) 1f else 0f }
+            .fillMaxWidth()
+            .then(if (usesSeriesGeometry) Modifier.height(tvSeriesEpisodeRailHeight()) else Modifier)
+            .then(
+                if (onDirectionUp != null) {
+                    Modifier.onPreviewKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp) {
+                            onDirectionUp()
+                        } else {
+                            false
+                        }
+                    }
+                } else {
+                    Modifier
+                },
+            )
+            .onFocusChanged {
+                if (it.hasFocus) revealed = true else onCarouselFocusLost()
+            }
+            .focusGroup()
+            .then(
+                if (entryIndex != null) {
+                    Modifier.focusProperties { enter = { defaultFocusRequester } }
+                } else {
+                    Modifier
+                },
+            ),
+        state = listState,
+        contentPadding = PaddingValues(
+            horizontal = TvDetailHorizontalInset,
+            // Compact Series padding keeps the lowered episode band within the
+            // fixed primary viewport beneath the selector and season controls.
+            vertical = if (usesSeriesGeometry) 6.dp else 16.dp,
+        ),
+        horizontalArrangement = Arrangement.spacedBy(if (usesSeriesGeometry) 20.dp else 18.dp),
+    ) {
+        if (hasPreviousEpisodes) {
+            item(key = PreviousSeasonPlaceholderKey, contentType = "episode-loading") {
+                TvEpisodeBoundaryPlaceholder(carouselLoadError)
+            }
+        }
+        itemsIndexed(
+            episodes,
+            key = { _, episode -> episode.contentId },
+            contentType = { _, _ -> "episode-card" },
+        ) { index, episode ->
+            val isCurrent = episode.contentId == currentContentId
+            val isEntryTarget = index == entryIndex
+            TvDetailEpisodeCard(
+                episode = episode,
+                isCurrent = isCurrent,
+                isFavorite = favoriteStates[episode.contentId] ?: false,
+                onClick = { onEpisodeSelected(episode) },
+                onSetWatched = { watched -> onSetWatched(episode.contentId, watched) },
+                onSetFavorite = { favorite -> onSetFavorite(episode.contentId, favorite) },
+                usesSeriesGeometry = usesSeriesGeometry,
+                modifier = Modifier
+                    .tvRailPinOnFocus(
+                        listState,
+                        index + if (hasPreviousEpisodes) 1 else 0,
+                        TvDetailHorizontalInset,
+                    )
+                    .onPreviewKeyEvent { event ->
+                        val direction = episodeCarouselDirection(event.key, layoutDirection)
+                        if (direction == 0 || event.type != KeyEventType.KeyDown) {
+                            false
+                        } else if (usesSeriesGeometry && (
+                            (direction == -1 && index == 0) ||
+                                (direction == 1 && index == episodes.lastIndex)
+                        )) {
+                            if ((direction < 0 && hasPreviousEpisodes) || (direction > 0 && hasNextEpisodes)) {
+                                onCarouselEdgeRequested(episode.contentId, direction)
+                            }
+                            // At the real series ends, horizontal input stays in this rail.
+                            true
+                        } else false
+                    }
+                    .onFocusChanged { focusState ->
+                        if (focusState.isFocused) {
+                            observedFocusedContentId = episode.contentId
+                            rememberedFocusedContentId = episode.contentId
+                            onEpisodeFocused?.invoke(episode)
+                        } else if (observedFocusedContentId == episode.contentId) {
+                            observedFocusedContentId = null
+                        }
+                    }
+                    .then(
+                        if (isEntryTarget) {
+                            Modifier.focusRequester(defaultFocusRequester)
+                        } else {
+                            Modifier
+                        },
+                    ),
+            )
+        }
+        if (hasNextEpisodes) {
+            item(key = "next-season-loading", contentType = "episode-loading") {
+                TvEpisodeBoundaryPlaceholder(carouselLoadError)
+            }
+        }
+    }
+    if (!revealed) TvSeriesEpisodeRailSkeleton()
+    }
+    }
+}
+
+private const val InitialRevealTimeoutMillis = 1_000L
+
+private const val PreviousSeasonPlaceholderKey = "previous-season-loading"
+
+@Composable
+private fun TvEpisodeBoundaryPlaceholder(failed: Boolean) {
+    Column(
+        modifier = Modifier.width(tvEpisodeCardWidth()),
+        verticalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        Box(
+            Modifier.fillMaxWidth().height(tvEpisodeCardWidth() * (9f / 16f))
+                .background(DarkSurfaceElevated, RoundedCornerShape(8.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = stringResource(
+                    if (failed) CommonR.string.detail_episodes_pressToRetry else CommonR.string.detail_episodes_loading,
+                ),
+                fontSize = 14.sp,
+                color = SiloSecondaryText,
+            )
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalFoundationApi::class)
+private fun TvDetailEpisodeCard(
+    episode: EpisodeListItem,
+    isCurrent: Boolean,
+    isFavorite: Boolean,
+    onClick: () -> Unit,
+    onSetWatched: (Boolean) -> Unit,
+    onSetFavorite: (Boolean) -> Unit,
+    usesSeriesGeometry: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    // The combined Series page uses the exact same card footprint as Home's
+    // Continue Watching rail. Legacy season/episode routes keep their existing
+    // geometry so this targeted parity change cannot disturb those layouts.
+    val cardWidth = if (usesSeriesGeometry) tvEpisodeCardWidth() else 230.dp.cardScaled()
+    val spoilers = LocalEpisodeSpoilerPrefs.current
+    val unwatched = EpisodeSpoilers.isUnwatched(episode.userData)
+    val visibleOverview = episode.overview
+        ?.takeIf { it.isNotBlank() && !spoilers.hidesOverview(unwatched) }
+    val stillHeight = if (usesSeriesGeometry) cardWidth * (9f / 16f) else 130.dp.cardScaled()
+    val cornerRadius = if (usesSeriesGeometry) 8.dp else 5.dp
+    val shape = RoundedCornerShape(cornerRadius)
+
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+    var menuExpanded by remember(episode.contentId) { mutableStateOf(false) }
+    val actions = remember(episode.contentId, onSetWatched, onSetFavorite) {
+        TvMediaCardActions(
+            onSetWatched = onSetWatched,
+            onToggleFavorite = onSetFavorite,
+        )
+    }
+
+    // Scale + shadow only — no TV Material focus halo. The white outline on
+    // the still (driven by isFocused below) is the focus cue, shared with the
+    // current episode and every other card, as on tvOS.
+    val focusedScale = cardFocusedScale()
+    val scale by animateFloatAsState(
+        targetValue = if (isFocused) focusedScale else 1f,
+        animationSpec = tween(durationMillis = 180),
+        label = "episodeCardScale",
+    )
+
+    Column(
+        modifier = modifier
+            .width(cardWidth)
+            // Continue Watching lifts only its artwork; keep the inline label
+            // locked while the focused still hovers above it.
+            .then(if (usesSeriesGeometry) Modifier else Modifier.scale(scale))
+            .combinedClickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick,
+                onLongClick = { menuExpanded = true },
+            ),
+        verticalArrangement = Arrangement.spacedBy(if (usesSeriesGeometry) SeriesStillToCaption else 9.dp),
+    ) {
+        TvMediaCardContextMenu(
+            expanded = menuExpanded,
+            onDismiss = { menuExpanded = false },
+            actions = actions,
+            isPlayed = episode.userData?.played == true,
+            isFavorite = isFavorite,
+            isInWatchlist = false,
+        )
+
+        // Still
+        Box(
+            modifier = Modifier
+                .width(cardWidth)
+                .height(stillHeight)
+                .then(if (usesSeriesGeometry) Modifier.scale(scale) else Modifier)
+                .shadow(
+                    elevation = if (isFocused) CardOutline.shadowElevation else 8.dp,
+                    shape = shape,
+                    ambientColor = Color.Black,
+                    spotColor = Color.Black,
+                )
+                .clip(shape)
+                .background(DarkSurfaceElevated)
+                .then(
+                    if (isFocused || isCurrent) {
+                        Modifier.border(CardOutline.width, CardOutline.color, shape)
+                    } else {
+                        Modifier
+                    },
+                ),
+        ) {
+            SpoilerImage(
+                url = episode.stillUrl,
+                thumbhash = episode.stillThumbhash,
+                hidden = spoilers.hidesImage(unwatched, episode.stillIsEpisodeStill),
+                contentDescription = episode.title,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+                defaultArtwork = DefaultArtworkKind.Tv,
+            )
+
+            if (episode.userData?.played == true) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.35f)),
+                )
+                Box(
+                    modifier = Modifier
+                        .padding(6.dp)
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .background(Color.White)
+                        .align(Alignment.TopEnd),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = null,
+                        tint = Color.Black,
+                        modifier = Modifier.size(9.dp),
+                    )
+                }
+            }
+
+            episode.progressFraction()?.let { fraction ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(5.dp)
+                        .align(Alignment.BottomStart)
+                        .background(Color.Black.copy(alpha = 0.6f)),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(fraction)
+                            .height(5.dp)
+                            .background(ProgressFill),
+                    )
+                }
+            }
+        }
+
+        // The caption shared with tvOS: "S01E02 · Title" over the air date and
+        // runtime. On the Series page the focused episode's description sits in
+        // the hero above the rail, so those cards leave it out. The current
+        // episode is marked by its still's border, as on tvOS. The card
+        // recomposes on every frame of its focus animation, so the text is built
+        // once per episode.
+        val resources = localizedResources()
+        val configuration = LocalConfiguration.current
+        val dateLocale = currentFormatLocale()
+        // A right-to-left interface isolates the title as a catalog placeholder (D28).
+        val rtl = isRightToLeftText()
+        val title = remember(episode, configuration) {
+            val episodeForCaption = if (rtl) episode else episode.copy(title = episode.title?.trim()?.let { bidiIsolated(it, false) })
+            EpisodeCardCaption.title(episodeForCaption).text(resources)
+        }
+        val metadata = remember(episode, configuration, dateLocale) {
+            EpisodeCardCaption.metadata(
+                airDate = abbreviatedEpisodeDate(episode.airDate, dateLocale),
+                runtimeMinutes = episode.runtime,
+            )?.text(resources)
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(if (usesSeriesGeometry) SeriesCaptionLineGap else 4.dp)) {
+            Text(
+                text = title,
+                style = if (usesSeriesGeometry) SeriesCaptionTitleStyle else CaptionTitleStyle,
+                color = if (isCurrent || isFocused) SiloOnSurface else SiloOnSurface.copy(alpha = 0.92f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            // Drawn even when empty: other episode rails take their height from
+            // the cards on screen, so every card keeps both lines.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    text = metadata.orEmpty(),
+                    style = if (usesSeriesGeometry) SeriesCaptionMetadataStyle else CaptionMetadataStyle,
+                    color = SiloOnSurface.copy(alpha = 0.7f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                // Only these cards show the description, so only they mark a
+                // translated one.
+                if (!usesSeriesGeometry && visibleOverview != null &&
+                    hasMachineTranslatedOverview(episode.machineTranslatedFields)
+                ) {
+                    TvMachineTranslatedLabel(compact = true, iconSize = 12.dp)
+                }
+            }
+            if (!usesSeriesGeometry) {
+                // Outside the Series page (a season or episode page kept when its
+                // series can't be loaded) the hero doesn't follow focus, so the
+                // card keeps the description. Three lines are kept even when
+                // spoiler protection empties them, so the cards stay one height.
+                Text(
+                    text = visibleOverview.orEmpty(),
+                    style = CaptionOverviewStyle,
+                    color = SiloSecondaryText,
+                    minLines = 3,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+// tvOS's Series caption (20pt title, 17pt date line) on the 960×540dp canvas.
+// tvSeriesEpisodeRailHeight and the skeleton are built from these values.
+private val SeriesStillToCaption = 7.dp
+private val SeriesCaptionLineGap = 3.dp
+private val SeriesCaptionTitleStyle = TextStyle(
+    fontFamily = InterFamily,
+    fontSize = 11.5.sp,
+    lineHeight = 14.sp,
+    fontWeight = FontWeight.SemiBold,
+    textDirection = TextDirection.Content,
+    textAlign = TextAlign.Left,
+)
+private val SeriesCaptionMetadataStyle = TextStyle(
+    fontFamily = InterFamily,
+    fontSize = 10.5.sp,
+    lineHeight = 13.sp,
+    fontWeight = FontWeight.Medium,
+)
+private val CaptionTitleStyle = TextStyle(
+    fontFamily = InterFamily,
+    fontSize = 18.sp,
+    lineHeight = 22.sp,
+    fontWeight = FontWeight.SemiBold,
+    textDirection = TextDirection.Content,
+    textAlign = TextAlign.Left,
+)
+private val CaptionMetadataStyle = TextStyle(
+    fontFamily = InterFamily,
+    fontSize = 14.sp,
+    lineHeight = 17.sp,
+    fontWeight = FontWeight.Medium,
+)
+private val CaptionOverviewStyle = TextStyle(
+    fontFamily = InterFamily,
+    fontSize = 16.sp,
+    lineHeight = 20.sp,
+    fontWeight = FontWeight.Normal,
+    textDirection = TextDirection.Content,
+    textAlign = TextAlign.Left,
+)
+
+// Shared with the hero facts row (tvOS parity), so the card dates agree with it.
+private fun abbreviatedEpisodeDate(raw: String?, locale: Locale): String? =
+    TvDetailMetadata.abbreviatedDate(raw, locale = locale)
+
+private fun EpisodeListItem.progressFraction(): Float? {
+    val user = userData ?: return null
+    val pos = user.positionSeconds ?: return null
+    val dur = user.durationSeconds ?: return null
+    if (dur <= 0 || pos <= 0 || pos >= dur) return null
+    return (pos / dur).toFloat().coerceIn(0f, 1f)
+}
+
+
+internal fun episodeCarouselDirection(key: Key, layoutDirection: LayoutDirection): Int {
+    val physicalDirection = when (key) {
+        Key.DirectionLeft -> -1
+        Key.DirectionRight -> 1
+        else -> 0
+    }
+    return if (layoutDirection == LayoutDirection.Rtl) -physicalDirection else physicalDirection
+}

@@ -1,0 +1,332 @@
+package org.siloserver.silo.model.playback
+
+import org.siloserver.silo.model.catalog.SubtitleTrack
+import org.siloserver.silo.playback.canonicalSubtitleLanguage
+import org.siloserver.silo.playback.isBitmapSubtitleCodecFamily
+import org.siloserver.silo.playback.isClientMountableBitmapCodecFamily
+import org.siloserver.silo.playback.playbackSubtitleIdentity
+import org.siloserver.silo.playback.subtitleLabelIndicatesHearingImpaired
+
+/**
+ * The ONE subtitle auto-selection resolver.
+ *
+ * The detail page's "Auto - <track>" preview and the player's no-handoff
+ * fallback used to be two independent implementations (plus a third on phone),
+ * with divergent inventories, SDH detection, bitmap detection and language
+ * folding. They disagreed in the field: the detail row previewed an external
+ * SRT while playback started on an embedded PGS track, because the player only
+ * ever ranked tracks Media3 had already mounted.
+ *
+ * The DETAIL PAGE's semantics are the reference behaviour — its ordering and
+ * cascade are what the viewer sees and what QA signed off (tvOS parity, QA
+ * 2026-07-09). Candidates carry a [AutoSubtitleCandidate.selectionIndex] in the
+ * server's COMBINED selection space, so the winner can be handed straight to a
+ * playback start request, and their own [AutoSubtitleCandidate.source], so the
+ * caller's iteration order (catalog: embedded first; inventory: externals
+ * first) never decides between two otherwise equal tracks.
+ */
+data class AutoSubtitleCandidate(
+    /**
+     * COMBINED-space selection index (externals first, embedded after) — the
+     * identity `subtitle_track_index` requests and session `subtitle_urls`
+     * resolve against. Callers that only need an ordinal (the detail preview)
+     * may put their own ordinal here; the resolver never interprets it.
+     */
+    val selectionIndex: Int,
+    val language: String? = null,
+    val codec: String? = null,
+    /** Catalog/track title. Feeds the SDH predicate alongside [hearingImpaired]. */
+    val title: String? = null,
+    val forced: Boolean = false,
+    /**
+     * A hearing-impaired signal the caller already knows (the server's
+     * `hearing_impaired` flag, Media3 role flags, an accessibility label).
+     * ORed with a title match — never a replacement for it, because many
+     * tracks say SDH only in the title.
+     */
+    val hearingImpaired: Boolean = false,
+    /** Where the track lives. `null` (unknown) ranks with embedded, as on the web player. */
+    val source: AutoSubtitleSource? = null,
+    /**
+     * Whether showing this track makes the server burn it into the picture for
+     * THIS device. `null` when the caller cannot tell, which falls back to
+     * treating every bitmap track as a burn-in.
+     */
+    val needsBurnIn: Boolean? = null,
+    /**
+     * The label the track is listed under in the session inventory — what a
+     * [SubtitleTrackSignature] records and is matched against. Falls back to
+     * [title].
+     */
+    val label: String? = null,
+    /**
+     * No route can show this track ([isUnplayableSubtitle]). Auto never
+     * picks it, not even as the only track or the series choice.
+     */
+    val unplayable: Boolean = false,
+) {
+    val signatureLabel: String? get() = label ?: title
+}
+
+/** Track provenance, in auto-selection preference order. */
+enum class AutoSubtitleSource { EMBEDDED, EXTERNAL, DOWNLOADED }
+
+/** Cascaded preference inputs. Same shape on every surface. */
+data class AutoSubtitleContext(
+    /** Cascaded `subtitle_language`. `null` = no preference; empty = "no subs". */
+    val preferredLanguage: String?,
+    /** Cascaded `subtitle_mode`. `null`/blank → "auto". */
+    val mode: String?,
+    /** Whether forced subs should be auto-selected when available. */
+    val showForced: Boolean = false,
+    /** Language of the audio track that will play. */
+    val audioLanguage: String? = null,
+    /**
+     * The track the viewer last chose for this series, from the server's
+     * `effective_subtitle_track_signature`. Its exact match wins over the
+     * language rules (unless subtitles are off); otherwise it breaks ties
+     * between tracks in the wanted language.
+     */
+    val trackSignature: SubtitleTrackSignature? = null,
+)
+
+sealed class AutoSubtitleResolution {
+    /** Auto picked nothing, and nothing needs turning off. */
+    data object NoChange : AutoSubtitleResolution()
+
+    /** Auto decided subtitles must be off. */
+    data object Disable : AutoSubtitleResolution()
+
+    data class Select(val candidate: AutoSubtitleCandidate) : AutoSubtitleResolution()
+}
+
+/** The chosen candidate, or null when Auto resolves to no subtitle at all. */
+fun AutoSubtitleResolution.selectedCandidate(): AutoSubtitleCandidate? =
+    (this as? AutoSubtitleResolution.Select)?.candidate
+
+/**
+ * Resolves the track Auto should start with.
+ *
+ * Cascade (unchanged from the detail page):
+ * mode `off` → off, or the forced track in the audio's language when forced
+ * subs are enabled (web parity); an explicitly empty preferred language → off; no preferred
+ * language → only mode `always` picks anything; audio already in the preferred
+ * language under mode `auto` → off, or the language's forced track when forced
+ * subs are enabled; otherwise the best track in the preferred language, falling
+ * back to any forced track when forced subs are enabled.
+ *
+ * Within a pool, [autoSubtitlePreferenceOrder] ranks the tracks; a track that
+ * needs a burn-in is DEPRIORITISED, never excluded, so it still wins when it is
+ * the only candidate. A track no route can show
+ * ([AutoSubtitleCandidate.unplayable]) is excluded: the server refuses it.
+ *
+ * "Show forced subtitles" is a SEPARATE setting and never outranks the
+ * viewer's full-subtitle preference: when subtitles are wanted (mode `always`,
+ * or `auto` with foreign audio) the full-dialogue track wins and a forced
+ * track is only the last resort when the language has nothing else. Forced
+ * leads only in the branch where subtitles would otherwise be OFF (audio
+ * already in the preferred language). Product owner call, 2026-08-16: an
+ * "English – Always" profile with forced enabled was starting on the Forced
+ * track of a disc that also carried a plain English track.
+ *
+ * A series choice ([AutoSubtitleContext.trackSignature]) comes first, as on
+ * Apple and the web: the track it describes exactly is selected outright —
+ * even a forced one, because the viewer picked it — unless subtitles are off.
+ */
+fun resolveAutoSubtitle(
+    candidates: List<AutoSubtitleCandidate>,
+    context: AutoSubtitleContext,
+): AutoSubtitleResolution {
+    if (candidates.isEmpty()) return AutoSubtitleResolution.NoChange
+    // Every branch below ranks only tracks the server can show. With none of
+    // those left, each branch finds nothing and says so in its own terms
+    // (Disable or NoChange), as it would for a file without the language.
+    val playable = candidates.filterNot(AutoSubtitleCandidate::unplayable)
+
+    val mode = context.mode?.trim()?.lowercase()?.takeIf { it.isNotBlank() } ?: "auto"
+    if (mode == "off") {
+        // Off still shows foreign-language dialogue when forced subtitles are
+        // on — what the settings copy promises and the web player does: the
+        // forced track in the language of the audio that plays, else nothing.
+        if (!context.showForced) return AutoSubtitleResolution.Disable
+        val audioLanguage = autoSubtitleLanguageKey(context.audioLanguage)
+            ?: return AutoSubtitleResolution.Disable
+        return bestForcedAutoSubtitleCandidate(playable, audioLanguage)
+            ?.let(AutoSubtitleResolution::Select)
+            ?: AutoSubtitleResolution.Disable
+    }
+
+    val signature = context.trackSignature
+    signature?.let { sig -> playable.firstOrNull { it.matchesSignature(sig) } }
+        ?.let { return AutoSubtitleResolution.Select(it) }
+
+    val preferred = context.preferredLanguage
+    if (preferred != null && preferred.isBlank()) return AutoSubtitleResolution.Disable
+
+    val targetLanguage = autoSubtitleLanguageKey(preferred)
+    if (targetLanguage == null) {
+        if (mode != "always") return AutoSubtitleResolution.NoChange
+        return bestAutoSubtitleCandidate(playable, null, signature)
+            ?.let(AutoSubtitleResolution::Select)
+            ?: AutoSubtitleResolution.NoChange
+    }
+
+    val audioLanguage = autoSubtitleLanguageKey(context.audioLanguage)
+    if (mode == "auto" && audioLanguage != null && audioLanguage == targetLanguage) {
+        if (context.showForced) {
+            bestForcedAutoSubtitleCandidate(playable, targetLanguage)
+                // Idempotent re-select even when this track is already on:
+                // NoChange is reserved for "no track should be on", so a
+                // launch-time consumer can map it to an explicit disable
+                // without turning off a forced track the defaults picked.
+                ?.let { return AutoSubtitleResolution.Select(it) }
+        }
+        return AutoSubtitleResolution.Disable
+    }
+
+    val target = bestAutoSubtitleCandidate(playable, targetLanguage, signature)
+        ?: if (context.showForced) {
+            playable.filter { it.forced }.minWithOrNull(autoSubtitlePreferenceOrder)
+        } else {
+            null
+        }
+    return target?.let(AutoSubtitleResolution::Select) ?: AutoSubtitleResolution.NoChange
+}
+
+/**
+ * Preference order between tracks that already match the wanted language.
+ * Each tier only breaks ties in the one before it (server/web parity,
+ * silo-server #1849):
+ * 1. a track this device renders itself beats one the server must burn in;
+ * 2. full dialogue beats forced, and plain beats SDH, so a file's own forced
+ *    or SDH track never displaces the full track the viewer asked for;
+ * 3. embedded beats external beats downloaded. External sidecars are the ones
+ *    that drift out of sync.
+ * Use with [minWithOrNull], which keeps the caller's order for full ties.
+ */
+val autoSubtitlePreferenceOrder: Comparator<AutoSubtitleCandidate> = compareBy(
+    { it.requiresBurnIn() },
+    { it.forced },
+    { it.isHearingImpaired() },
+    { it.source?.ordinal ?: 0 },
+)
+
+private fun bestAutoSubtitleCandidate(
+    candidates: List<AutoSubtitleCandidate>,
+    targetLanguage: String?,
+    signature: SubtitleTrackSignature? = null,
+): AutoSubtitleCandidate? {
+    val pool = if (targetLanguage == null) {
+        candidates
+    } else {
+        candidates.filter { autoSubtitleLanguageKey(it.language) == targetLanguage }
+    }
+    // The remembered track's traits rank first within the language (web
+    // parity), so a series that was watched with SDH keeps SDH when the exact
+    // track is not in this episode.
+    val order = if (signature == null) {
+        autoSubtitlePreferenceOrder
+    } else {
+        compareByDescending<AutoSubtitleCandidate> { it.signatureScore(signature) }
+            .then(autoSubtitlePreferenceOrder)
+    }
+    return pool.minWithOrNull(order)
+}
+
+private fun bestForcedAutoSubtitleCandidate(
+    candidates: List<AutoSubtitleCandidate>,
+    targetLanguage: String?,
+): AutoSubtitleCandidate? =
+    candidates
+        .filter { targetLanguage == null || autoSubtitleLanguageKey(it.language) == targetLanguage }
+        .filter { it.forced }
+        .minWithOrNull(autoSubtitlePreferenceOrder)
+
+/** The ONE SDH predicate: an explicit signal, or the track's own title. */
+fun AutoSubtitleCandidate.isHearingImpaired(): Boolean =
+    hearingImpaired || subtitleLabelIndicatesHearingImpaired(title)
+
+/**
+ * Whether this track ranks as a burn-in: the caller's answer for this device,
+ * or, when it has none, the bitmap predicate (PGS / VobSub / DVB / HDMV
+ * aliases).
+ */
+private fun AutoSubtitleCandidate.requiresBurnIn(): Boolean =
+    needsBurnIn ?: isBitmapSubtitleCodecFamily(codec)
+
+/**
+ * The language key auto-selection compares: the primary subtitle language with
+ * every ISO 639-2 code folded to its ISO 639-1 form, `und` dropped. Mounted
+ * tracks report 639-1 (`it`) while the catalog and server rows usually carry
+ * 639-2 (`ita`), so the whole table is needed, not a few common aliases.
+ */
+fun autoSubtitleLanguageKey(language: String?): String? = canonicalSubtitleLanguage(language)
+
+/**
+ * Candidates over the CATALOG subtitle list, in catalog order, addressed in
+ * combined selection space — the inventory the detail page previews and the
+ * one a playback start request can act on.
+ *
+ * Burn-in follows the server's delivery rule for the capabilities Android
+ * declares on every delivery (embedded and sidecar bitmap): text and an
+ * embedded PGS track reach the device as-is, while VobSub, DVB and any
+ * external bitmap file have no client route and are burned in.
+ */
+fun catalogAutoSubtitleCandidates(
+    catalogTracks: List<SubtitleTrack>,
+): List<AutoSubtitleCandidate> {
+    val combined = combinedSubtitleSelectionIndexes(catalogTracks)
+    return catalogTracks.mapIndexed { ordinal, track ->
+        AutoSubtitleCandidate(
+            selectionIndex = combined[ordinal],
+            language = track.language,
+            codec = track.codec,
+            title = track.title,
+            forced = track.forced,
+            hearingImpaired = track.hearingImpaired,
+            source = if (track.external) AutoSubtitleSource.EXTERNAL else AutoSubtitleSource.EMBEDDED,
+            needsBurnIn = isBitmapSubtitleCodecFamily(track.codec) &&
+                (track.external || !isClientMountableBitmapCodecFamily(track.codec)),
+            unplayable = track.isUnplayableSubtitle(),
+        )
+    }
+}
+
+/**
+ * Candidates over the SERVER subtitle inventory (`subtitle_urls`), which
+ * includes external sidecars the player has not mounted yet. Ranking an
+ * unmounted sidecar is the point: resolving over Media3's mounted text tracks
+ * alone made every external row structurally invisible.
+ */
+fun inventoryAutoSubtitleCandidates(
+    rows: List<PlayerSubtitleInfo>,
+): List<AutoSubtitleCandidate> = rows.map(PlayerSubtitleInfo::toAutoSubtitleCandidate)
+
+/**
+ * One session subtitle row as a resolver candidate. Burn-in comes from the
+ * row's own playback identity, which reads the server's `burn_in_only`
+ * delivery and otherwise applies the same rule as [catalogAutoSubtitleCandidates].
+ */
+fun PlayerSubtitleInfo.toAutoSubtitleCandidate(): AutoSubtitleCandidate =
+    AutoSubtitleCandidate(
+        selectionIndex = index,
+        language = language,
+        codec = codec,
+        title = catalogLabel ?: label,
+        forced = forced == true,
+        hearingImpaired = hearingImpaired == true,
+        source = autoSubtitleSource(),
+        needsBurnIn = playbackSubtitleIdentity(this) is SubtitleIdentity.ServerBurnIn,
+        label = label ?: catalogLabel,
+        unplayable = unplayable,
+    )
+
+private fun PlayerSubtitleInfo.autoSubtitleSource(): AutoSubtitleSource? {
+    if (isLocalDownloadedSubtitle()) return AutoSubtitleSource.DOWNLOADED
+    return when ((catalogSource ?: source)?.trim()?.lowercase()) {
+        "embedded" -> AutoSubtitleSource.EMBEDDED
+        "external" -> AutoSubtitleSource.EXTERNAL
+        SUBTITLE_SOURCE_DOWNLOADED -> AutoSubtitleSource.DOWNLOADED
+        else -> null
+    }
+}

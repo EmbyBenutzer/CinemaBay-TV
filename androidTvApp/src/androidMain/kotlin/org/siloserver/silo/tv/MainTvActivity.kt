@@ -1,0 +1,665 @@
+package org.siloserver.silo.tv
+
+import android.annotation.SuppressLint
+import android.content.Context
+import android.content.Intent
+import android.content.res.Configuration
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.util.Log
+import android.view.KeyEvent
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.compose.BackHandler
+import androidx.core.view.WindowCompat
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.sp
+import androidx.tv.material3.Text
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import org.siloserver.silo.common.diagnostics.DiagnosticsLifecycleLogger
+import org.siloserver.silo.common.i18n.AppLanguageStore
+import org.siloserver.silo.common.i18n.AppLocales
+import org.siloserver.silo.common.network.ServerReachabilityMonitor
+import org.siloserver.silo.common.player.ActivePlayerHolder
+import org.siloserver.silo.common.player.SiloPlaybackService
+import org.siloserver.silo.common.settings.PlayerSettingsStore
+import org.siloserver.silo.common.settings.ServerDrivenConfigRefresher
+import org.siloserver.silo.common.settings.TitleArtStore
+import org.siloserver.silo.common.startup.StartupArtworkPlan
+import org.siloserver.silo.common.startup.warmAuthenticatedStartup
+import org.siloserver.silo.common.startup.warmProfileSelectionStartup
+import org.siloserver.silo.common.ui.components.StartupSplashVideo
+import org.siloserver.silo.common.ui.components.StartupSplashResizeMode
+import org.siloserver.silo.network.IdentityTransition
+import org.siloserver.silo.network.IdentityTransitionBarrier
+import org.siloserver.silo.network.IdentityTransitionPhase
+import org.siloserver.silo.network.ServerRegistry
+import org.siloserver.silo.tv.ui.focus.TvFocusLog
+import org.siloserver.silo.network.TokenManager
+import org.siloserver.silo.network.requiresApproval
+import org.siloserver.silo.repository.AuthRepository
+import org.siloserver.silo.repository.PersonalDataRepository
+import org.siloserver.silo.repository.ProfileRepository
+import org.siloserver.silo.repository.SectionRepository
+import org.siloserver.silo.repository.port.HomeCachePort
+import org.siloserver.silo.tv.cast.TvSiloCastReceiver
+import org.siloserver.silo.common.profiles.ProfileLaunchBehavior
+import org.siloserver.silo.common.profiles.ProfileLaunchPreferences
+import org.siloserver.silo.tv.profiles.TvActiveProfileReset
+import org.siloserver.silo.tv.profiles.noAccountOpenButAnotherSignedIn
+import org.siloserver.silo.tv.profiles.onlyOpenTile
+import org.siloserver.silo.tv.profiles.onlyOpenTileIsActive
+import org.siloserver.silo.tv.profiles.restoreLastTile
+import org.siloserver.silo.tv.watchnext.WatchNextSeeder
+import org.siloserver.silo.common.ui.marquee.SignInHandoff
+import org.siloserver.silo.common.profiles.ProfileAwayTracker
+import org.siloserver.silo.tv.ui.navigation.TvAppNavigation
+import org.siloserver.silo.tv.ui.navigation.TvRoute
+import org.siloserver.silo.tv.ui.screens.player.TvPlayerRemoteKeyBridge
+import org.siloserver.silo.tv.ui.theme.SiloTvTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapLatest
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.onSubscription
+import kotlinx.coroutines.launch
+import org.koin.android.ext.android.inject
+import org.koin.core.qualifier.named
+import org.koin.java.KoinJavaComponent.get
+
+class MainTvActivity : ComponentActivity() {
+    private var skipStartupIntro: (() -> Unit)? = null
+    private var swallowedIntroKey: Int? = null
+
+    private fun consumeIntroKey(event: KeyEvent): Boolean {
+        // Swallow the complete key press: its release must never activate a
+        // button on the screen revealed underneath the intro.
+        if (event.keyCode == swallowedIntroKey) {
+            if (event.action == KeyEvent.ACTION_UP) swallowedIntroKey = null
+            return true
+        }
+        val skip = skipStartupIntro
+        if (skip != null && event.action == KeyEvent.ACTION_DOWN &&
+            event.keyCode in setOf(KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
+                KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_BUTTON_A)) {
+            swallowedIntroKey = event.keyCode
+            skip()
+            return true
+        }
+        return false
+    }
+
+    // Shared flow with [TvAppNavigation]. We publish the launching Uri here so
+    // the navigation Composable can consume it once the auth chain has landed
+    // the user on Main — see [handleIntent] and the collector in TvAppNavigation.
+    private val pendingDeepLink: MutableStateFlow<Uri?> by inject(named("pendingDeepLink"))
+
+    companion object {
+        // The startup splash plays once per process (a genuine cold launch). It
+        // survives Activity recreation / return-from-background so we don't replay
+        // it on warm re-open; a process death resets it, which is itself a cold
+        // start. Mirrors the phone-side flag in MainActivity.
+        @Volatile
+        private var hasShownColdSplash = false
+
+        // Profile Selection's launch rule applies once per process, like the
+        // splash: a later Activity in the same process follows the return rule
+        // instead (see resolveStartDestination).
+        @Volatile
+        private var hasResolvedLaunchProfile = false
+
+        /** Shared with [TvAppNavigation]'s consumer so intake and consumption
+         * of a deep link line up in one logcat filter. */
+        const val DEEP_LINK_TAG = "SiloDeepLink"
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // "Keys do nothing" with no other SiloTvFocus lines afterwards means
+        // input is going to whichever window took focus (typically the Google
+        // TV launcher), not to this app — an OS/emulator condition, not ours.
+        TvFocusLog.d { "window focus ${if (hasFocus) "GAINED" else "LOST"}" }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        // Own our window insets so WindowInsets.ime is dispatched to Compose.
+        // The login/server-setup screens already use imePadding()+bringIntoView
+        // to lift fields above the soft keyboard, but without this the decor
+        // view consumes the IME inset (reports 0) and those become no-ops — so
+        // on Android TV the keyboard covered the URL/login fields.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+
+        // Capture the launching intent's Uri (if any) before Compose starts so
+        // the navigation collector observes it as soon as it subscribes.
+        handleIntent(intent)
+
+        // Recents and a warm return to Silo show a snapshot of its last screen.
+        // When Profile Selection asks, that is the previous viewer's profile,
+        // so keep no snapshot then (Android 13+; earlier versions have no
+        // equivalent short of blocking screenshots altogether).
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            lifecycleScope.launch {
+                get<ProfileLaunchPreferences>(ProfileLaunchPreferences::class.java).state
+                    .map { it.behavior == ProfileLaunchBehavior.Automatic }
+                    .distinctUntilChanged()
+                    .collect { automatic -> setRecentsScreenshotEnabled(automatic) }
+            }
+        }
+
+        // Run the SiloCast receiver while the app is started AND signed in,
+        // following sign-in, profile selection and sign-out without needing a
+        // background/foreground cycle. start()/stop() run here on the main
+        // thread, and repeatOnLifecycle cancels this block at ON_STOP, so no
+        // start() can land after onStop()'s stop().
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                val receiver = get<TvSiloCastReceiver>(TvSiloCastReceiver::class.java)
+                val identityTransitions =
+                    get<IdentityTransitionBarrier>(IdentityTransitionBarrier::class.java)
+                var running = false
+                castAuthentication(identityTransitions).collect { state ->
+                    // A read that crossed the IO hop after a newer identity
+                    // change is stale. Every generation bump ends in a
+                    // DID_CHANGE that triggers a fresh read, so wait for that
+                    // one; acting on this could stop a handoff that just began.
+                    if (state.generation != identityTransitions.generation.value) return@collect
+                    if (state.authenticated == running) return@collect
+                    running = state.authenticated
+                    if (running) receiver.start() else receiver.stop()
+                }
+            }
+        }
+
+        setContent {
+            var startRoute by remember { mutableStateOf<String?>(null) }
+            var splashPlaybackComplete by remember {
+                val enabled = CinemaBayStartupPreferences(this).showIntro
+                if (!enabled) hasShownColdSplash = true
+                mutableStateOf(hasShownColdSplash)
+            }
+            val finishIntro = {
+                splashPlaybackComplete = true
+                hasShownColdSplash = true
+            }
+            DisposableEffect(splashPlaybackComplete) {
+                skipStartupIntro = if (splashPlaybackComplete) null else finishIntro
+                onDispose { skipStartupIntro = null }
+            }
+            BackHandler(enabled = !splashPlaybackComplete) { finishIntro() }
+
+            LaunchedEffect(Unit) {
+                val route = resolveStartDestination()
+                startRoute = route
+                launchAuthenticatedStartupWarmup(route)
+            }
+
+            // Profile Selection: from the moment Silo returns and the setting
+            // asks, cover the previous profile's screens until Who's Watching
+            // has replaced them (TvAppNavigation lifts the request).
+            val profileAwayTracker = remember { get<ProfileAwayTracker>(ProfileAwayTracker::class.java) }
+            val profileCoverVisible by profileAwayTracker.selectionRequired.collectAsState()
+
+            SiloTvTheme {
+                val resolvedRoute = startRoute
+                val splashVisible = resolvedRoute == null || !splashPlaybackComplete
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .onPreviewKeyEvent {
+                            // Consume ALL input at the root while the splash
+                            // overlay is up: no input-dispatch-timeout ANR, and
+                            // no keys leak into the app pre-rendering below —
+                            // even after its content grabs focus. The profile
+                            // cover gates input the same way.
+                            if (splashVisible) {
+                                TvFocusLog.d { "key swallowed by splash gate" }
+                            }
+                            splashVisible || profileCoverVisible
+                        },
+                ) {
+                    if (resolvedRoute != null) {
+                        // Compose the real app UNDER the splash overlay so Home
+                        // fetches, paints its rows/hero art, and settles entry
+                        // focus while the animation plays. Lifting the overlay
+                        // then reveals a finished screen — no spinner, no
+                        // image fade-up — mirroring tvOS "paint Home fully on
+                        // first frame after startup splash".
+                        CompositionLocalProvider(
+                            LocalCinemaBayPreviewAllowed provides (!splashVisible && !profileCoverVisible),
+                        ) {
+                            TvAppNavigation(
+                                startDestination = resolvedRoute,
+                                onExitApp = ::exitCinemaBay,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                    }
+                    if (profileCoverVisible && !splashVisible) {
+                        Box(modifier = Modifier.fillMaxSize().background(Color.Black))
+                    }
+                    if (splashVisible) {
+                        val splashFocus = remember { FocusRequester() }
+                        // PURE black — the splash video's encoded black is #000000, and any
+                        // off-black (the old 0xFF070509) reads as a visible box
+                        // around the small video layer (QA 2026-07-08).
+                        val splashBackground = Color.Black
+                        // Holds key-event routing until the app UI below exists;
+                        // its content may later claim focus, which is fine — the
+                        // root gate above still swallows every event.
+                        LaunchedEffect(Unit) { runCatching { splashFocus.requestFocus() } }
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(splashBackground)
+                                .focusRequester(splashFocus)
+                                .focusable(),
+                        ) {
+                            if (!splashPlaybackComplete) {
+                                // CinemaBay's supplied 16:9 intro fills the TV without cropping.
+                                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                                    val videoWidth = maxWidth
+                                    StartupSplashVideo(
+                                        modifier = Modifier
+                                            .align(Alignment.Center)
+                                            .width(videoWidth)
+                                            .aspectRatio(16f / 9f),
+                                        resizeMode = StartupSplashResizeMode.Fit,
+                                        backgroundColor = splashBackground,
+                                        // End naturally; a stalled decoder cannot block startup.
+                                        videoResource = R.raw.cinemabay_intro,
+                                        audioVolume = 1f,
+                                        maxVisibleMillis = 6_500L,
+                                        onPlaybackComplete = {
+                                            splashPlaybackComplete = true
+                                            hasShownColdSplash = true
+                                        },
+                                    )
+                                }
+                                Text(
+                                    text = stringResource(R.string.cinemabay_startup_skip),
+                                    color = Color.White.copy(alpha = 0.9f),
+                                    fontSize = 16.sp,
+                                    modifier = Modifier.align(Alignment.BottomCenter).padding(24.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        DiagnosticsLifecycleLogger.state("foreground")
+        get<ProfileAwayTracker>(ProfileAwayTracker::class.java).onForeground()
+        val refresher = get<ServerDrivenConfigRefresher>(ServerDrivenConfigRefresher::class.java)
+        val monitor = get<ServerReachabilityMonitor>(ServerReachabilityMonitor::class.java)
+        monitor.startForeground()
+        lifecycleScope.launch(Dispatchers.IO) { refresher.refreshIfStale() }
+        // A language chosen in system settings while Silo was away.
+        get<AppLanguageStore>(AppLanguageStore::class.java).check(this)
+    }
+
+    // Before Android 13 the app language is applied here (from 13 the
+    // platform does it), and a device language without a catalog is shown as
+    // its stand-in on every version (D64).
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(AppLocales.wrap(newBase))
+    }
+
+    // `locale|layoutDirection` are handled in place, so a language chosen in
+    // system settings while this stays started (picture-in-picture, split
+    // screen) arrives here rather than as a recreation.
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // attachBaseContext fixed this activity's locale; a change it can't take in place
+        // recreates it, though not in picture-in-picture: leaving it brings another change.
+        if (!isInPictureInPictureMode && AppLocales.needsRecreate(this)) return recreate()
+        get<AppLanguageStore>(AppLanguageStore::class.java).check(this)
+    }
+
+    /**
+     * Warm-launch deep links arrive here while the Activity is already alive
+     * (singleTop / singleTask). Forward to [handleIntent] and update the
+     * Activity's stored intent so [getIntent] reflects the latest payload.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIntent(intent)
+        setIntent(intent)
+    }
+
+    @SuppressLint("RestrictedApi")
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // Desktop TV emulators deliver the host keyboard's Escape key as
+        // KEYCODE_ESCAPE, not always as Android's KEYCODE_BACK. Translate it
+        // before normal window dispatch so a focused popup/menu gets first
+        // refusal, exactly as it does for a physical remote's Back button.
+        val translatedEvent = if (event.keyCode == KeyEvent.KEYCODE_ESCAPE) {
+            KeyEvent(
+                event.downTime,
+                event.eventTime,
+                event.action,
+                KeyEvent.KEYCODE_BACK,
+                event.repeatCount,
+                event.metaState,
+                event.deviceId,
+                event.scanCode,
+                event.flags,
+                event.source,
+            )
+        } else {
+            event
+        }
+        if (consumeIntroKey(translatedEvent)) return true
+        if (TvPlayerRemoteKeyBridge.dispatch(translatedEvent)) return true
+        return super.dispatchKeyEvent(translatedEvent)
+    }
+
+    /**
+     * Pushes a Silo deep-link Uri into the shared [pendingDeepLink] flow for
+     * [TvAppNavigation] to consume. Non-Silo schemes (and intents without data)
+     * are ignored so unrelated launch intents don't clobber a queued URI.
+     * Nullable parameter to accommodate the cold-launch call site where the
+     * Activity's intent may be null.
+     */
+    private fun handleIntent(intent: Intent?) {
+        val data = intent?.data ?: return
+        // `silo` is the only scheme the manifest registers; anything else is
+        // an unrelated launch intent and must not clobber a queued URI.
+        if (data.scheme == "silo") {
+            Log.i(DEEP_LINK_TAG, "deep link queued: ${data.host}/${data.lastPathSegment}")
+            pendingDeepLink.value = data
+        }
+    }
+
+    private var exitInProgress = false
+
+    private fun exitCinemaBay() {
+        if (exitInProgress) return
+        exitInProgress = true
+        lifecycleScope.launch {
+            // Flush local preferences before destroying the activity's scope.
+            try {
+                kotlinx.coroutines.withTimeoutOrNull(2000L) {
+                    get<PlayerSettingsStore>(PlayerSettingsStore::class.java).flushPendingDeviceSettings()
+                }
+            } catch (error: Exception) {
+                Log.w("CinemaBay", "Could not flush settings before exit", error)
+            } finally {
+                get<TvSiloCastReceiver>(TvSiloCastReceiver::class.java).stop()
+                get<ActivePlayerHolder>(ActivePlayerHolder::class.java).player.value?.let {
+                    it.pause()
+                    it.stop()
+                }
+                stopService(Intent(this@MainTvActivity, SiloPlaybackService::class.java))
+                finishAndRemoveTask()
+            }
+        }
+    }
+
+    /**
+     * Mirror of the phone app's app-background flush — drain pending
+     * device-setting writes when the user leaves so a process kill in
+     * the debounce window doesn't lose what they just toggled.
+     */
+    override fun onStop() {
+        DiagnosticsLifecycleLogger.state("background")
+        super.onStop()
+        // A configuration-change recreation is not leaving Silo.
+        if (!isChangingConfigurations) {
+            get<ProfileAwayTracker>(ProfileAwayTracker::class.java).onBackground()
+        }
+        val monitor = get<ServerReachabilityMonitor>(ServerReachabilityMonitor::class.java)
+        monitor.stopForeground()
+        get<TvSiloCastReceiver>(TvSiloCastReceiver::class.java).stop()
+        val store = get<PlayerSettingsStore>(PlayerSettingsStore::class.java)
+        lifecycleScope.launch { store.flushPendingDeviceSettings() }
+    }
+
+    /**
+     * Mirrors the phone app's [org.siloserver.silo.android.MainActivity] startup
+     * flow on top of the multi-server [ServerRegistry]. See that file for the
+     * routing rules — they're identical: registry empty ⇒ ServerSetup,
+     * tokens missing ⇒ Login, no active profile header scope ⇒
+     * ProfileSelection, else Main.
+     */
+    private suspend fun resolveStartDestination(): String {
+        val registry = get<ServerRegistry>(ServerRegistry::class.java)
+        val tokenManager = get<TokenManager>(TokenManager::class.java)
+        val processStart = !hasResolvedLaunchProfile
+        // An unreadable registry hides which servers remember a profile, so
+        // settle on a later launch rather than mistake this TV for a new one.
+        if (processStart && !registry.stateLoadFailed) {
+            // The setting is device-wide, so a profile saved for any server
+            // makes this an existing TV, not just one on the active server.
+            val hasRememberedProfile = registry.entries.value.any { !it.profileId.isNullOrBlank() } ||
+                !tokenManager.getProfileId().isNullOrBlank()
+            get<ProfileLaunchPreferences>(ProfileLaunchPreferences::class.java)
+                .settleFirstLaunch(hasRememberedProfile = hasRememberedProfile)
+        }
+        // Only once settled: an Activity recreated while this was suspended
+        // must still settle.
+        hasResolvedLaunchProfile = true
+
+        val activeEntry = registry.activeEntry.value
+            ?: return TvRoute.ServerSetup.route
+
+        // Restored servers were probed by whichever build saved them (or never,
+        // before the v2 pilot); re-establish the contract verdict once per launch.
+        // A stored UPDATE_REQUIRED may be stale (server upgraded since), and a
+        // stored UNKNOWN (first launch after upgrading the app) passes the gate,
+        // so authenticated startup consumers would race the probe and could
+        // receive raw v2 404s from a v1-only server. Both wait (bounded) for
+        // the probe before routing; only a settled V2 skips the wait. A null
+        // result (V2, timeout, or failure) makes the name refresh re-probe.
+        val authRepository = get<AuthRepository>(AuthRepository::class.java)
+        val knownContract = kotlinx.coroutines.withContext(Dispatchers.IO) {
+            authRepository.awaitContractRefreshIfUnsettled()
+        }
+        lifecycleScope.launch(Dispatchers.IO) {
+            authRepository.refreshActiveServerName(knownContract = knownContract)
+        }
+        // Accounts saved before multiple accounts existed lack their server
+        // user, which tells a new sign-in apart from a saved account. Best
+        // effort, never awaited.
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching { authRepository.backfillAccountIdentities() }
+        }
+
+        val cleartextConsent = get<org.siloserver.silo.network.CleartextOriginConsent>(
+            org.siloserver.silo.network.CleartextOriginConsent::class.java,
+        )
+        if (cleartextConsent.requiresApproval(activeEntry.url)) {
+            return TvRoute.ServerSetup.route
+        }
+
+        val launchPreferences = get<ProfileLaunchPreferences>(ProfileLaunchPreferences::class.java)
+        val requiresSelection = if (processStart) {
+            launchPreferences.requiresSelectionAtLaunch()
+        } else {
+            get<ProfileAwayTracker>(ProfileAwayTracker::class.java).selectionRequired.value
+        }
+
+        // Automatic reopens the last tile, on whichever server and account
+        // (multi-account spec §4.2), when no profile is open here.
+        if (!requiresSelection && !tokenManager.hasTemporaryScope()) {
+            runCatching {
+                restoreLastTile(
+                    registry = registry,
+                    tokenManager = tokenManager,
+                    launchPreferences = launchPreferences,
+                    authRepository = authRepository,
+                    profileRepository = get(ProfileRepository::class.java),
+                    watchNextSeeder = get(WatchNextSeeder::class.java),
+                )
+            }
+        }
+
+        val accessToken = tokenManager.getAccessToken()
+        if (accessToken.isNullOrBlank()) {
+            // No session on the active server. With another account's session
+            // to go to, Change Account is the root (owner decision
+            // 2026-11-02); otherwise this server's sign-in, with an expired
+            // account's username filled in.
+            val active = registry.activeAccount.value
+            return when {
+                registry.noAccountOpenButAnotherSignedIn() -> TvRoute.ChangeAccount().route
+                active?.needsSignIn == true ->
+                    TvRoute.Login(sessionExpired = true, username = active.username).route
+                else -> TvRoute.Login().route
+            }
+        }
+
+        val profileId = tokenManager.getProfileId()
+        if (profileId.isNullOrBlank()) {
+            // The open account's only profile, with no PIN, opens without
+            // the picker (spec §4.2).
+            if (registry.onlyOpenTile() != null) SignInHandoff.skipsSingleProfilePicker = true
+            return TvRoute.ProfileSelection.route
+        }
+
+        // A remote-playback overlay (only possible when the Activity is
+        // recreated in a live process) owns identity until it ends; the
+        // navigation graph applies the return rule once it has.
+        if (tokenManager.hasTemporaryScope()) return TvRoute.Main.route
+
+        // Profile Selection (silo-apple `ProfileLaunchState.resolution`). A
+        // process start applies the launch rule: Every Time, or a timed choice
+        // whose away interval ran out while Silo was closed. A later Activity
+        // in this process (Back left Silo, then it was reopened) follows the
+        // return rule the away tracker evaluated in onStart. Either way the
+        // profile is cleared here, before the picker loads, and losing its PIN
+        // proof makes a protected profile ask for its PIN again.
+        // The open account's only profile, with no PIN, is never asked for (spec §4.2).
+        if (requiresSelection && registry.onlyOpenTileIsActive(tokenManager)) {
+            launchPreferences.clearBackgroundedAt()
+            get<ProfileAwayTracker>(ProfileAwayTracker::class.java).onSelectionHandled()
+            return TvRoute.Main.route
+        }
+        if (requiresSelection) {
+            get<TvActiveProfileReset>(TvActiveProfileReset::class.java).clearActiveProfile()
+            return TvRoute.ProfileSelection.route
+        }
+        if (processStart) launchPreferences.clearBackgroundedAt()
+
+        return TvRoute.Main.route
+    }
+
+    private fun launchAuthenticatedStartupWarmup(startRoute: String) {
+        // A launch that lands on profile selection still warms the profile
+        // list + avatar art so the grid paints finished after the splash
+        // (Apple's prefetchForInitialRoute(.needsProfile)).
+        if (startRoute == TvRoute.ProfileSelection.route) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                warmProfileSelectionStartup(
+                    context = applicationContext,
+                    profileRepository = get(ProfileRepository::class.java),
+                    serverUrl = get<ServerRegistry>(ServerRegistry::class.java).activeEntry.value?.url,
+                )
+            }
+            return
+        }
+        if (startRoute != TvRoute.Main.route) return
+        lifecycleScope.launch(Dispatchers.IO) {
+            warmAuthenticatedStartup(
+                context = applicationContext,
+                authRepository = get(AuthRepository::class.java),
+                profileRepository = get(ProfileRepository::class.java),
+                personalDataRepository = get(PersonalDataRepository::class.java),
+                sectionRepository = get(SectionRepository::class.java),
+                homeCache = get(HomeCachePort::class.java),
+                identityTransitions = get<org.siloserver.silo.network.IdentityTransitionBarrier>(
+                    org.siloserver.silo.network.IdentityTransitionBarrier::class.java,
+                ),
+                serverUrl = get<ServerRegistry>(ServerRegistry::class.java).activeEntry.value?.url,
+                artworkPlan = StartupArtworkPlan.tv(resources.displayMetrics.density),
+                // What Home will draw right now (cached answer, else logos on);
+                // never waits on the title art request.
+                showTitleArt = { get<TitleArtStore>(TitleArtStore::class.java).state.value.showTitleArt },
+            )
+        }
+    }
+
+    /** Whether the TV may receive casts, read under identity [generation]. */
+    private data class CastAuthState(val authenticated: Boolean, val generation: Long)
+
+    /**
+     * Emits whether the TV is signed in far enough to receive casts, re-read
+     * after every committed identity change, so signing in, picking a profile
+     * or signing out while the app stays open starts or stops the receiver.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun castAuthentication(identityTransitions: IdentityTransitionBarrier): Flow<CastAuthState> {
+        val registry = get<ServerRegistry>(ServerRegistry::class.java)
+        // Widened to nullable so a null marker can stand for "subscribed".
+        val transitions: SharedFlow<IdentityTransition?> = identityTransitions.transitions
+        return merge(
+            // The marker triggers the first read only once the subscription is
+            // live, so a transition finishing at that moment can't be missed.
+            // DID_CHANGE, not WILL_CHANGE: the new identity is only readable
+            // after the transition's block has run.
+            transitions
+                .onSubscription { emit(null) }
+                .filter { it == null || it.phase == IdentityTransitionPhase.DID_CHANGE },
+            registry.activeEntry,
+        )
+            .mapLatest {
+                // Captured before the read, so a transition landing mid-read
+                // marks the result stale.
+                val generation = identityTransitions.generation.value
+                CastAuthState(isAuthenticatedForCast(), generation)
+            }
+            // Keeps a repeated answer under a new generation: the collector may
+            // have dropped the earlier one as stale.
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.IO)
+    }
+
+    private suspend fun isAuthenticatedForCast(): Boolean {
+        val registry = get<ServerRegistry>(ServerRegistry::class.java)
+        val tokenManager = get<TokenManager>(TokenManager::class.java)
+        // A remote-playback overlay counts as signed in: stopping the receiver
+        // would end the handoff it belongs to.
+        if (tokenManager.hasTemporaryScope()) return true
+        return registry.activeEntry.value != null &&
+            !tokenManager.getAccessToken().isNullOrBlank() &&
+            !tokenManager.getProfileId().isNullOrBlank()
+    }
+}

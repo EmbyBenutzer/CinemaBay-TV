@@ -1,0 +1,347 @@
+package org.siloserver.silo.common.settings
+
+import org.siloserver.silo.domain.player.BufferingQualityMode
+import org.siloserver.silo.domain.player.IntroSkipMode
+import org.siloserver.silo.model.settings.CellularQuality
+import org.siloserver.silo.model.settings.SubtitleAppearance
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
+import org.siloserver.silo.player.DolbyVisionPolicy
+
+/**
+ * How far the phone player may expand a picture whose letterbox is encoded into
+ * the video (see the player's `LetterboxMatte`). Expansion never crops picture —
+ * it only eats black the file itself carries — so the question a user actually
+ * has is what to do about the camera cutout once the image reaches the edges.
+ */
+object LetterboxExpansion {
+    /** Expand, but keep the image clear of the display cutout. */
+    const val ClearOfCamera = "clear_of_camera"
+
+    /** Expand to the full display width; the camera overlaps the picture. */
+    const val FullWidth = "full_width"
+
+    /** Never expand — the coded frame is fitted whole, bars and all. */
+    const val Off = "off"
+
+    /**
+     * Biggest picture that is neither cropped nor covered. Expansion itself is
+     * free (the clip lands in encoded black), so it is on; stopping at the
+     * cutout costs width but is what keeps the whole image visible.
+     */
+    const val Default = ClearOfCamera
+
+    val Valid = setOf(ClearOfCamera, FullWidth, Off)
+}
+
+interface PlayerSettingsStore {
+    /**
+     * What the player does when an intro starts — `playback.intro_skip_mode`,
+     * contract revision 7. See the server's
+     * `docs/design/2026-08-16-intro-skip-mode.md`.
+     */
+    val introSkipModeFlow: Flow<IntroSkipMode>
+
+    /**
+     * What the player does on Auto when playback keeps buffering —
+     * `playback.buffering_quality_mode`. See the server's
+     * `docs/design/2026-10-17-buffering-quality.md`. The default (`always`)
+     * against a server whose manifest lacks the setting.
+     */
+    val bufferingQualityModeFlow: Flow<BufferingQualityMode>
+
+    /**
+     * True once the active server's manifest is known to define
+     * `playback.buffering_quality_mode`: Settings shows its row only then.
+     */
+    val bufferingQualityModeSupportedFlow: Flow<Boolean>
+        get() = flowOf(true)
+
+    // Booleans
+    /**
+     * The deprecated boolean, projected from [introSkipModeFlow] rather than
+     * read separately so the two cannot disagree — `always` is the only mode
+     * the boolean's `true` ever meant, and `never` degrades to the same `false`
+     * an old client would have shown as "ask".
+     *
+     * Nothing in the app should read this: it exists for the compatibility
+     * window while the server still mirrors the two keys.
+     */
+    val autoSkipIntroFlow: Flow<Boolean>
+        get() = introSkipModeFlow.map { it == IntroSkipMode.ALWAYS }
+    val autoSkipCreditsFlow: Flow<Boolean>
+    val autoPlayNextFlow: Flow<Boolean>
+
+    /** `ui.theme_music_enabled` as this device resolves it; off by default. */
+    val themeMusicEnabledFlow: Flow<Boolean>
+
+    /** `ui.theme_music_loop` as this device resolves it; off by default. */
+    val themeMusicLoopFlow: Flow<Boolean>
+    val hdrEnabledFlow: Flow<Boolean>
+    val dvProfile7HDR10FallbackFlow: Flow<Boolean>
+    val dolbyVisionEnabledFlow: Flow<Boolean>
+    val matchContentFrameRateFlow: Flow<Boolean>
+    val pictureInPictureEnabledFlow: Flow<Boolean>
+
+    /** See [org.siloserver.silo.model.settings.PlaybackSettingsKeys.ForceHdrPassthrough]. */
+    val forceHdrPassthroughFlow: Flow<Boolean>
+
+    /**
+     * How far to expand video whose black bars are encoded into the picture
+     * (a 2.39:1 film inside a 16:9 frame) — see [LetterboxExpansion].
+     *
+     * Defaulted here rather than declared abstract so the existing fakes in the
+     * player tests keep compiling; the real store overrides it.
+     */
+    val letterboxExpansionFlow: Flow<String>
+        get() = flowOf(LetterboxExpansion.Default)
+
+    /**
+     * See [org.siloserver.silo.model.settings.PlaybackSettingsKeys.TrueBlackBars].
+     * Defaulted for the same reason as [letterboxExpansionFlow].
+     */
+    val trueBlackBarsFlow: Flow<Boolean>
+        get() = flowOf(false)
+
+    /** Per-profile preference for restricting downloads to unmetered (Wi-Fi)
+     *  networks. Default true. Consumed by [DownloadEnqueuer] at enqueue
+     *  time to set the WorkManager NetworkType constraint. */
+    val downloadsWifiOnlyFlow: Flow<Boolean>
+    val keepWatchedDownloadsFlow: Flow<Boolean>
+    val defaultDownloadQualityFlow: Flow<String>
+
+    // Doubles
+    val playbackSpeedFlow: Flow<Double>
+
+    // Ints
+    val audioSyncMsFlow: Flow<Int>
+    /** Canonical device-scoped subtitle offset (`player.subtitle_sync_ms`). */
+    val subtitleSyncMsFlow: Flow<Int>
+    val nextUpPromptSecondsFlow: Flow<Int>
+    val sleepTimerDefaultMinutesFlow: Flow<Int>
+    /** Seconds to skip back on resume (F1). Default 7; 0 = off. Local-only. */
+    val resumeRewindSecondsFlow: Flow<Int>
+    /** Consecutive auto-advances before the "Still watching?" prompt (F2). Default 3; 0 = off. Local-only. */
+    val passOutThresholdFlow: Flow<Int>
+
+    /**
+     * The bandwidth half of the quality choice, orthogonal to
+     * [preferredQualityFlow]. null is uncapped, which is the absence of a
+     * stored value rather than a sentinel.
+     */
+    val maxBitrateKbpsFlow: Flow<Int?>
+
+    /**
+     * The phone's cellular pair, sent instead of [preferredQualityFlow] and
+     * [maxBitrateKbpsFlow] on mobile data or a metered network. Defaults to
+     * the 720p preset. Kept and applied locally against a server too old to
+     * store it; see [CellularQuality].
+     */
+    val cellularPreferredQualityFlow: Flow<String>
+        get() = flowOf(CellularQuality.DEFAULT_RESOLUTION)
+    /** null is uncapped, as for [maxBitrateKbpsFlow]. */
+    val cellularMaxBitrateKbpsFlow: Flow<Int?>
+        get() = flowOf(CellularQuality.DEFAULT_MAX_BITRATE_KBPS)
+
+    // Strings
+    val preferredQualityFlow: Flow<String>
+    val audioLanguageFlow: Flow<String>
+    val videoGravityFlow: Flow<String>
+    val orientationModeFlow: Flow<String>
+
+    // Composite
+    val subtitleAppearanceFlow: Flow<SubtitleAppearance>
+    /** Last explicitly edited custom appearance, retained while its override is disabled. */
+    val savedCustomSubtitleAppearanceFlow: Flow<SubtitleAppearance>
+        get() = subtitleAppearanceFlow
+
+    /**
+     * "Only on This Device" for subtitles (mirrors iOS
+     * `subtitleUsesDeviceAppearanceOverride`). When false, subtitle appearance
+     * and timing edits save to the profile and apply on every device; when
+     * true, they are saved for this device only.
+     */
+    val subtitleUsesDeviceOverrideFlow: Flow<Boolean>
+
+    /**
+     * Whether a subtitle delay set now is saved for the profile on every
+     * device (false: on this device only — the toggle is on, or the server
+     * stores timing per device only).
+     */
+    val subtitleSyncSavedToProfileFlow: Flow<Boolean>
+        get() = subtitleUsesDeviceOverrideFlow.map { !it }
+    /** tvOS "Match Device Settings": appearance follows OS captioning prefs. */
+    val subtitleMatchesDeviceFlow: Flow<Boolean>
+    /** iOS AppNavPreferences.showAudiobooks parity — audiobook surfaces are opt-in. */
+    val showAudiobooksFlow: Flow<Boolean>
+
+    /**
+     * The server-stored keys this device holds its own value for, in the
+     * active profile. A control whose key is absent follows the profile (or
+     * the default); see [PlaybackSettingsKeys.hasDeviceOverride][org.siloserver.silo.model.settings.PlaybackSettingsKeys.hasDeviceOverride].
+     */
+    val deviceOverrideKeysFlow: Flow<Set<String>>
+        get() = flowOf(emptySet())
+    /** [subtitleAppearanceFlow] with the match-device override applied. */
+    val effectiveSubtitleAppearanceFlow: Flow<org.siloserver.silo.model.settings.SubtitleAppearance>
+
+    /**
+     * False only when the active server is known to run a settings manifest
+     * older than [SubtitleAppearance.TEXT_OPACITY_MIN_MANIFEST_REVISION], so it
+     * would discard [SubtitleAppearance.textOpacity]. An unknown revision
+     * counts as supported: the flusher holds the value until it is known.
+     */
+    val subtitleTextOpacitySupportedFlow: Flow<Boolean>
+        get() = flowOf(true)
+
+    // Setters
+    suspend fun setIntroSkipMode(value: IntroSkipMode)
+    suspend fun setBufferingQualityMode(value: BufferingQualityMode)
+
+    /**
+     * Deprecated shim for the boolean. Routes to [setIntroSkipMode] so a caller
+     * that has not moved yet still writes the canonical key; the server mirrors
+     * the boolean back at the same identity.
+     */
+    suspend fun setAutoSkipIntro(value: Boolean) =
+        setIntroSkipMode(IntroSkipMode.fromLegacyBoolean(value))
+    suspend fun setAutoSkipCredits(value: Boolean)
+    suspend fun setAutoPlayNext(value: Boolean)
+    suspend fun setThemeMusicEnabled(value: Boolean)
+    suspend fun setThemeMusicLoop(value: Boolean)
+    suspend fun setHdrEnabled(value: Boolean)
+    suspend fun setDvProfile7HDR10Fallback(value: Boolean)
+    suspend fun setDolbyVisionEnabled(value: Boolean)
+    suspend fun setMatchContentFrameRate(value: Boolean)
+    suspend fun setPictureInPictureEnabled(value: Boolean)
+    suspend fun setForceHdrPassthrough(value: Boolean)
+    suspend fun setLetterboxExpansion(value: String) = Unit
+    suspend fun setTrueBlackBars(value: Boolean) = Unit
+    suspend fun setDownloadsWifiOnly(value: Boolean)
+    suspend fun setKeepWatchedDownloads(value: Boolean)
+    suspend fun setDefaultDownloadQuality(value: String)
+
+    suspend fun setPlaybackSpeed(value: Double)
+
+    suspend fun setAudioSyncMs(value: Int)
+    suspend fun setSubtitleSyncMs(value: Int)
+    suspend fun setNextUpPromptSeconds(value: Int)
+    suspend fun setSleepTimerDefaultMinutes(value: Int)
+    /** Set resume skip-back seconds (clamped 0..30; 0 = off). */
+    suspend fun setResumeRewindSeconds(value: Int)
+    /** Set the pass-out prompt threshold (clamped 0..10; 0 = off). */
+    suspend fun setPassOutThreshold(value: Int)
+
+    suspend fun setPreferredQuality(value: String)
+
+    /** The bitrate ceiling, independent of the resolution; null is uncapped. */
+    suspend fun setMaxBitrateKbps(value: Int?) = Unit
+
+    /**
+     * Set both cellular axes at once — the two values one preset decomposes
+     * into, so the pair never holds a combination no preset covers.
+     * [bitrateKbps] null is uncapped.
+     */
+    suspend fun setCellularQuality(resolution: String, bitrateKbps: Int?) = Unit
+    suspend fun setAudioLanguage(value: String)
+    suspend fun setVideoGravity(value: String)
+    suspend fun setOrientationMode(value: String)
+
+    suspend fun setSubtitleAppearance(value: SubtitleAppearance)
+
+    /**
+     * Applies [transform] atomically against the current stored appearance,
+     * read inside the same DataStore transaction that writes the result.
+     * Unlike a caller reading [subtitleAppearanceFlow] and then calling
+     * [setSubtitleAppearance] separately, no write from another caller can
+     * land in the gap between the read and the write — two edits committing
+     * around the same time (e.g. two fields as a sheet dismisses) each see
+     * the other's result instead of racing on a shared pre-transaction read.
+     *
+     * The default falls back to the non-atomic read-then-write for fakes
+     * that only need to capture the resulting value; [AndroidPlayerSettingsStore]
+     * overrides this with the real atomic transaction.
+     */
+    suspend fun updateSubtitleAppearance(transform: (SubtitleAppearance) -> SubtitleAppearance) {
+        setSubtitleAppearance(transform(subtitleAppearanceFlow.first()))
+    }
+
+    /**
+     * Project the granular, client-local `subtitle.*` fields into the
+     * composite `playback.subtitle_appearance` and enqueue it.
+     *
+     * The contract carries subtitle appearance as one object and has no
+     * definitions for the individual fields, so a per-field edit is
+     * device-local until it is folded into the composite. Call this after
+     * editing fields individually (the player HUD, a per-field picker); a
+     * no-op when the projection already matches what is stored.
+     */
+    suspend fun flushProjectedSubtitleAppearance()
+
+    /**
+     * Pull every device-scoped setting from `/api/v2/settings/values/effective`
+     * and write the resolved values into the local DataStore without
+     * round-tripping them back to the server. Mirrors iOS
+     * `PlayerSettings.refreshFromServer()`. Safe to call repeatedly
+     * (idempotent with respect to local state); silently no-ops when no
+     * profile is active or the network is unreachable.
+     */
+    suspend fun refreshFromServer()
+
+    /**
+     * Toggle "Only on This Device" for subtitles. When `enabled` is false,
+     * deletes this device's subtitle appearance (and, where the server stores
+     * timing per profile, its timing) and refetches the profile's values.
+     * When true, pins the appearance on screen to this device; later edits
+     * stay on this device.
+     */
+    suspend fun setSubtitleDeviceOverrideEnabled(enabled: Boolean)
+    suspend fun setSubtitleMatchesDevice(enabled: Boolean)
+    suspend fun setShowAudiobooks(enabled: Boolean)
+
+    /**
+     * Go back to the profile's value for one setting on this device: clears
+     * the device-scoped value for [key] (and any key its control writes with
+     * it), then refreshes so the profile's value, or the default, applies.
+     */
+    suspend fun resetDeviceSetting(key: String)
+
+    /**
+     * The user's "Use Profile Settings" action. Clears every server-side
+     * device override (as iOS `PlayerSettings.resetAllDeviceSettings()` does)
+     * and resets the local-only playback keys, which have no profile value, to
+     * their defaults.
+     *
+     * Returns true when every clear reached the server and the server's
+     * answer no longer resolves any setting from this device; false when some
+     * are still queued (offline) or the server could not confirm it.
+     */
+    suspend fun resetAllDeviceSettings(): Boolean
+
+    /**
+     * Cancel any in-flight debounce, drain pending writes, and suspend
+     * until each one acks. Use this from app-lifecycle ON_STOP to make
+     * sure settings the user just toggled survive a backgrounding /
+     * process death window.
+     */
+    /** Import only under original authority; true means all writes were acknowledged. */
+    suspend fun importLegacyDeviceSettings(
+        authority: org.siloserver.silo.network.AuthScopeSnapshot,
+        values: Map<String, String>,
+    ): Boolean = false
+
+    suspend fun flushPendingDeviceSettings()
+}
+
+/**
+ * Current Dolby Vision decision inputs, read once at plan/load time. DV off
+ * supersedes the Profile 7 fallback toggle (precedence enforced inside
+ * [DolbyVisionPolicy]).
+ */
+suspend fun PlayerSettingsStore.dolbyVisionPolicySnapshot(): DolbyVisionPolicy.Snapshot =
+    DolbyVisionPolicy.Snapshot(
+        dolbyVisionEnabled = dolbyVisionEnabledFlow.first(),
+        preferProfile7HDR10Fallback = dvProfile7HDR10FallbackFlow.first(),
+    )

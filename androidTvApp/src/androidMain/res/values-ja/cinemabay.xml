@@ -1,0 +1,34 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+  <string name="app_name">CinemaBay</string>
+  <string name="android_settings_appLanguageFooter">このプロフィールのCinemaBayのメニューとボタンの言語で、すべてのデバイスに適用されます。音声、字幕、メタデータの言語は別の設定です。</string>
+  <plurals name="diagnostics_capture_hostedFooter">
+    <item quantity="other">レポートには、CinemaBayアプリのバージョンとビルド、Androidのバージョン、デバイスのモデル、クラッシュの詳細、確認済みの診断ログが含まれます。仮名のインストール認証情報は、セルフホストサーバーのアカウントとは紐付けられません。ユーザー名、メールアドレス、プロフィール、サーバーアドレス、再生セッションIDは含まれません。レポートが自動的に送信されることはなく、最大%1$d日間保持される場合があります。</item>
+  </plurals>
+  <plurals name="diagnostics_capture_hostedFooterTv">
+    <item quantity="other">レポートには、CinemaBayアプリのバージョンとビルド、Androidのバージョン、デバイスのモデル、クラッシュの詳細、確認済みの診断ログが含まれます。仮名のインストール認証情報は、セルフホストサーバーのアカウントとは紐付けられません。ユーザー名、メールアドレス、プロフィール、サーバーアドレス、再生セッションIDは含まれません。レポートが自動的に送信されることはなく、最大%1$d日間保持される場合があります。ポリシーの全文：%2$s</item>
+  </plurals>
+  <string name="diagnostics_prompt_privacyNotice">レポートには、CinemaBayアプリのバージョンとビルド、Androidのバージョン、デバイスのモデル、クラッシュの詳細、診断ログが含まれます。仮名の認証情報は、セルフホストサーバーのアカウントとは紐付けられません。ユーザー名、メールアドレス、プロフィール、サーバーアドレス、再生セッションIDは含まれません。自動的に送信されることはなく、最大30日間保持される場合があります。</string>
+  <string name="diagnostics_prompt_title">CinemaBayで問題が発生しました</string>
+  <string name="settings_bufferingQuality_description">自動画質で再生中にバッファリングが続く場合のCinemaBayの動作です。選択した画質を下げる前には、必ず確認します。</string>
+  <string name="settings_episodes_footer">「再開時に巻き戻す」は、途中まで視聴したタイトルに戻ったときに少し巻き戻します。「視聴継続の確認」では、CinemaBayが視聴を続けているか確認するまでに連続再生するエピソード数を設定します。</string>
+  <string name="settings_notifications_inAppFooter">新作が追加されたときにCinemaBay内で通知を表示します。</string>
+  <string name="settings_profileLaunch_afterOneHour_detail">CinemaBayから1時間離れると、プロフィール選択画面を表示します。</string>
+  <string name="settings_profileLaunch_afterTwelveHours_detail">CinemaBayから12時間離れると、プロフィール選択画面を表示します。</string>
+  <string name="settings_profileLaunch_askEveryLaunch_detail">CinemaBayに戻るたびに、プロフィール選択画面を表示します。</string>
+  <string name="settings_profileSelection_footer">CinemaBayがプロフィールの選択を求めるタイミングを選びます。この設定はこのデバイスにのみ適用されます。</string>
+  <string name="settings_streaming_footer">%1$s「HDRパススルーを強制」は、このテレビがHDR対応を報告しない場合でもHDR再生を許可します。HDMI出力をHDRに強制するものではなく、Androidが映像をSDRに変換することがあります。テレビがソースの形式に対応していることを確認した場合にのみオンにしてください。対応していない形式では、画面が真っ暗になったり色が正しく表示されなかったりすることがあります。「完全な黒帯」をオンにすると、再生中に映像の周りの帯をCinemaBayが描画しなくなります。HDRやDolby Visionで帯がグレーに見える場合にお試しください。帯が明るくなったり細い線が表示されたりする場合は、再びオフにしてください。</string>
+  <string name="settingsManifest_catalog_metadata_language_description">CinemaBayがタイトル、説明、アートワークに優先して使う代替の言語です。</string>
+  <string name="settingsManifest_playback_audio_language_description">CinemaBayが最初に優先する音声の言語を選択します。</string>
+  <string name="settingsManifest_playback_auto_skip_intro_description">CinemaBayがイントロを検出できた場合、自動的にスキップします。</string>
+  <string name="settingsManifest_playback_auto_skip_recap_description">CinemaBayが「前回までのあらすじ」を検出できた場合、自動的にスキップします。</string>
+  <string name="settingsManifest_playback_buffering_quality_mode_description">自動のときにバッファリングが続く場合のCinemaBayの動作です。選択した画質を下げる前には必ず確認します。</string>
+  <string name="settingsManifest_playback_intro_skip_mode_description">イントロが始まったときのCinemaBayの動作です。何もしない、「イントロをスキップ」ボタンを表示する、またはスキップして元に戻す操作を表示する、から選びます。</string>
+  <string name="settingsManifest_playback_max_bitrate_kbps_description">再生に使う帯域幅を制限します。制限なしの場合、CinemaBayが選択した解像度に合わせて決めます。</string>
+  <string name="settingsManifest_playback_preferred_quality_description">CinemaBayが優先する画質を選択します。</string>
+  <string name="settingsManifest_playback_subtitle_language_description">CinemaBayが最初に優先する字幕の言語を選択します。</string>
+  <string name="settingsManifest_playback_subtitle_mode_description">CinemaBayが字幕をオンにするタイミングです。</string>
+  <string name="settingsManifest_player_passout_threshold_description">CinemaBayが視聴を続けているか確認するまでに自動再生するエピソード数です。0にすると確認しません。</string>
+  <string name="settingsManifest_subtitle_matches_device_description">CinemaBayの字幕スタイルの代わりにOSの字幕スタイルを使用します。</string>
+  <string name="settingsManifest_ui_theme_description">CinemaBayのインターフェースのカラーテーマです。</string>
+</resources>

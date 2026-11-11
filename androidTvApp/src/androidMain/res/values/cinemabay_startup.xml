@@ -1,0 +1,6 @@
+<resources>
+    <string name="cinemabay_startup_skip">OK or Back: skip intro</string>
+    <string name="cinemabay_startup_title">CinemaBay startup</string>
+    <string name="cinemabay_startup_showIntro">Show startup intro</string>
+    <string name="cinemabay_startup_hint">Play the intro once on a cold start. Press OK or Back to skip. Applies only to this TV.</string>
+</resources>

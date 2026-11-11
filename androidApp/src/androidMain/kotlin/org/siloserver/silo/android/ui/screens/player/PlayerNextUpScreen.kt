@@ -1,0 +1,471 @@
+package org.siloserver.silo.android.ui.screens.player
+
+import android.graphics.Rect
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import org.siloserver.silo.common.R as CommonR
+import org.siloserver.silo.common.i18n.LocaleFormat
+import org.siloserver.silo.common.i18n.stringResourceWithNames
+import org.siloserver.silo.common.player.videoViewportBounds
+import org.siloserver.silo.common.ui.components.DeferImagePresentationWhileScrolling
+import org.siloserver.silo.common.cards.LocalEpisodeSpoilerPrefs
+import org.siloserver.silo.common.ui.components.SpoilerImage
+import org.siloserver.silo.common.i18n.currentNumberLocale
+
+/** Episode details and controls beside the mounted player's preview pane. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun PlayerNextUpScreen(
+    nextEpisode: PlayerViewModel.NextEpisodeInfo?,
+    onDeckItems: List<PlayerViewModel.OnDeckItem>,
+    videoEnded: Boolean,
+    countdownSeconds: Int?,
+    countdownTotalSeconds: Int,
+    autoPlayEnabled: Boolean,
+    onPlayNow: () -> Unit,
+    onKeepWatching: () -> Unit,
+    onToggleAutoPlay: () -> Unit,
+    onPlayOnDeckItem: (String) -> Unit,
+    onBack: () -> Unit,
+    onVideoBoundsChanged: (Rect) -> Unit,
+    // The video playing in the frame is loading; the spinner sits on it.
+    spinnerVisible: Boolean = false,
+    compactTabletop: Boolean = false,
+    // Set while a shuffle plays: the next item is a random pick, and the
+    // viewer can pick another or stop shuffling.
+    shuffle: PlayerViewModel.ShuffleUiState? = null,
+    onPickAnother: () -> Unit = {},
+    onStopShuffling: () -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
+    BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+        val sideBySide = maxWidth > maxHeight && !compactTabletop
+        val panelAlignment = if (sideBySide) Alignment.Start else Alignment.CenterHorizontally
+        val panel: @Composable (Modifier) -> Unit = { panelModifier ->
+            Column(
+                modifier = panelModifier.widthIn(max = 620.dp),
+                horizontalAlignment = panelAlignment,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                shuffle?.scopeLabel?.let { scope ->
+                    Row(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.10f))
+                            .padding(horizontal = 12.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Shuffle,
+                            contentDescription = null,
+                            tint = Color.White.copy(alpha = 0.75f),
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Text(
+                            text = stringResourceWithNames(CommonR.string.upNext_shuffling, scope),
+                            color = Color.White.copy(alpha = 0.75f),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                Text(
+                    // The heading is shown in capitals, as before.
+                    text = stringResource(
+                        when {
+                            nextEpisode == null -> CommonR.string.upNext_headingFinished
+                            shuffle != null -> CommonR.string.upNext_headingShuffle
+                            videoEnded -> CommonR.string.upNext_headingEnded
+                            else -> CommonR.string.upNext_heading
+                        },
+                    ).uppercase(),
+                    color = Color.White.copy(alpha = 0.52f),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 2.sp,
+                )
+                if (nextEpisode != null) {
+                    // A shuffled movie has no series line; its own title heads the card.
+                    val heading = nextEpisode.seriesTitle?.takeIf { it.isNotBlank() }
+                        ?: nextEpisode.title.takeUnless { nextEpisode.isEpisode }
+                    heading?.let { title ->
+                        Text(
+                            text = title,
+                            color = Color.White,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (nextEpisode.isEpisode) {
+                        Text(
+                            text = nextEpisodeLabel(nextEpisode),
+                            color = Color.White,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (nextEpisode.runtimeMinutes > 0) {
+                        Text(
+                            text = stringResource(CommonR.string.catalog_runtimeMinutes, LocaleFormat.integer(nextEpisode.runtimeMinutes)),
+                            color = Color.White.copy(alpha = 0.62f),
+                            fontSize = 13.sp,
+                        )
+                    }
+                    val hidesOverview =
+                        LocalEpisodeSpoilerPrefs.current.hidesOverview(nextEpisode.isUnwatched)
+                    val overview = nextEpisode.overview?.takeIf { it.isNotBlank() && !hidesOverview }
+                    if (overview != null) {
+                        Text(
+                            text = overview,
+                            color = Color.White.copy(alpha = 0.58f),
+                            fontSize = 13.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                } else {
+                    Text(stringResource(CommonR.string.upNext_endOfPlayback), color = Color.White, fontSize = 17.sp)
+                }
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, panelAlignment),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    NextUpActionButtons(
+                        hasNextEpisode = nextEpisode != null,
+                        videoEnded = videoEnded,
+                        onPlayNow = onPlayNow,
+                        onKeepWatching = onKeepWatching,
+                        onBack = onBack,
+                        pickAnother = if (shuffle != null && nextEpisode != null) {
+                            PickAnotherAction(enabled = !shuffle.pickingAnother, onClick = onPickAnother)
+                        } else {
+                            null
+                        },
+                    )
+                    if (countdownSeconds != null) {
+                        CountdownRing(countdownSeconds, countdownTotalSeconds)
+                    }
+                }
+                shuffle?.message?.let { message ->
+                    Text(stringResource(message), color = Color(0xFFFFB4AB), fontSize = 13.sp)
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = stringResource(if (autoPlayEnabled) CommonR.string.upNext_autoPlayOn else CommonR.string.upNext_autoPlayOff),
+                        color = Color.White.copy(alpha = 0.54f),
+                        fontSize = 12.sp,
+                        modifier = Modifier.clip(CircleShape).clickable(onClick = onToggleAutoPlay)
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                    )
+                    if (shuffle != null) {
+                        Text("·", color = Color.White.copy(alpha = 0.54f), fontSize = 12.sp)
+                        Text(
+                            text = stringResource(CommonR.string.upNext_stopShuffling),
+                            color = Color.White.copy(alpha = 0.54f),
+                            fontSize = 12.sp,
+                            modifier = Modifier.clip(CircleShape).clickable(onClick = onStopShuffling)
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                        )
+                    }
+                }
+                if (!compactTabletop && onDeckItems.isNotEmpty()) {
+                    Text(stringResource(CommonR.string.upNext_onDeck), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    val onDeckState = rememberLazyListState()
+                    DeferImagePresentationWhileScrolling(onDeckState) {
+                        LazyRow(state = onDeckState, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            items(onDeckItems, key = { it.contentId }) { item ->
+                                OnDeckCard(item = item, onClick = { onPlayOnDeckItem(item.contentId) })
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        val scrollState = rememberScrollState()
+        DeferImagePresentationWhileScrolling(scrollState) {
+            if (sideBySide) {
+                Row(
+                    modifier = Modifier.fillMaxSize().padding(24.dp),
+                    horizontalArrangement = Arrangement.spacedBy(24.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    NextUpVideoPane(onVideoBoundsChanged, spinnerVisible, Modifier.weight(0.45f))
+                    panel(Modifier.weight(0.55f).verticalScroll(scrollState))
+                }
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxSize().verticalScroll(scrollState)
+                        .padding(horizontal = 24.dp, vertical = if (compactTabletop) 12.dp else 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(20.dp),
+                ) {
+                    if (!compactTabletop) {
+                        NextUpVideoPane(
+                            onVideoBoundsChanged,
+                            spinnerVisible,
+                            Modifier.widthIn(max = 620.dp).fillMaxWidth(),
+                        )
+                    }
+                    panel(Modifier)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NextUpVideoPane(onBoundsChanged: (Rect) -> Unit, spinnerVisible: Boolean, modifier: Modifier) {
+    Box(
+        modifier = modifier.aspectRatio(16f / 9f)
+            .onGloballyPositioned { onBoundsChanged(it.videoViewportBounds()) }
+            .border(1.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(8.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (spinnerVisible) PlayerLoadingSpinner()
+    }
+}
+
+private class PickAnotherAction(val enabled: Boolean, val onClick: () -> Unit)
+
+@Composable
+private fun NextUpActionButtons(
+    hasNextEpisode: Boolean,
+    videoEnded: Boolean,
+    onPlayNow: () -> Unit,
+    onKeepWatching: () -> Unit,
+    onBack: () -> Unit,
+    pickAnother: PickAnotherAction? = null,
+    modifier: Modifier = Modifier,
+) {
+    if (hasNextEpisode) {
+        Button(
+            onClick = onPlayNow,
+            modifier = modifier,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color.White,
+                contentColor = Color.Black,
+            ),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.PlayArrow,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(stringResource(CommonR.string.upNext_playNow))
+        }
+    }
+    if (pickAnother != null) {
+        OutlinedButton(
+            onClick = pickAnother.onClick,
+            enabled = pickAnother.enabled,
+            modifier = modifier,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Shuffle,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(stringResource(CommonR.string.upNext_pickAnother), color = Color.White)
+        }
+    }
+    if (!videoEnded) {
+        OutlinedButton(
+            onClick = onKeepWatching,
+            modifier = modifier,
+        ) {
+            Text(stringResource(CommonR.string.upNext_keepWatching), color = Color.White)
+        }
+    }
+    OutlinedButton(
+        onClick = onBack,
+        modifier = modifier,
+    ) {
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+            contentDescription = null,
+            tint = Color.White,
+            modifier = Modifier.size(18.dp),
+        )
+        Text(stringResource(CommonR.string.common_back), color = Color.White)
+    }
+}
+
+@Composable
+private fun OnDeckCard(
+    item: PlayerViewModel.OnDeckItem,
+    onClick: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .width(180.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(16f / 9f)
+                .clip(RoundedCornerShape(8.dp)),
+        ) {
+            SpoilerImage(
+                url = item.artUrl,
+                thumbhash = item.artThumbhash,
+                hidden = LocalEpisodeSpoilerPrefs.current.hidesImage(item.isUnwatchedEpisode, item.imageIsEpisodeStill),
+                contentDescription = item.title,
+                modifier = Modifier.fillMaxSize(),
+            )
+            item.progressFraction?.takeIf { it > 0f }?.let { fraction ->
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .height(3.dp)
+                        .background(Color.White.copy(alpha = 0.25f)),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(fraction)
+                            .fillMaxHeight()
+                            .background(MaterialTheme.colorScheme.primary),
+                    )
+                }
+            }
+        }
+        Text(
+            text = item.title,
+            color = Color.White,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        (item.episodeLine?.let { onDeckEpisodeText(it) } ?: item.year?.let { LocaleFormat.integer(it, currentNumberLocale()) } ?: item.subtitle)?.let { subtitle ->
+            Text(
+                text = subtitle,
+                color = Color.White.copy(alpha = 0.8f),
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/** iOS `CountdownRing`: a 44pt circular trim showing seconds remaining. */
+@Composable
+private fun CountdownRing(
+    seconds: Int,
+    totalSeconds: Int,
+) {
+    val fraction = if (totalSeconds > 0) {
+        (seconds.toFloat() / totalSeconds.toFloat()).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    Box(
+        modifier = Modifier.size(44.dp).clip(CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val stroke = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
+            drawCircle(
+                color = Color.White.copy(alpha = 0.2f),
+                style = stroke,
+                radius = size.minDimension / 2f - stroke.width / 2f,
+            )
+            drawArc(
+                color = Color.White,
+                startAngle = -90f,
+                sweepAngle = 360f * fraction,
+                useCenter = false,
+                style = stroke,
+                topLeft = Offset(stroke.width / 2f, stroke.width / 2f),
+                size = androidx.compose.ui.geometry.Size(
+                    size.width - stroke.width,
+                    size.height - stroke.width,
+                ),
+            )
+        }
+        Text(
+            text = LocaleFormat.integer(seconds, currentNumberLocale()),
+            color = Color.White,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+/** "S2·E4 — Title" under an On Deck card's title. */
+@Composable
+private fun onDeckEpisodeText(line: PlayerViewModel.OnDeckEpisodeLine): String {
+    val code = stringResource(CommonR.string.upNext_episodeCode, LocaleFormat.codeNumber(line.season), LocaleFormat.codeNumber(line.episode))
+    return code + (line.title?.let { " — $it" } ?: "")
+}
+
+/** "S2·E4 — Title", the next episode's line on the card. */
+@Composable
+private fun nextEpisodeLabel(episode: PlayerViewModel.NextEpisodeInfo): String {
+    val code = stringResource(CommonR.string.upNext_episodeCode, LocaleFormat.codeNumber(episode.seasonNumber), LocaleFormat.codeNumber(episode.episodeNumber))
+    return code + (episode.title?.let { " — $it" } ?: "")
+}

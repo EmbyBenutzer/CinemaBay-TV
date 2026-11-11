@@ -1,0 +1,450 @@
+package org.siloserver.silo.cast
+
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.descriptors.elementNames
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonClassDiscriminator
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.put
+
+/**
+ * Wire model for the `_silocast._tcp` phone→TV control channel.
+ *
+ * BYTE-COMPATIBLE WITH silo-apple's SiloControlMessage
+ * (iosApp/Control/SiloControlProtocol.swift) — Apple clients ship this exact
+ * schema and cannot be revved in lockstep, so every field name, casing, enum
+ * string, and envelope key here mirrors the Swift Codable output: camelCase
+ * payload fields, `{type, v, <kind>}` envelope with the payload nested under
+ * the kind key, payloadless ping/pong, an optional `close` payload, and Int64
+ * track ids. Every field added after the first release is optional and sent
+ * only to peers that list the matching [SiloCastFeature]. Change this file
+ * only together with silo-apple.
+ */
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable
+@JsonClassDiscriminator("type")
+sealed class SiloCastMessage {
+    abstract val v: Int
+
+    @Serializable
+    @SerialName("hello")
+    data class Hello(
+        val hello: SiloCastHello,
+        @EncodeDefault(EncodeDefault.Mode.ALWAYS) override val v: Int = SiloCastProtocol.version,
+    ) : SiloCastMessage()
+
+    @Serializable
+    @SerialName("handoff_offer")
+    data class HandoffOffer(
+        val handoffOffer: SiloCastHandoffOffer,
+        @EncodeDefault(EncodeDefault.Mode.ALWAYS) override val v: Int = SiloCastProtocol.version,
+    ) : SiloCastMessage()
+
+    @Serializable
+    @SerialName("handoff_challenge")
+    data class HandoffChallenge(
+        val handoffChallenge: SiloCastHandoffChallenge,
+        @EncodeDefault(EncodeDefault.Mode.ALWAYS) override val v: Int = SiloCastProtocol.version,
+    ) : SiloCastMessage()
+
+    @Serializable
+    @SerialName("handoff_ready")
+    data class HandoffReady(
+        val handoffReady: SiloCastHandoffReady,
+        @EncodeDefault(EncodeDefault.Mode.ALWAYS) override val v: Int = SiloCastProtocol.version,
+    ) : SiloCastMessage()
+
+    @Serializable
+    @SerialName("handoff_cancel")
+    data class HandoffCancel(
+        val handoffCancel: SiloCastHandoffCancel,
+        @EncodeDefault(EncodeDefault.Mode.ALWAYS) override val v: Int = SiloCastProtocol.version,
+    ) : SiloCastMessage()
+
+    @Serializable
+    @SerialName("launch")
+    data class Launch(
+        val launch: SiloCastLaunchRequest,
+        @EncodeDefault(EncodeDefault.Mode.ALWAYS) override val v: Int = SiloCastProtocol.version,
+    ) : SiloCastMessage()
+
+    @Serializable
+    @SerialName("control")
+    data class Control(
+        val control: SiloCastControlCommand,
+        @EncodeDefault(EncodeDefault.Mode.ALWAYS) override val v: Int = SiloCastProtocol.version,
+    ) : SiloCastMessage()
+
+    @Serializable
+    @SerialName("state")
+    data class State(
+        val state: SiloCastPlaybackState,
+        @EncodeDefault(EncodeDefault.Mode.ALWAYS) override val v: Int = SiloCastProtocol.version,
+    ) : SiloCastMessage()
+
+    @Serializable
+    @SerialName("error")
+    data class Error(
+        val error: SiloCastError,
+        @EncodeDefault(EncodeDefault.Mode.ALWAYS) override val v: Int = SiloCastProtocol.version,
+    ) : SiloCastMessage()
+
+    /** A controller's `passive` flag after hello. Sent only to receivers that list [SiloCastFeature.Presence]. */
+    @Serializable
+    @SerialName("presence")
+    data class Presence(
+        val presence: SiloCastPresence,
+        @EncodeDefault(EncodeDefault.Mode.ALWAYS) override val v: Int = SiloCastProtocol.version,
+    ) : SiloCastMessage()
+
+    @Serializable
+    @SerialName("ping")
+    data class Ping(
+        @EncodeDefault(EncodeDefault.Mode.ALWAYS) override val v: Int = SiloCastProtocol.version,
+    ) : SiloCastMessage()
+
+    @Serializable
+    @SerialName("pong")
+    data class Pong(
+        @EncodeDefault(EncodeDefault.Mode.ALWAYS) override val v: Int = SiloCastProtocol.version,
+    ) : SiloCastMessage()
+
+    /**
+     * Ends the session. [close] carries `{"reason": ...}` ([SiloCastCloseReason])
+     * only for peers that list [SiloCastFeature.CloseReason]; older peers get a
+     * bare close. Kept as raw JSON so a malformed payload reads as no reason, as
+     * on Apple, instead of failing the frame.
+     */
+    @Serializable
+    @SerialName("close")
+    data class Close(
+        val close: JsonElement? = null,
+        @EncodeDefault(EncodeDefault.Mode.ALWAYS) override val v: Int = SiloCastProtocol.version,
+    ) : SiloCastMessage() {
+        val reason: String?
+            get() = ((close as? JsonObject)?.get("reason") as? JsonPrimitive)
+                ?.takeIf { it.isString }?.contentOrNull
+
+        companion object {
+            fun withReason(reason: String?): Close =
+                Close(close = reason?.let { buildJsonObject { put("reason", it) } })
+        }
+    }
+
+    companion object {
+        /** Every `type` this build understands, read from the serializer so it can't drift. */
+        val knownTypes: Set<String> by lazy {
+            serializer().descriptor.getElementDescriptor(1).elementNames.toSet()
+        }
+
+        /**
+         * Decodes one frame, or returns null for a `type` this build doesn't
+         * know. A newer peer may send kinds added after this build; dropping
+         * them keeps the session up where a decode error would tear it down
+         * (Apple ignores them the same way). A known type with a malformed
+         * payload still throws.
+         */
+        fun decodeOrNull(json: Json, text: String): SiloCastMessage? {
+            val frame = json.parseToJsonElement(text) as? JsonObject
+                ?: throw SerializationException("SiloCast frame is not a JSON object")
+            val type = (frame["type"] as? JsonPrimitive)?.contentOrNull
+            if (type != null && type !in knownTypes) return null
+            return json.decodeFromJsonElement(serializer(), frame)
+        }
+    }
+}
+
+@Serializable
+enum class SiloCastPeerRole {
+    @SerialName("phone")
+    Phone,
+
+    @SerialName("tv")
+    Tv,
+}
+
+/**
+ * Session handshake. Both peers send one immediately after connecting; the TV
+ * authorizes the controller only when [serverId] matches its own active
+ * server — that check (plus same-LAN discovery) is the trust anchor, the
+ * fixed TLS-PSK is confidentiality only.
+ */
+@Serializable
+data class SiloCastHello(
+    val role: SiloCastPeerRole,
+    val deviceName: String,
+    val deviceId: String,
+    val serverId: String? = null,
+    val serverName: String? = null,
+    val supportedVersions: List<Int>,
+    /** The deployment identity behind [serverId], when known, so peers on different addresses of one server match. */
+    val serverIdentity: String? = null,
+    /** [SiloCastFeature] names this peer supports. Absent from older peers, which support none. */
+    val features: List<String>? = null,
+    /** A controller that only watches state (silent auto-resume, an integration); it never puts up the TV's standby screen. */
+    val passive: Boolean? = null,
+    /** [SiloCastClientKind]. `role` stays `phone` for integrations because shipped receivers reject other roles. */
+    val clientKind: String? = null,
+) {
+    fun supports(feature: String): Boolean = features?.contains(feature) == true
+}
+
+@Serializable
+data class SiloCastPlaybackRequest(
+    val contentId: String,
+    val fileId: Int? = null,
+    val audioTrackIndex: Int? = null,
+    val subtitleTrackIndex: Int? = null,
+    val startFromBeginning: Boolean,
+    val resumePosition: Double? = null,
+    val libraryId: Int? = null,
+    /**
+     * True when the viewer picked [fileId]'s version on the phone, so the TV
+     * pins it (`allow_alternate_versions: false`). Omitted otherwise; older
+     * peers ignore it, as Apple's do.
+     */
+    val pinsVersion: Boolean? = null,
+)
+
+@Serializable
+data class SiloCastLaunchRequest(
+    val serverId: String,
+    val playback: SiloCastPlaybackRequest,
+)
+
+@Serializable
+data class SiloCastHandoffOffer(
+    val requestId: String,
+    val serverId: String,
+    val serverURL: String,
+    val serverName: String? = null,
+    val profileId: String,
+    val profileName: String? = null,
+    /** Display-only: what the phone is about to launch. Older peers omit and ignore it. */
+    val title: String? = null,
+    /** The deployment identity the phone verified at [serverURL]. */
+    val serverIdentity: String? = null,
+    /**
+     * Other addresses the deployment offers, from its connections document,
+     * public first, then providers. The TV may use one that reports
+     * [serverIdentity]; reachability is the TV's to test.
+     */
+    val serverEndpoints: List<SiloCastServerEndpoint>? = null,
+    /** The token from an earlier `handoff_ready`, to reuse that identity from a new connection without another approval. */
+    val resumeToken: String? = null,
+    /** The user agreed to replace a title another profile started, after the TV answered `replace_confirmation_required`. */
+    val replaceConfirmed: Boolean? = null,
+    /** With [replaceConfirmed]: the title the user agreed to replace. The TV honors it only while that title is on screen. */
+    val replacingContentId: String? = null,
+)
+
+/**
+ * One address in [SiloCastHandoffOffer.serverEndpoints]. Mirrors silo-apple
+ * `ServerEndpoint`: [kind] is `public` or `provider`, kept as a string so a
+ * kind this build doesn't know still decodes.
+ */
+@Serializable
+data class SiloCastServerEndpoint(
+    val url: String,
+    val kind: String,
+    /** Provider slug for a `provider` endpoint, e.g. `tailscale`. */
+    val provider: String? = null,
+    /** Provider display name from its manifest. */
+    val displayName: String? = null,
+)
+
+@Serializable
+data class SiloCastHandoffChallenge(
+    val requestId: String,
+    val userCode: String,
+    val matchCode: String,
+    val expiresAt: String,
+)
+
+@Serializable
+data class SiloCastHandoffReady(
+    val requestId: String,
+    val serverId: String,
+    val profileId: String,
+    val sessionExpiresAt: String,
+    val reused: Boolean,
+    /** Proof for reusing this identity from a later connection, sent only to controllers that list [SiloCastFeature.ResumeToken]. */
+    val resumeToken: String? = null,
+)
+
+@Serializable
+data class SiloCastHandoffCancel(
+    val requestId: String,
+    val reason: String,
+    val message: String? = null,
+    /** With reason `replace_confirmation_required`: the title the handoff would replace, so the controller can ask. */
+    val nowPlaying: SiloCastNowPlayingSummary? = null,
+)
+
+/** What a controller needs to ask "Replace what Alex is watching?". */
+@Serializable
+data class SiloCastNowPlayingSummary(
+    val contentId: String? = null,
+    val title: String,
+    val subtitle: String? = null,
+    val profileName: String? = null,
+    val controllerName: String? = null,
+)
+
+@Serializable
+data class SiloCastPresence(
+    val passive: Boolean,
+)
+
+@Serializable
+data class SiloCastTrack(
+    val kind: String,
+    val trackId: Long,
+    val title: String,
+    val detail: String? = null,
+)
+
+@Serializable
+data class SiloCastQualityOption(
+    val id: String,
+    val label: String,
+    val detail: String? = null,
+)
+
+@Serializable
+data class SiloCastPlaybackState(
+    val contentId: String? = null,
+    val sessionId: String? = null,
+    val title: String,
+    val subtitle: String? = null,
+    val isPlaying: Boolean,
+    val isLoading: Boolean,
+    val isBuffering: Boolean,
+    val currentTime: Double,
+    val duration: Double,
+    val audioTracks: List<SiloCastTrack>,
+    val subtitleTracks: List<SiloCastTrack>,
+    val selectedAudioTrackId: Long? = null,
+    val selectedSubtitleTrackId: Long? = null,
+    val qualityOptions: List<SiloCastQualityOption>,
+    val activeQualityId: String,
+    val isQualitySwitching: Boolean,
+    val playbackSpeed: Double,
+    val videoGravity: String,
+    val hdrEnabled: Boolean,
+    val supportsVideoGravity: Boolean,
+    val supportsHDRToggle: Boolean,
+    val subtitleSyncMs: Int? = null,
+    val subtitlePosition: String? = null,
+    val supportsSubtitleDelay: Boolean? = null,
+    val supportsSubtitlePosition: Boolean? = null,
+    val volume: Double,
+    val isMuted: Boolean,
+    val hasNextEpisode: Boolean,
+    val nextEpisodeTitle: String? = null,
+    val error: String? = null,
+    /**
+     * Absolute, signed poster URL for the playing title (the series poster for
+     * an episode), so an integration can fetch artwork without its own Silo
+     * sign-in. The TV re-signs it before it expires. Omitted when unknown;
+     * older peers ignore it, so it needs no feature flag.
+     */
+    val posterUrl: String? = null,
+    /** Synopsis of the playing title. Omitted when unknown. */
+    val overview: String? = null,
+)
+
+/**
+ * Command envelope: a [name] from Apple's closed Name enum plus the sparse
+ * argument fields. Current Apple builds ignore a name they don't know, but
+ * older ones reject the whole frame, so never send a string outside this set.
+ */
+@Serializable
+data class SiloCastControlCommand(
+    val name: String,
+    val seconds: Double? = null,
+    val trackId: Long? = null,
+    val speed: Double? = null,
+    val volume: Double? = null,
+    val value: String? = null,
+    val enabled: Boolean? = null,
+    val milliseconds: Int? = null,
+) {
+    companion object {
+        const val Play = "play"
+        const val Pause = "pause"
+        const val PlayPause = "play_pause"
+        const val Seek = "seek"
+        const val Stop = "stop"
+        const val SelectAudioTrack = "select_audio_track"
+        const val SelectSubtitleTrack = "select_subtitle_track"
+        const val SetPlaybackSpeed = "set_playback_speed"
+        const val SetQuality = "set_quality"
+        const val SetVideoGravity = "set_video_gravity"
+        const val SetSubtitleSyncMs = "set_subtitle_sync_ms"
+        const val SetSubtitlePosition = "set_subtitle_position"
+        const val SetVolume = "set_volume"
+        const val SetMuted = "set_muted"
+        const val PlayNext = "play_next"
+
+        /** Every command name this build implements. */
+        val knownNames: Set<String> = setOf(
+            Play, Pause, PlayPause, Seek, Stop, SelectAudioTrack, SelectSubtitleTrack, SetPlaybackSpeed,
+            SetQuality, SetVideoGravity, SetSubtitleSyncMs, SetSubtitlePosition, SetVolume, SetMuted, PlayNext,
+        )
+
+        fun play(): SiloCastControlCommand = SiloCastControlCommand(name = Play)
+
+        fun pause(): SiloCastControlCommand = SiloCastControlCommand(name = Pause)
+
+        fun playPause(): SiloCastControlCommand = SiloCastControlCommand(name = PlayPause)
+
+        fun stop(): SiloCastControlCommand = SiloCastControlCommand(name = Stop)
+
+        fun seek(seconds: Double): SiloCastControlCommand =
+            SiloCastControlCommand(name = Seek, seconds = seconds)
+
+        fun selectAudioTrack(trackId: Long): SiloCastControlCommand =
+            SiloCastControlCommand(name = SelectAudioTrack, trackId = trackId)
+
+        fun selectSubtitleTrack(trackId: Long?): SiloCastControlCommand =
+            SiloCastControlCommand(name = SelectSubtitleTrack, trackId = trackId)
+
+        fun setPlaybackSpeed(speed: Double): SiloCastControlCommand =
+            SiloCastControlCommand(name = SetPlaybackSpeed, speed = speed)
+
+        fun setQuality(qualityId: String): SiloCastControlCommand =
+            SiloCastControlCommand(name = SetQuality, value = qualityId)
+
+        fun setVideoGravity(value: String): SiloCastControlCommand =
+            SiloCastControlCommand(name = SetVideoGravity, value = value)
+
+        fun setSubtitleSyncMs(milliseconds: Int): SiloCastControlCommand =
+            SiloCastControlCommand(name = SetSubtitleSyncMs, milliseconds = milliseconds)
+
+        fun setSubtitlePosition(value: String): SiloCastControlCommand =
+            SiloCastControlCommand(name = SetSubtitlePosition, value = value)
+
+        fun setVolume(volume: Double): SiloCastControlCommand =
+            SiloCastControlCommand(name = SetVolume, volume = volume)
+
+        fun setMuted(muted: Boolean): SiloCastControlCommand =
+            SiloCastControlCommand(name = SetMuted, enabled = muted)
+
+        fun playNext(): SiloCastControlCommand = SiloCastControlCommand(name = PlayNext)
+    }
+}
+
+@Serializable
+data class SiloCastError(
+    val code: String,
+    val message: String,
+)

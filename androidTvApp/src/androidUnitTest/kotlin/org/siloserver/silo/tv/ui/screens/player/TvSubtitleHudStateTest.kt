@@ -1,0 +1,293 @@
+package org.siloserver.silo.tv.ui.screens.player
+
+import org.siloserver.silo.common.i18n.UiText
+import android.app.Application
+import androidx.test.core.app.ApplicationProvider
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import org.siloserver.silo.model.playback.PlayerSubtitleInfo
+import org.siloserver.silo.model.playback.SUBTITLE_DELIVERY_BURN_IN_ONLY
+import org.siloserver.silo.model.playback.SUBTITLE_DELIVERY_SIDECAR
+import org.siloserver.silo.model.playback.SubtitleIdentity
+import org.siloserver.silo.model.playback.SubtitleMediaIdentity
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34], application = Application::class)
+class TvSubtitleHudStateTest {
+    // The HUD builders read their words from the app's resources (English here).
+    private val resources
+        get() = ApplicationProvider.getApplicationContext<Application>().resources
+
+    @Test
+    fun `sync status resolves server tracks by ordinal and merged stored rows by download id`() {
+        val sync = TvHudSubtitleSync(
+            statusByServerIndex = mapOf(0 to UiText.Raw("Synced −3.0 s")),
+            statusByDownloadId = mapOf(9 to UiText.Raw("Syncing… 40%")),
+        )
+        assertEquals(UiText.Raw("Synced −3.0 s"), sync.statusFor(SubtitleIdentity.ServerSidecar(0)))
+        assertEquals(UiText.Raw("Syncing… 40%"), sync.statusFor(SubtitleIdentity.Downloaded(9, SubtitleMediaIdentity())))
+        assertEquals(null, sync.statusFor(SubtitleIdentity.ServerSidecar(1)))
+        assertEquals(null, sync.statusFor(SubtitleIdentity.Off))
+    }
+
+    @Test
+    fun `pending HUD state keeps committed row checked and labels pending row Applying`() {
+        val presentation = present(
+            committed = sidecar(3),
+            pending = sidecar(4),
+            focusedId = id(sidecar(4)),
+        )
+
+        assertTrue(presentation.rows.single { it.identity == sidecar(3) }.checked)
+        assertFalse(presentation.rows.single { it.identity == sidecar(4) }.checked)
+        assertEquals("Applying…", presentation.rows.single { it.identity == sidecar(4) }.status)
+    }
+
+    @Test
+    fun `transaction failure removes Applying and keeps committed row checked`() {
+        val presentation = present(
+            committed = sidecar(3),
+            pending = null,
+            focusedId = id(sidecar(4)),
+        )
+
+        assertTrue(presentation.rows.single { it.identity == sidecar(3) }.checked)
+        assertFalse(presentation.rows.any { it.applying })
+    }
+
+    @Test
+    fun `cancellation never flashes the pending row as committed`() {
+        val applying = present(sidecar(3), sidecar(4), id(sidecar(4)))
+        val cancelled = present(sidecar(3), null, applying.focusedStableId)
+
+        assertFalse(applying.rows.single { it.identity == sidecar(4) }.checked)
+        assertFalse(cancelled.rows.single { it.identity == sidecar(4) }.checked)
+        assertTrue(cancelled.rows.single { it.identity == sidecar(3) }.checked)
+    }
+
+    @Test
+    fun `stale completion cannot change HUD selection`() {
+        val afterNewerIntent = present(sidecar(3), sidecar(5), id(sidecar(5)))
+        val afterStaleCompletion = present(sidecar(3), sidecar(5), afterNewerIntent.focusedStableId)
+
+        assertTrue(afterStaleCompletion.rows.single { it.identity == sidecar(3) }.checked)
+        assertTrue(afterStaleCompletion.rows.single { it.identity == sidecar(5) }.applying)
+        assertFalse(afterStaleCompletion.rows.single { it.identity == sidecar(4) }.checked)
+    }
+
+    @Test
+    fun `content reset removes prior pending HUD state`() {
+        val reset = present(
+            committed = SubtitleIdentity.Off,
+            pending = null,
+            focusedId = id(sidecar(4)),
+        )
+
+        assertTrue(reset.rows.single { it.identity == SubtitleIdentity.Off }.checked)
+        assertFalse(reset.rows.any { it.applying })
+    }
+
+    @Test
+    fun `exit clears pending HUD state`() {
+        val presentation = buildTvSubtitleHudPresentation(
+            options = options(),
+            committedIdentity = sidecar(3),
+            pendingIdentity = null,
+            hudOpen = false,
+            focusedStableId = id(sidecar(4)),
+            resources = resources,
+        )
+
+        assertFalse(presentation.hudOpen)
+        assertFalse(presentation.rows.any { it.applying })
+    }
+
+    @Test
+    fun `selecting a catalog row while HUD is open keeps the HUD open`() {
+        val presentation = buildTvSubtitleHudPresentation(
+            options = options(),
+            committedIdentity = sidecar(3),
+            pendingIdentity = sidecar(4),
+            hudOpen = true,
+            focusedStableId = id(sidecar(4)),
+            resources = resources,
+        )
+
+        assertTrue(presentation.hudOpen)
+        assertTrue(presentation.rows.single { it.identity == sidecar(4) }.applying)
+    }
+
+    @Test
+    fun `picker focus is independent from the checked committed row`() {
+        val presentation = present(sidecar(3), null, id(sidecar(5)))
+
+        assertTrue(presentation.rows.single { it.identity == sidecar(3) }.checked)
+        assertTrue(presentation.rows.single { it.identity == sidecar(5) }.focused)
+        assertFalse(presentation.rows.single { it.identity == sidecar(5) }.checked)
+    }
+
+    @Test
+    fun `failed selection keeps focus on the activated pending row`() {
+        val pending = present(sidecar(3), sidecar(4), id(sidecar(4)))
+        val failed = present(sidecar(3), null, pending.focusedStableId)
+
+        assertEquals(id(sidecar(4)), failed.focusedStableId)
+        assertTrue(failed.rows.single { it.identity == sidecar(4) }.focused)
+    }
+
+    @Test
+    fun `cancelled selection keeps the picker focus trap active`() {
+        val cancelled = buildTvSubtitleHudPresentation(
+            options = options(),
+            committedIdentity = sidecar(3),
+            pendingIdentity = null,
+            hudOpen = true,
+            focusedStableId = id(sidecar(4)),
+            resources = resources,
+        )
+
+        assertTrue(cancelled.focusTrapActive)
+        assertEquals(id(sidecar(4)), cancelled.focusedStableId)
+    }
+
+    @Test
+    fun `stale completion cannot move focus`() {
+        val before = present(sidecar(3), sidecar(5), id(sidecar(5)))
+        val after = present(sidecar(3), sidecar(5), before.focusedStableId)
+
+        assertEquals(id(sidecar(5)), after.focusedStableId)
+    }
+
+    @Test
+    fun `refresh and remount preserve the focused stable option`() {
+        val before = present(sidecar(3), sidecar(4), id(sidecar(4)))
+        val refreshed = buildTvSubtitleHudPresentation(
+            options = listOf(
+                option(SubtitleIdentity.Off, "Off"),
+                option(sidecar(5), "Spanish"),
+                option(sidecar(4), "English"),
+                option(sidecar(3), "French"),
+            ),
+            committedIdentity = sidecar(3),
+            pendingIdentity = sidecar(4),
+            hudOpen = true,
+            focusedStableId = before.focusedStableId,
+            resources = resources,
+        )
+
+        assertEquals(id(sidecar(4)), refreshed.focusedStableId)
+        assertTrue(refreshed.rows.single { it.identity == sidecar(4) }.focused)
+    }
+
+    @Test
+    fun `a track no route can show is listed in place but never takes focus`() {
+        val english = PlayerSubtitleInfo(
+            index = 0,
+            language = "eng",
+            codec = "srt",
+            source = "external",
+            url = "/s/0.vtt",
+            serverTrackId = "file:1:subtitle:0",
+            serverDelivery = SUBTITLE_DELIVERY_SIDECAR,
+        )
+        val unrecognized = PlayerSubtitleInfo(
+            index = 1,
+            language = "eng",
+            source = "embedded",
+            url = "",
+            serverTrackId = "file:1:subtitle:1",
+            serverDelivery = SUBTITLE_DELIVERY_BURN_IN_ONLY,
+            unplayable = true,
+        )
+        val options = buildTvSubtitleHudOptions(
+            subtitleUrls = listOf(english, unrecognized),
+            subtitleTracks = emptyList(),
+            resources = resources,
+        )
+        assertEquals(listOf(false, false, true), options.map(TvSubtitleHudOption::unplayable))
+
+        // A stale focus on it, or Off committed, lands on a row that can take focus.
+        val presentation = buildTvSubtitleHudPresentation(
+            options = options,
+            committedIdentity = SubtitleIdentity.Off,
+            pendingIdentity = null,
+            hudOpen = true,
+            focusedStableId = options[2].stableId,
+            resources = resources,
+        )
+        assertEquals(options[0].stableId, presentation.focusedStableId)
+        assertTrue(presentation.rows[2].unplayable)
+    }
+
+    @Test
+    fun `duplicate labels use typed option IDs and never collapse focus targets`() {
+        val forced = SubtitleIdentity.LocalMedia3(
+            media(trackId = "forced", forced = true),
+        )
+        val full = SubtitleIdentity.LocalMedia3(
+            media(trackId = "full", forced = false),
+        )
+        val choices = listOf(option(forced, "English"), option(full, "English"))
+
+        assertNotEquals(choices[0].stableId, choices[1].stableId)
+        val presentation = buildTvSubtitleHudPresentation(
+            options = choices,
+            committedIdentity = forced,
+            pendingIdentity = full,
+            hudOpen = true,
+            focusedStableId = choices[1].stableId,
+            resources = resources,
+        )
+        assertEquals(2, presentation.rows.map { it.stableId }.distinct().size)
+        assertTrue(presentation.rows.single { it.identity == full }.focused)
+    }
+
+    private fun present(
+        committed: SubtitleIdentity,
+        pending: SubtitleIdentity?,
+        focusedId: String?,
+    ): TvSubtitleHudPresentation = buildTvSubtitleHudPresentation(
+        options = options(),
+        committedIdentity = committed,
+        pendingIdentity = pending,
+        hudOpen = true,
+        focusedStableId = focusedId,
+        resources = resources,
+    )
+
+    private fun options(): List<TvSubtitleHudOption> = listOf(
+        option(SubtitleIdentity.Off, "Off"),
+        option(sidecar(3), "French"),
+        option(sidecar(4), "English"),
+        option(sidecar(5), "Spanish"),
+    )
+
+    private fun option(identity: SubtitleIdentity, label: String): TvSubtitleHudOption =
+        TvSubtitleHudOption(
+            stableId = id(identity),
+            identity = identity,
+            label = label,
+        )
+
+    private fun id(identity: SubtitleIdentity): String = tvSubtitleOptionStableId(identity)
+
+    private fun sidecar(index: Int): SubtitleIdentity = SubtitleIdentity.ServerSidecar(index)
+
+    private fun media(
+        trackId: String,
+        forced: Boolean,
+    ): SubtitleMediaIdentity = SubtitleMediaIdentity(
+        trackId = trackId,
+        label = "English",
+        language = "en",
+        codecFamily = "pgs",
+        forced = forced,
+        hearingImpaired = false,
+    )
+}

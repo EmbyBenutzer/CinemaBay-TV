@@ -1,0 +1,110 @@
+package org.siloserver.silo.android.ui.components
+
+import org.siloserver.silo.common.R as CommonR
+import androidx.compose.ui.res.stringResource
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BookmarkAdd
+import androidx.compose.material.icons.filled.BookmarkRemove
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.vector.ImageVector
+
+/**
+ * Bundle of optional callbacks for the long-press context menu on a media card.
+ *
+ * Mirrors the iOS/tvOS card context menu (see iosApp/iosApp/Components/MediaCard.swift).
+ * Callers leave callbacks null to omit the corresponding menu item.
+ */
+data class MediaCardActions(
+    val onSetWatched: ((watched: Boolean) -> Unit)? = null,
+    val onToggleFavorite: ((favorite: Boolean) -> Unit)? = null,
+    val onToggleWatchlist: ((inWatchlist: Boolean) -> Unit)? = null,
+    /** Removes the card from its Home row; [removeFromHomeLabel] names the list it leaves. */
+    val onRemoveFromHome: (() -> Unit)? = null,
+    /** Null names Continue Watching. */
+    val removeFromHomeLabel: String? = null,
+) {
+    val isEmpty: Boolean
+        get() = onSetWatched == null &&
+            onToggleFavorite == null &&
+            onToggleWatchlist == null &&
+            onRemoveFromHome == null
+}
+
+/**
+ * Long-press context menu for [MediaCard] and [BackdropCard]. Renders as a
+ * [SiloDropdownMenu] anchored to the card. Each item invokes the
+ * matching callback in [actions] then closes the menu.
+ */
+@Composable
+fun MediaCardContextMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    actions: MediaCardActions,
+    isPlayed: Boolean,
+    isFavorite: Boolean,
+    isInWatchlist: Boolean,
+) {
+    if (actions.isEmpty) return
+
+    SiloDropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismiss,
+    ) {
+        actions.onSetWatched?.let { setWatched ->
+            MenuRow(
+                text = stringResource(if (isPlayed) CommonR.string.menu_card_markUnwatched else CommonR.string.menu_card_markWatched),
+                icon = if (isPlayed) Icons.Default.VisibilityOff else Icons.Default.Check,
+                onClick = {
+                    setWatched(!isPlayed)
+                    onDismiss()
+                },
+            )
+        }
+        actions.onToggleFavorite?.let { toggle ->
+            MenuRow(
+                text = stringResource(if (isFavorite) CommonR.string.detail_more_removeFavorite else CommonR.string.detail_more_addFavorite),
+                icon = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                onClick = {
+                    toggle(!isFavorite)
+                    onDismiss()
+                },
+            )
+        }
+        actions.onToggleWatchlist?.let { toggle ->
+            MenuRow(
+                text = stringResource(if (isInWatchlist) CommonR.string.personal_watchlist_remove else CommonR.string.cardMenu_addWatchlist),
+                icon = if (isInWatchlist) Icons.Default.BookmarkRemove else Icons.Default.BookmarkAdd,
+                onClick = {
+                    toggle(!isInWatchlist)
+                    onDismiss()
+                },
+            )
+        }
+        actions.onRemoveFromHome?.let { remove ->
+            MenuRow(
+                text = actions.removeFromHomeLabel ?: stringResource(CommonR.string.cardMenu_removeContinueWatching),
+                icon = Icons.Default.Close,
+                onClick = {
+                    remove()
+                    onDismiss()
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun MenuRow(text: String, icon: ImageVector, onClick: () -> Unit) {
+    SiloDropdownMenuItem(
+        text = { Text(text) },
+        leadingIcon = { Icon(icon, contentDescription = null) },
+        onClick = onClick,
+    )
+}

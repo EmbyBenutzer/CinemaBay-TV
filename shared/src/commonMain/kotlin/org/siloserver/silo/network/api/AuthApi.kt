@@ -1,0 +1,299 @@
+package org.siloserver.silo.network.api
+
+import io.ktor.client.*
+import io.ktor.client.call.*
+import io.ktor.client.request.*
+import io.ktor.client.statement.*
+import io.ktor.http.*
+import kotlinx.coroutines.CancellationException
+import org.siloserver.silo.model.auth.*
+import org.siloserver.silo.network.ApiErrorBody
+import org.siloserver.silo.network.ApiResult
+import org.siloserver.silo.network.AuthScopeSnapshot
+import org.siloserver.silo.network.authScope
+import org.siloserver.silo.network.SiloJson
+import org.siloserver.silo.network.forceSiloRefresh
+import org.siloserver.silo.network.freshSiloAuth
+import org.siloserver.silo.network.map
+import org.siloserver.silo.network.singleAttempt
+import org.siloserver.silo.network.skipSiloAuth
+import org.siloserver.silo.network.apiv2.Account
+import org.siloserver.silo.network.apiv2.ApiV2Gate
+import org.siloserver.silo.network.apiv2.Problem
+import org.siloserver.silo.network.apiv2.ProblemText
+import org.siloserver.silo.network.apiv2.invalidResponse
+import org.siloserver.silo.network.apiv2.SetupStatus
+import org.siloserver.silo.network.apiv2.safeApiV2Call
+
+class AuthApi(
+    private val client: HttpClient,
+    private val apiV2Gate: ApiV2Gate,
+    /**
+     * For mutations the engine must never resend after a dropped connection
+     * (OkHttp otherwise does on a reused one), such as the password change.
+     */
+    private val nonReplayingClient: HttpClient = client,
+) {
+
+    suspend fun login(request: LoginRequest, serverUrl: String? = null): ApiResult<LoginResponse> = safeApiV2Call<TokenPairV2>(apiV2Gate) {
+        client.post("${serverUrl?.trimEnd('/').orEmpty()}/api/v2/auth/login") {
+            skipSiloAuth(); singleAttempt()
+            contentType(ContentType.Application.Json); setBody(request)
+        }.requireAuthStatus(200)
+    }.map { it.domain() }
+
+    suspend fun refresh(request: RefreshRequest): ApiResult<RefreshResponse> = safeApiV2Call(apiV2Gate) {
+        client.post("/api/v2/auth/refresh") {
+            skipSiloAuth()
+            contentType(ContentType.Application.Json); setBody(request)
+        }.requireAuthStatus(200)
+    }
+
+    suspend fun signup(request: SignupRequest, serverUrl: String? = null): ApiResult<LoginResponse> = safeApiV2Call<TokenPairV2>(apiV2Gate) {
+        client.post("${serverUrl?.trimEnd('/').orEmpty()}/api/v2/auth/signup") {
+            skipSiloAuth(); singleAttempt()
+            contentType(ContentType.Application.Json); setBody(request)
+        }.requireAuthStatus(201)
+    }.map { it.domain() }
+
+    suspend fun setup(username: String, email: String, password: String, serverUrl: String? = null): ApiResult<LoginResponse> =
+        safeApiV2Call<TokenPairV2>(apiV2Gate) {
+            client.post("${serverUrl?.trimEnd('/').orEmpty()}/api/v2/auth/setup") {
+                skipSiloAuth(); singleAttempt()
+                contentType(ContentType.Application.Json)
+                setBody(SetupRequest(username, email, password))
+            }.requireAuthStatus(201)
+        }.map { it.domain() }
+
+    suspend fun getSetupStatus(): ApiResult<SetupStatusResponse> =
+        safeApiV2Call<SetupStatus>(apiV2Gate) {
+            // Public, exactly like the explicit-server variant below — which
+            // already opted out. Without this the relative form carries a bearer
+            // it never needed, and a dead session would fail it.
+            client.get("/api/v2/system/setup") { skipSiloAuth() }
+        }.map { status -> SetupStatusResponse(needsSetup = status.needsSetup) }
+
+    /**
+     * Explicit-server form: probes a candidate the app is not connected to
+     * yet, so the ACTIVE entry's verdict must not gate it — otherwise an
+     * UPDATE_REQUIRED active server would block adding (or reconnecting to)
+     * a supported one. The candidate's own gate is the contract probe the
+     * add-server flow runs before switching.
+     */
+    suspend fun getSetupStatus(serverUrl: String): ApiResult<SetupStatusResponse> =
+        safeApiV2Call<SetupStatus>(ApiV2Gate.Unrestricted) {
+            client.get("${serverUrl.trimEnd('/')}/api/v2/system/setup") {
+                skipSiloAuth()
+            }
+        }.map { status -> SetupStatusResponse(needsSetup = status.needsSetup) }
+
+    suspend fun getSignupStatus(): ApiResult<SignupStatusResponse> = safeApiV2Call(apiV2Gate) {
+        client.get("/api/v2/auth/signup") { skipSiloAuth() }
+    }
+
+    suspend fun getSignupStatus(serverUrl: String): ApiResult<SignupStatusResponse> = safeApiV2Call(ApiV2Gate.Unrestricted) {
+        client.get("${serverUrl.trimEnd('/')}/api/v2/auth/signup") {
+            skipSiloAuth()
+        }
+    }
+
+    /**
+     * Resolves an emailed-invitation claim token against the given server.
+     * Unauthenticated: this runs before any account exists.
+     */
+    suspend fun lookupInvitation(
+        serverUrl: String,
+        token: String,
+    ): ApiResult<InvitationLookupResponse> = safeApiV2Call(ApiV2Gate.Unrestricted) {
+        // The token arrives from an emailed link and is not ours to trust as
+        // path-safe: a '/' or '?' in it would otherwise re-shape the request.
+        client.get("${serverUrl.trimEnd('/')}/api/v2/invitations/${token.encodeURLPathPart()}") {
+            skipSiloAuth()
+        }.requireAuthStatus(200)
+    }
+
+    suspend fun invitationCapabilities(serverUrl: String): ApiResult<InvitationCapabilities> =
+        safeApiV2Call(ApiV2Gate.Unrestricted) {
+            client.get("${serverUrl.trimEnd('/')}/api/v2/invitations/capabilities") { skipSiloAuth() }
+                .requireAuthStatus(200)
+        }
+
+    suspend fun acceptInvitation(serverUrl: String, token: String, password: String): ApiResult<InvitationAcceptance> =
+        safeApiV2Call<InvitationAcceptanceV2>(ApiV2Gate.Unrestricted) {
+            client.post("${serverUrl.trimEnd('/')}/api/v2/invitations/${token.encodeURLPathPart()}/accept") {
+                skipSiloAuth(); singleAttempt()
+                contentType(ContentType.Application.Json)
+                setBody(AcceptInvitationRequest(password = password))
+            }.requireAuthStatus(201)
+        }.map { it.domain() }
+
+    suspend fun getMe(): ApiResult<User> =
+        safeApiV2Call<Account>(apiV2Gate) { client.get("/api/v2/account/me") }.map { account -> account.toUser() }
+
+    /**
+     * The account signed in on [scope]'s server, which need not be the active
+     * one. Read by a phone about to approve a TV, so the scope's access token is
+     * renewed first when it has expired or is about to (TV sign-in spec).
+     */
+    suspend fun getMe(scope: AuthScopeSnapshot): ApiResult<User> =
+        // Gated on the scope's own server, not the active one.
+        safeApiV2Call<Account>(apiV2Gate.forServer(scope.serverId)) {
+            client.get("/api/v2/account/me") {
+                authScope(scope)
+                freshSiloAuth()
+            }
+        }.map { account -> account.toUser() }
+
+    /**
+     * `GET /api/v2/account/me` on [scope] as captured, with no profile declared:
+     * one of the few reads a session holding a temporary password may make.
+     */
+    suspend fun getAccount(scope: AuthScopeSnapshot): ApiResult<User> =
+        safeApiV2Call<Account>(apiV2Gate.forServer(scope.serverId)) {
+            client.get("/api/v2/account/me") { authScope(scope.withoutProfile()) }
+        }.map { account -> account.toUser() }
+
+    /**
+     * Replaces [scope]'s access token through the shared refresh, however long
+     * it has left, then reads the account on the new one. Fails without
+     * sending the read when the token did not rotate.
+     */
+    suspend fun refreshAccountSession(scope: AuthScopeSnapshot): ApiResult<User> =
+        safeApiV2Call<Account>(apiV2Gate.forServer(scope.serverId)) {
+            client.get("/api/v2/account/me") {
+                authScope(scope.withoutProfile())
+                forceSiloRefresh()
+            }
+        }.map { account -> account.toUser() }
+
+    /** `getAccountPasswordCapability`: whether [scope] may change the password, and the limits for a new one. */
+    suspend fun passwordCapability(scope: AuthScopeSnapshot): ApiResult<PasswordCapability> =
+        safeApiV2Call<PasswordCapabilityV2>(apiV2Gate.forServer(scope.serverId)) {
+            client.get("/api/v2/account/password/capability") { authScope(scope.withoutProfile()) }
+        }.map { it.domain() }
+
+    /**
+     * `changePassword` (204). Account-scoped, with no profile declared, and sent
+     * once, on [nonReplayingClient]: a replay would spend another attempt from
+     * the server's password-change budget. A 422 naming `body.current_password`
+     * comes back as [WRONG_CURRENT_PASSWORD]; any other 422 carries the first error's
+     * detail, which names the rule the new password broke. Neither password
+     * is logged: both travel only in the body.
+     */
+    suspend fun changePassword(scope: AuthScopeSnapshot, current: String, new: String): ApiResult<Unit> {
+        apiV2Gate.forServer(scope.serverId).blocked()?.let { return it }
+        return try {
+            val response = nonReplayingClient.post("/api/v2/account/password") {
+                authScope(scope.withoutProfile()); singleAttempt()
+                contentType(ContentType.Application.Json)
+                setBody(ChangePasswordRequestV2(currentPassword = current, newPassword = new))
+            }
+            when {
+                response.status == HttpStatusCode.NoContent -> ApiResult.Success(Unit)
+                response.status.isSuccess() -> invalidResponse()
+                else -> passwordChangeError(response.status.value, response.bodyAsText())
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            ApiResult.NetworkError(e)
+        }
+    }
+
+    /** Ends the active session, or the one [scope] was captured from even when another is active by then. */
+    suspend fun logout(scope: AuthScopeSnapshot? = null): ApiResult<Unit> = safeApiV2Call(apiV2Gate) {
+        client.post("/api/v2/auth/logout") { scope?.let { authScope(it) } }.requireAuthStatus(204)
+    }
+
+}
+
+/** The `error` of a 422 whose problem names `body.current_password`: the temporary password is wrong. */
+const val WRONG_CURRENT_PASSWORD = "wrong_current_password"
+
+internal fun passwordChangeError(status: Int, body: String): ApiResult.Error {
+    val problem = runCatching { SiloJson.decodeFromString(Problem.serializer(), body) }.getOrNull()
+    val rejected = problem?.errors?.firstOrNull()
+    // A refused field's own detail is the most specific server text.
+    val detail = if (status == 422) rejected?.detail.orEmpty() else problem?.detail.orEmpty()
+    val message = problem?.let { ProblemText.message(it, detail) } ?: detail
+    val code = if (status == 422 && rejected?.location == "body.current_password") WRONG_CURRENT_PASSWORD else problem?.code.orEmpty()
+    return ApiResult.Error(status, code, message, detail)
+}
+
+private fun AuthScopeSnapshot.withoutProfile() = copy(profileId = null, profileToken = null)
+
+/**
+ * Wraps an HTTP call in error handling, returning a typed [ApiResult].
+ *
+ * On success (2xx), deserializes the response body to [T].
+ * On HTTP error, attempts to parse a standard [ApiErrorBody].
+ * On network/parsing exceptions, returns [ApiResult.NetworkError].
+ */
+internal suspend inline fun <reified T> safeApiCall(
+    block: () -> HttpResponse
+): ApiResult<T> {
+    return try {
+        val response = block()
+        if (response.status.isSuccess()) {
+            // Handle Unit return type for endpoints that return no body
+            if (T::class == Unit::class) {
+                @Suppress("UNCHECKED_CAST")
+                ApiResult.Success(Unit as T)
+            } else {
+                ApiResult.Success(response.body<T>())
+            }
+        } else {
+            val error = try {
+                response.body<ApiErrorBody>()
+            } catch (_: Exception) {
+                ApiErrorBody()
+            }
+            ApiResult.Error(response.status.value, error.error, error.message)
+        }
+    } catch (e: Exception) {
+        ApiResult.NetworkError(e)
+    }
+}
+
+/** Adapts the v2 account to the v1-shaped [User] the repositories and screens consume. */
+internal fun Account.toUser(): User = User(
+    id = id,
+    username = username,
+    email = email,
+    role = role.wire,
+    downloadAllowed = downloadAllowed,
+    impersonation = impersonation?.let {
+        ImpersonationInfo(
+            active = it.active,
+            impersonatorUserId = it.impersonatorUserId,
+            impersonatorUsername = it.impersonatorUsername,
+        )
+    },
+    passwordChangeRequired = passwordChangeRequired,
+)
+
+/**
+ * `GET /api/v2/account/me` at [serverUrl] with an access token that isn't
+ * saved anywhere yet (a TV checking whose account a pairing approval signed
+ * in before committing it). Runs on a client with no Silo auth plugin, so the
+ * active server's credentials never go with it. Null when it can't be read.
+ */
+class UnsavedSessionAccountReader(
+    private val client: HttpClient = org.siloserver.silo.network.createPlatformHttpClient(retryOnConnectionFailure = false),
+) {
+    suspend fun read(serverUrl: String, accessToken: String): User? = try {
+        val response = client.get("${serverUrl.trimEnd('/')}/api/v2/account/me") {
+            header(HttpHeaders.Authorization, "Bearer $accessToken")
+            accept(ContentType.Application.Json)
+        }
+        if (response.status.value != 200) {
+            null
+        } else {
+            SiloJson.decodeFromString(Account.serializer(), response.bodyAsText()).toUser()
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
+    }
+}

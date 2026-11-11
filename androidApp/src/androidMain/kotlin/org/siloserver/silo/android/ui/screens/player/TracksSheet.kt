@@ -1,0 +1,259 @@
+package org.siloserver.silo.android.ui.screens.player
+
+import org.siloserver.silo.common.i18n.UiText
+import org.siloserver.silo.common.i18n.text
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Restore
+import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import org.siloserver.silo.common.R as CommonR
+import org.siloserver.silo.model.catalog.AudioTrack
+import org.siloserver.silo.model.playback.PlayerSubtitleInfo
+import org.siloserver.silo.playback.SubtitleTimingActions
+import org.siloserver.silo.player.formatSubtitleTrackDisplayLabel
+
+/** Which list the Audio & Subtitles menu opens on. */
+enum class TracksTab { Subtitles, Audio }
+
+/**
+ * Audio & Subtitles. A segmented switch picks the list; the subtitle list ends
+ * in Find more / Translate / Timing. Docked beside the picture (landscape) a
+ * choice applies while the panel stays open, so the viewer sees the new track
+ * on screen; as a portrait sheet, which covers the picture, a choice closes it.
+ */
+@Composable
+fun TracksSheet(
+    isVisible: Boolean,
+    audioTracks: List<AudioTrack>,
+    selectedAudioIndex: Int,
+    subtitles: List<PlayerSubtitleInfo>,
+    selectedSubtitleIndex: Int,
+    onSelectAudio: (Int) -> Unit,
+    onSelectSubtitle: (Int) -> Unit,
+    onDismiss: () -> Unit,
+    showSearchAction: Boolean = false,
+    showTranslateAction: Boolean = false,
+    onSearchSubtitles: () -> Unit = {},
+    onTranslateWithAi: () -> Unit = {},
+    subtitleStatus: (PlayerSubtitleInfo) -> UiText? = { null },
+    timingActions: SubtitleTimingActions? = null,
+    onSyncSubtitle: (String) -> Unit = {},
+    onResetTiming: (String) -> Unit = {},
+    initialTab: TracksTab = TracksTab.Subtitles,
+    tabletopPaneHeight: Dp? = null,
+) {
+    if (!isVisible) return
+
+    val controller = rememberPlayerMenuController(onDismiss)
+    val staysOpen = controller.presentation == PlayerMenuPresentation.Docked
+    fun choose(select: () -> Unit) {
+        select()
+        if (!staysOpen) controller.dismiss()
+    }
+    var tabOrdinal by rememberSaveable {
+        mutableIntStateOf(if (audioTracks.isEmpty()) TracksTab.Subtitles.ordinal else initialTab.ordinal)
+    }
+    var showTiming by rememberSaveable { mutableStateOf(false) }
+    val tab = TracksTab.entries[tabOrdinal]
+    val trackStrings = trackLabelStrings()
+
+    PlayerMenu(controller = controller, tabletopPaneHeight = tabletopPaneHeight) {
+        if (showTiming && timingActions != null) {
+            PlayerPanelHeader(
+                title = stringResource(CommonR.string.player_tracks_timing),
+                onClose = { controller.dismiss() },
+                onBack = { showTiming = false },
+                backDescription = stringResource(CommonR.string.player_tracks_backToTracks),
+            )
+            PlayerMenuScrollColumn(horizontalPadding = 12.dp) {
+                Spacer(Modifier.height(8.dp))
+                SubtitleTimingGroup(
+                    actions = timingActions,
+                    onSync = { onSyncSubtitle(timingActions.key) },
+                    onReset = { onResetTiming(timingActions.key) },
+                )
+            }
+            return@PlayerMenu
+        }
+
+        PlayerPanelHeader(title = stringResource(CommonR.string.player_tracks_title), onClose = { controller.dismiss() })
+        if (audioTracks.isNotEmpty()) {
+            PlayerSegmentedControl(
+                segments = listOf(
+                    PlayerSegment(stringResource(CommonR.string.player_tracks_subtitles), subtitles.size),
+                    PlayerSegment(stringResource(CommonR.string.player_tracks_audio), audioTracks.size),
+                ),
+                selectedIndex = tab.ordinal,
+                onSelect = { tabOrdinal = it },
+                modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 4.dp, bottom = 8.dp),
+            )
+        }
+
+        when (tab) {
+            TracksTab.Subtitles -> {
+                PlayerMenuScrollColumn {
+                    PlayerTrackRow(
+                        title = stringResource(CommonR.string.player_tracks_subtitlesOff),
+                        selected = selectedSubtitleIndex == -1,
+                        onClick = { choose { onSelectSubtitle(-1) } },
+                    )
+                    val unsupportedFormat = stringResource(CommonR.string.subtitle_trackUnsupportedFormat)
+                    subtitles.forEachIndexed { index, subtitle ->
+                        // A track no route can show stays listed, disabled, so
+                        // the rows keep their places and the viewer sees why.
+                        val status = if (subtitle.unplayable) unsupportedFormat else subtitleStatus(subtitle)?.text()
+                        val presentation = subtitleTrackPresentation(subtitle, index, trackStrings, status)
+                        PlayerTrackRow(
+                            title = presentation.title,
+                            chips = presentation.chips,
+                            detail = presentation.detail,
+                            selected = index == selectedSubtitleIndex,
+                            enabled = !subtitle.unplayable,
+                            onClick = { choose { onSelectSubtitle(index) } },
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
+                if (showSearchAction || showTranslateAction || timingActions != null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (showSearchAction) {
+                            PlayerFooterButton(
+                                icon = Icons.Rounded.Search,
+                                label = stringResource(CommonR.string.player_tracks_findMore),
+                                onClick = { controller.dismiss(then = onSearchSubtitles) },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        if (showTranslateAction) {
+                            PlayerFooterButton(
+                                icon = Icons.Rounded.AutoAwesome,
+                                label = stringResource(CommonR.string.player_tracks_translate),
+                                onClick = { controller.dismiss(then = onTranslateWithAi) },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        if (timingActions != null) {
+                            PlayerFooterButton(
+                                icon = Icons.Rounded.Schedule,
+                                label = stringResource(CommonR.string.player_tracks_timing),
+                                onClick = { showTiming = true },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                }
+            }
+            TracksTab.Audio -> PlayerMenuScrollColumn {
+                audioTracks.forEachIndexed { index, track ->
+                    val presentation = audioTrackPresentation(track, index, trackStrings)
+                    PlayerTrackRow(
+                        title = presentation.title,
+                        detail = presentation.detail,
+                        selected = index == selectedAudioIndex,
+                        onClick = { choose { onSelectAudio(index) } },
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+        }
+    }
+}
+
+/**
+ * "Sync to audio" and "Reset timing" for the selected subtitle, stored or a
+ * file next to the media, with a running sync's progress and the last result.
+ * Anyone who can play the file may retime it; after a refusal (demo mode) the
+ * actions give way to a short explanation.
+ */
+@Composable
+private fun SubtitleTimingGroup(
+    actions: SubtitleTimingActions,
+    onSync: () -> Unit,
+    onReset: () -> Unit,
+) {
+    if (actions.forbidden) {
+        PlayerFootnote(SubtitleTimingActions.FORBIDDEN_MESSAGE.text())
+        return
+    }
+    if (actions.canSync || actions.canReset) {
+        PlayerGroup {
+            if (actions.canSync) {
+                PlayerActionRow(
+                    icon = Icons.Rounded.Sync,
+                    label = stringResource(
+                        if (actions.inProgress) CommonR.string.player_tracks_syncing else CommonR.string.player_tracks_syncToAudio,
+                    ),
+                    onClick = onSync,
+                    enabled = actions.actionsEnabled,
+                )
+            }
+            if (actions.canReset) {
+                PlayerActionRow(
+                    icon = Icons.Rounded.Restore,
+                    label = stringResource(CommonR.string.player_tracks_resetTiming),
+                    onClick = onReset,
+                    enabled = actions.actionsEnabled,
+                    separator = actions.canSync,
+                )
+            }
+        }
+    }
+    if (actions.inProgress) {
+        SyncProgressRow(
+            percent = actions.percent ?: 0,
+            label = actions.phaseLabel?.text(),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+        )
+    }
+    actions.result?.let { result ->
+        TimingMessage(result.text.text(), color = if (result.warning) TimingWarningColor else null)
+    }
+    actions.note?.let { TimingMessage(it.text(), color = PlayerChrome.Faint) }
+    actions.error?.let { TimingMessage(it.text(), color = MaterialTheme.colorScheme.error) }
+}
+
+private val TimingWarningColor = Color(0xFFFDE68A).copy(alpha = 0.85f)
+
+@Composable
+private fun TimingMessage(text: String, color: Color? = null) {
+    Text(
+        text = text,
+        style = PlayerType.Footnote.copy(color = color ?: PlayerChrome.Graphite),
+        modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 10.dp),
+    )
+}
+
+internal fun subtitleTrackLabel(sub: PlayerSubtitleInfo, index: Int): String =
+    formatSubtitleTrackDisplayLabel(
+        rawLabel = sub.label,
+        language = sub.language,
+        codecOrMime = sub.codec,
+        isForced = sub.forced == true,
+        index = index,
+    )

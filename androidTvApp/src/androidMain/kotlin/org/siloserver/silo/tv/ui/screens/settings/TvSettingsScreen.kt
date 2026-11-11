@@ -1,0 +1,3252 @@
+package org.siloserver.silo.tv.ui.screens.settings
+
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalActivity
+import androidx.annotation.StringRes
+import androidx.compose.foundation.background
+import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.outlined.ClosedCaption
+import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.MonitorHeart
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.SmartDisplay
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import org.siloserver.silo.common.i18n.AppLanguageStore
+import org.siloserver.silo.common.i18n.appLanguageOptions
+import org.siloserver.silo.common.settings.profileLaunchDescription
+import org.siloserver.silo.common.settings.profileLaunchTitle
+import org.siloserver.silo.common.settings.SeekIntervalSettingsModel
+import org.siloserver.silo.common.settings.SeekIntervalSettingsUiState
+import org.siloserver.silo.model.settings.SeekDirection
+import org.siloserver.silo.model.settings.SeekIntervalSupport
+import org.siloserver.silo.model.settings.SeekIntervals
+import org.siloserver.silo.model.settings.SeekMedia
+import org.siloserver.silo.tv.ui.components.TvDialog
+import org.siloserver.silo.tv.ui.components.TvDialogAction
+import org.siloserver.silo.tv.ui.components.TvDialogActionStyle
+import org.siloserver.silo.tv.ui.components.TvSignOutDialog
+import org.siloserver.silo.tv.ui.components.tvDialogSurface
+import org.siloserver.silo.tv.ui.focus.claimFocusOrReport
+import org.siloserver.silo.tv.ui.focus.requestFocusUntilObserved
+import org.siloserver.silo.tv.ui.focus.TvObservedFocusResult
+import org.siloserver.silo.tv.ui.focus.TvContentInitialFocusMaxAttempts
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.tv.material3.Border
+import androidx.tv.material3.ClickableSurfaceDefaults
+import androidx.tv.material3.ExperimentalTvMaterial3Api
+import androidx.tv.material3.Icon
+import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.Surface
+import androidx.tv.material3.Text
+import org.siloserver.silo.common.network.clientVersionLabel
+import org.siloserver.silo.common.settings.CardPresentationSource
+import org.siloserver.silo.common.settings.CardPresentationSupport
+import org.siloserver.silo.common.settings.ConnectionSpeedSettingsModel
+import org.siloserver.silo.common.settings.PlayerSettingsStore
+import org.siloserver.silo.common.settings.TitleArtStore
+import org.siloserver.silo.common.settings.UseProfileSettingsCopy
+import org.siloserver.silo.common.settings.bufferingQualityModeLabel
+import org.siloserver.silo.common.settings.learnedLimitLabel
+import org.siloserver.silo.common.settings.shownIn
+import org.siloserver.silo.model.settings.PlaybackSettingsKeys
+import org.siloserver.silo.model.settings.CardPosterSize
+import org.siloserver.silo.model.settings.CardPresentation
+import org.siloserver.silo.model.settings.LanguageOptions
+import org.siloserver.silo.domain.player.BufferingQualityMode
+import org.siloserver.silo.domain.player.IntroSkipMode
+import org.siloserver.silo.domain.settings.ProfileSettingsController
+import org.siloserver.silo.model.settings.QualityChoices
+import org.siloserver.silo.model.settings.QualityPresets
+import org.siloserver.silo.model.settings.SettingKeys
+import org.siloserver.silo.model.settings.SubtitleBackgroundStylePreset
+import org.siloserver.silo.model.settings.SubtitleAppearance
+import org.siloserver.silo.model.settings.SubtitleFontSizePreset
+import org.siloserver.silo.model.settings.SubtitlePositionPreset
+import org.siloserver.silo.model.settings.pointSize
+import org.siloserver.silo.tv.BuildConfig
+import org.siloserver.silo.tv.CinemaBayAppearancePreferences
+import org.siloserver.silo.tv.LocalCinemaBayCardTrailers
+import org.siloserver.silo.tv.LocalCinemaBayLightMode
+import org.siloserver.silo.tv.CinemaBayStartupPreferences
+import org.siloserver.silo.tv.R
+import org.siloserver.silo.common.R as CommonR
+import org.siloserver.silo.tv.ui.screens.settings.diagnostics.TvPrivacyPolicyDialog
+import org.siloserver.silo.common.ui.components.ProfileAvatarRef
+import org.siloserver.silo.common.ui.components.ThumbhashImage
+import org.siloserver.silo.common.ui.components.profileAvatarDisplayText
+import org.siloserver.silo.common.ui.components.rememberProfileAvatarImage
+import androidx.compose.ui.layout.ContentScale
+import org.siloserver.silo.common.profiles.ProfileLaunchBehavior
+import org.siloserver.silo.tv.data.preferences.SubtitleMode
+import org.siloserver.silo.tv.ui.screens.player.TvSubtitleAppearanceOptions
+import org.siloserver.silo.tv.ui.screens.player.tvLabelResources
+import org.siloserver.silo.tv.ui.screens.settings.diagnostics.TvDiagnosticsSettingsPane
+import org.siloserver.silo.tv.ui.screens.settings.diagnostics.TvDiagnosticsViewModel
+import org.siloserver.silo.tv.ui.theme.FocusedContainer
+import org.siloserver.silo.tv.ui.theme.FocusedContent
+import org.siloserver.silo.tv.ui.theme.Spacing
+import org.koin.compose.koinInject
+import org.koin.compose.viewmodel.koinViewModel
+import org.siloserver.silo.common.watchparty.WatchPartyExperiment
+import org.siloserver.silo.viewmodel.HomeViewModel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import org.siloserver.silo.common.settings.text
+import org.siloserver.silo.common.i18n.text
+
+/**
+ * TV Settings — a tvOS-style split rail/detail surface modeled on
+ * `iosApp/.../tvOS/Screens/Settings/TVSettingsView.swift`.
+ *
+ * Requests/watch-together routes stay compiled elsewhere without normal menu
+ * rows.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+fun TvSettingsScreen(
+    onManageServers: () -> Unit = {},
+    onSignOut: (removeServer: Boolean) -> Unit = {},
+    onSwitchProfile: () -> Unit = {},
+    onNavigateHome: () -> Unit = {},
+    onOpenDiagnosticsReport: (reportId: String) -> Unit = {},
+    onInitialContentFocus: () -> Unit = {},
+    initialManageServersFocus: Boolean = false,
+    onManageServersReturnFocusConsumed: () -> Unit = {},
+    viewModel: TvSettingsViewModel = koinViewModel(),
+    diagnosticsViewModel: TvDiagnosticsViewModel = koinViewModel(),
+    homeSectionsViewModel: HomeViewModel = koinViewModel(key = "settings-home-sections"),
+) {
+    val state by viewModel.uiState.collectAsState()
+    val diagnosticsState by diagnosticsViewModel.state.collectAsState()
+    val metadataAiStore: org.siloserver.silo.model.feature.MetadataAiFeatureStore =
+        org.koin.compose.koinInject()
+    val metadataAiStatus by metadataAiStore.status.collectAsState()
+    val context = LocalContext.current
+    val categoryFocusRequesters = remember {
+        TvSettingsCategory.entries.associateWith { FocusRequester() }
+    }
+    val detailFocusRequester = remember { FocusRequester() }
+
+    // Saveable so a drill-out to the pending-report route and back returns to
+    // the category the viewer was reading, not to General.
+    var selectedCategory by rememberSaveable {
+        mutableStateOf(
+            if (initialManageServersFocus) TvSettingsCategory.Server else TvSettingsCategory.General,
+        )
+    }
+    var detailHasFocus by remember { mutableStateOf(false) }
+    var categoryColumnHasFocus by remember { mutableStateOf(false) }
+    var detailFocusRequest by remember { mutableStateOf(0) }
+    var showSignOutConfirm by remember { mutableStateOf(false) }
+
+    // This ViewModel outlives a visit to Settings, so each visit re-reads the
+    // learned limit and connection speed a playback may have changed, and
+    // reads them again after a network change while it is open.
+    LaunchedEffect(viewModel) { viewModel.connectionSpeed?.follow() }
+    LaunchedEffect(state.playbackOverridesReset) {
+        val landed = state.playbackOverridesReset ?: return@LaunchedEffect
+        Toast.makeText(context, UseProfileSettingsCopy.notice(landed), Toast.LENGTH_SHORT).show()
+        viewModel.onPlaybackOverridesResetShown()
+    }
+
+    LaunchedEffect(Unit) {
+        // Was four attempts judged on requestFocus() returning true — that is
+        // acceptance, not arrival. onInitialContentFocus() hands content focus
+        // to the shell, so firing it regardless told the shell focus had landed
+        // even when the loop had just failed four times.
+        val focusRestored = requestFocusUntilObserved(
+            maxAttempts = TvContentInitialFocusMaxAttempts,
+            awaitAttempt = { withFrameNanos { } },
+            // Resolved per attempt rather than captured up front: rememberSaveable
+            // may have restored a category other than General, and the eligibility
+            // fallback below can retarget it on the same frame. Claiming General
+            // unconditionally undid the restore, because that row's onFocused
+            // resets the selection on the way in.
+            requestFocus = {
+                if (initialManageServersFocus) {
+                    detailFocusRequester.requestFocus()
+                } else {
+                    categoryFocusRequesters.getValue(selectedCategory).requestFocus()
+                }
+            },
+            isFocused = { categoryColumnHasFocus },
+        ) == TvObservedFocusResult.Focused
+        if (initialManageServersFocus && focusRestored) onManageServersReturnFocusConsumed()
+        if (focusRestored) onInitialContentFocus()
+    }
+
+    // tvOS parity: eligibility can flip while Settings is open (profile switch,
+    // server capability refresh). Falling back keeps the pane and the rail in
+    // agreement instead of stranding focus in a category that just vanished.
+    LaunchedEffect(diagnosticsState.profileEligible) {
+        val fallback = tvSettingsCategoryForEligibility(
+            selectedCategory,
+            diagnosticsState.profileEligible,
+        )
+        if (fallback == selectedCategory) return@LaunchedEffect
+        selectedCategory = fallback
+        // Swapping the model is not enough: the row (or detail control) holding
+        // focus is the one that just left the rail, and Compose clears focus
+        // rather than re-homing it, which leaves the remote with nothing to
+        // move from. The fallback's row is always composed, so claim it here.
+        categoryFocusRequesters.getValue(fallback)
+            .claimFocusOrReport(target = "settings_category", action = "eligibility_fallback")
+    }
+
+    LaunchedEffect(detailFocusRequest) {
+        if (detailFocusRequest > 0) {
+            requestFocusUntilObserved(
+                maxAttempts = TvContentInitialFocusMaxAttempts,
+                awaitAttempt = { withFrameNanos { } },
+                requestFocus = detailFocusRequester::requestFocus,
+                isFocused = { detailHasFocus },
+            )
+        }
+    }
+
+    BackHandler {
+        if (detailHasFocus) {
+            categoryFocusRequesters.getValue(selectedCategory)
+                .claimFocusOrReport(target = "settings_category", action = "back_from_detail")
+        } else {
+            onNavigateHome()
+        }
+    }
+
+    LaunchedEffect(state.navAction) {
+        when (state.navAction) {
+            TvSettingsViewModel.NavAction.SWITCH_PROFILE -> {
+                viewModel.onNavActionConsumed()
+                onSwitchProfile()
+            }
+            null -> Unit
+        }
+    }
+
+    SettingsSplitLayout(
+        state = state,
+        diagnosticsState = diagnosticsState,
+        diagnosticsViewModel = diagnosticsViewModel,
+        homeSectionsViewModel = homeSectionsViewModel,
+        selectedCategory = selectedCategory,
+        categoryFocusRequesters = categoryFocusRequesters,
+        detailFocusRequester = detailFocusRequester,
+        onDetailFocusChanged = { detailHasFocus = it },
+        onRailCategoryFocusChanged = { categoryColumnHasFocus = it },
+        onCategorySelected = { selectedCategory = it },
+        onEnterCategory = {
+            selectedCategory = it
+            detailFocusRequest += 1
+        },
+        onSwitchProfile = viewModel::onSwitchProfile,
+        onManageServers = onManageServers,
+        onOpenDiagnosticsReport = onOpenDiagnosticsReport,
+        onRequestSignOut = { showSignOutConfirm = true },
+        onResolutionSelected = viewModel::onResolutionSelected,
+        onMaxBitrateSelected = viewModel::onMaxBitrateSelected,
+        onAudioLanguageChanged = viewModel::onAudioLanguageChanged,
+        onAutoPlayNextChanged = viewModel::onAutoPlayNextChanged,
+        onIntroSkipModeChanged = viewModel::onIntroSkipModeChanged,
+        onBufferingQualityModeChanged = viewModel::onBufferingQualityModeChanged,
+        onResetLearnedLimit = viewModel::onResetLearnedLimit,
+        onAutoSkipCreditsChanged = viewModel::onAutoSkipCreditsChanged,
+        onHideUnwatchedEpisodeImagesChanged = viewModel::setHideUnwatchedEpisodeImages,
+        onHideUnwatchedEpisodeOverviewsChanged = viewModel::setHideUnwatchedEpisodeOverviews,
+        onMatchContentFrameRateChanged = viewModel::onMatchContentFrameRateChanged,
+        onDolbyVisionEnabledChanged = viewModel::onDolbyVisionEnabledChanged,
+        onDvProfile7HDR10FallbackChanged = viewModel::onDvProfile7HDR10FallbackChanged,
+        onForceHdrPassthroughChanged = viewModel::onForceHdrPassthroughChanged,
+        onTrueBlackBarsChanged = viewModel::onTrueBlackBarsChanged,
+        onResumeRewindSecondsChanged = viewModel::onResumeRewindSecondsChanged,
+        onPassOutThresholdChanged = viewModel::onPassOutThresholdChanged,
+        onNextUpPromptSecondsChanged = viewModel::onNextUpPromptSecondsChanged,
+        onResetPlaybackOverrides = viewModel::resetPlaybackOverrides,
+        onUseProfileSetting = viewModel::onUseProfileSetting,
+        seekIntervals = viewModel.seekIntervals,
+        connectionSpeed = viewModel.connectionSpeed,
+        onSubtitleModeChanged = viewModel::onSubtitleModeChanged,
+        onSubtitleLanguageChanged = viewModel::onSubtitleLanguageChanged,
+        onMetadataLanguageChanged = viewModel::onMetadataLanguageChanged,
+        metadataLanguageEnabled = metadataAiStatus.enabled && metadataAiStatus.onView != org.siloserver.silo.model.metadata.MetadataAiOnView.Off,
+        onShowForcedSubtitlesChanged = viewModel::onShowForcedSubtitlesChanged,
+        onCardPresentationChanged = viewModel::onCardPresentationSelected,
+        onCardPresentationDeviceOnlyChanged = viewModel::onCardPresentationDeviceOnlyChanged,
+        onUseProfileCardDefault = viewModel::onUseProfileCardDefault,
+        onSubtitleFontSizeChanged = viewModel::setSubtitleFontSize,
+        onSubtitleFontFamilyChanged = viewModel::setSubtitleFontFamily,
+        onSubtitleFontColorChanged = viewModel::setSubtitleFontColor,
+        onSubtitleTextOpacityChanged = viewModel::setSubtitleTextOpacity,
+        onSubtitleTextOutlineChanged = viewModel::setSubtitleTextOutline,
+        onSubtitleTextOutlineColorChanged = viewModel::setSubtitleTextOutlineColor,
+        onSubtitleBackgroundStyleChanged = viewModel::setSubtitleBackgroundStyle,
+        onSubtitleBackgroundOpacityChanged = viewModel::setSubtitleBackgroundOpacity,
+        onSubtitleBackgroundColorChanged = viewModel::setSubtitleBackgroundColor,
+        onSubtitlePositionChanged = viewModel::setSubtitlePosition,
+        onResetSubtitleAppearance = viewModel::resetSubtitleAppearance,
+        onSubtitleDeviceOverrideEnabledChanged = viewModel::setSubtitleDeviceOverrideEnabled,
+        onSubtitleMatchesDeviceChanged = viewModel::onSubtitleMatchesDeviceChanged,
+        onShowAudiobooksTabChanged = viewModel::onShowAudiobooksTabChanged,
+        onProfileLaunchBehaviorChanged = viewModel::onProfileLaunchBehaviorChanged,
+    )
+
+    if (showSignOutConfirm) {
+        TvSignOutDialog(
+            onSignOut = { removeServer ->
+                showSignOutConfirm = false
+                onSignOut(removeServer)
+            },
+            onDismiss = { showSignOutConfirm = false },
+        )
+    }
+}
+
+/**
+ * The rail categories, in tvOS `TVSettingsCategory` order, with its rail
+ * descriptions, pane blurbs, and outlined glyphs. `stethoscope` has no Material
+ * twin; MonitorHeart is the nearest "check the patient" glyph.
+ */
+internal enum class TvSettingsCategory(
+    @StringRes val title: Int,
+    @StringRes val railDescription: Int,
+    @StringRes val blurb: Int,
+    val icon: ImageVector,
+) {
+    General(
+        title = CommonR.string.settings_general,
+        railDescription = CommonR.string.settings_rail_general,
+        blurb = CommonR.string.settings_blurb_general,
+        icon = Icons.Outlined.Settings,
+    ),
+    Playback(
+        title = CommonR.string.settings_playback,
+        railDescription = CommonR.string.settings_railDescription_playback,
+        blurb = CommonR.string.settings_blurb_playback,
+        icon = Icons.Outlined.SmartDisplay,
+    ),
+    Subtitles(
+        title = CommonR.string.settings_subtitles,
+        railDescription = CommonR.string.settings_rail_subtitles,
+        blurb = CommonR.string.settings_blurb_subtitles,
+        icon = Icons.Outlined.ClosedCaption,
+    ),
+    Diagnostics(
+        title = CommonR.string.settings_diagnostics,
+        railDescription = CommonR.string.settings_rail_diagnostics,
+        blurb = CommonR.string.settings_blurb_diagnostics,
+        icon = Icons.Outlined.MonitorHeart,
+    ),
+    Server(
+        title = CommonR.string.settings_category_server,
+        railDescription = CommonR.string.settings_rail_server,
+        blurb = CommonR.string.settings_blurb_server,
+        icon = Icons.Outlined.Dns,
+    ),
+}
+
+/**
+ * tvOS `visibleCategories`: Diagnostics is hidden outright for a profile that
+ * may not manage diagnostics (a kids profile, or a server that hides it).
+ */
+internal fun tvSettingsVisibleCategories(diagnosticsEligible: Boolean): List<TvSettingsCategory> =
+    TvSettingsCategory.entries.filter {
+        it != TvSettingsCategory.Diagnostics || diagnosticsEligible
+    }
+
+/**
+ * tvOS `.onChange(of: shouldShowSettings)`: if the category being shown stops
+ * being visible, fall back to General rather than leaving the pane rendering a
+ * category the rail no longer offers.
+ */
+internal fun tvSettingsCategoryForEligibility(
+    current: TvSettingsCategory,
+    diagnosticsEligible: Boolean,
+): TvSettingsCategory =
+    if (current in tvSettingsVisibleCategories(diagnosticsEligible)) {
+        current
+    } else {
+        TvSettingsCategory.General
+    }
+
+private val LocalSettingsDetailFocusReporter = staticCompositionLocalOf<(Boolean) -> Unit> { {} }
+
+// ---------------------------------------------------------------------------
+// Split settings layout (tvOS parity)
+// ---------------------------------------------------------------------------
+
+@OptIn(ExperimentalTvMaterial3Api::class, ExperimentalComposeUiApi::class)
+@Composable
+private fun SettingsSplitLayout(
+    state: TvSettingsViewModel.UiState,
+    diagnosticsState: org.siloserver.silo.common.diagnostics.DiagnosticsUiState,
+    diagnosticsViewModel: TvDiagnosticsViewModel,
+    homeSectionsViewModel: HomeViewModel,
+    selectedCategory: TvSettingsCategory,
+    categoryFocusRequesters: Map<TvSettingsCategory, FocusRequester>,
+    detailFocusRequester: FocusRequester,
+    onDetailFocusChanged: (Boolean) -> Unit,
+    // Observed arrival of the entry claim, so the shell handover below only
+    // fires when a category actually took focus.
+    onRailCategoryFocusChanged: (Boolean) -> Unit,
+    onCategorySelected: (TvSettingsCategory) -> Unit,
+    onEnterCategory: (TvSettingsCategory) -> Unit,
+    onShowAudiobooksTabChanged: (Boolean) -> Unit,
+    onProfileLaunchBehaviorChanged: (ProfileLaunchBehavior) -> Unit,
+    onSwitchProfile: () -> Unit,
+    onManageServers: () -> Unit,
+    onOpenDiagnosticsReport: (reportId: String) -> Unit,
+    onRequestSignOut: () -> Unit,
+    /** Receives a [QualityChoices.RESOLUTIONS] value. */
+    onResolutionSelected: (String) -> Unit,
+    /** Receives a [QualityChoices.bitrateChoices] value; null is no limit. */
+    onMaxBitrateSelected: (Int?) -> Unit,
+    onAudioLanguageChanged: (String) -> Unit,
+    onAutoPlayNextChanged: (Boolean) -> Unit,
+    onIntroSkipModeChanged: (IntroSkipMode) -> Unit,
+    onBufferingQualityModeChanged: (BufferingQualityMode) -> Unit,
+    onResetLearnedLimit: () -> Unit,
+    onAutoSkipCreditsChanged: (Boolean) -> Unit,
+    onHideUnwatchedEpisodeImagesChanged: (Boolean) -> Unit,
+    onHideUnwatchedEpisodeOverviewsChanged: (Boolean) -> Unit,
+    onMatchContentFrameRateChanged: (Boolean) -> Unit,
+    onDolbyVisionEnabledChanged: (Boolean) -> Unit,
+    onDvProfile7HDR10FallbackChanged: (Boolean) -> Unit,
+    onForceHdrPassthroughChanged: (Boolean) -> Unit,
+    onTrueBlackBarsChanged: (Boolean) -> Unit,
+    onResumeRewindSecondsChanged: (Int) -> Unit,
+    onPassOutThresholdChanged: (Int) -> Unit,
+    onNextUpPromptSecondsChanged: (Int) -> Unit,
+    onResetPlaybackOverrides: () -> Unit,
+    onUseProfileSetting: (String) -> Unit,
+    seekIntervals: SeekIntervalSettingsModel? = null,
+    connectionSpeed: ConnectionSpeedSettingsModel? = null,
+    onSubtitleModeChanged: (SubtitleMode) -> Unit,
+    onSubtitleLanguageChanged: (String) -> Unit,
+    onMetadataLanguageChanged: (String) -> Unit,
+    metadataLanguageEnabled: Boolean,
+    onShowForcedSubtitlesChanged: (Boolean) -> Unit,
+    onCardPresentationChanged: (CardPresentation) -> Unit,
+    onCardPresentationDeviceOnlyChanged: (Boolean) -> Unit,
+    onUseProfileCardDefault: () -> Unit,
+    onSubtitleFontSizeChanged: (SubtitleFontSizePreset) -> Unit,
+    onSubtitleFontFamilyChanged: (String) -> Unit,
+    onSubtitleFontColorChanged: (String) -> Unit,
+    onSubtitleTextOpacityChanged: (Int) -> Unit,
+    onSubtitleTextOutlineChanged: (Boolean) -> Unit,
+    onSubtitleTextOutlineColorChanged: (String) -> Unit,
+    onSubtitleBackgroundStyleChanged: (SubtitleBackgroundStylePreset) -> Unit,
+    onSubtitleBackgroundOpacityChanged: (Int) -> Unit,
+    onSubtitleBackgroundColorChanged: (String) -> Unit,
+    onSubtitlePositionChanged: (SubtitlePositionPreset) -> Unit,
+    onResetSubtitleAppearance: () -> Unit,
+    onSubtitleDeviceOverrideEnabledChanged: (Boolean) -> Unit,
+    onSubtitleMatchesDeviceChanged: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(SettingsBackground)
+            // tvOS TVSettingsView: safeAreaX 88pt + HStack spacing 52pt, with a
+            // 490pt rail — halved to Android dp. Full-screen surface (the shell
+            // hides the top bar on this route), so only the safe-area inset.
+            .padding(
+                start = 44.dp,
+                top = Spacing.safeArea,
+                end = 44.dp,
+                bottom = Spacing.xxxl,
+            ),
+        horizontalArrangement = Arrangement.spacedBy(26.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        SettingsRail(
+            state = state,
+            visibleCategories = tvSettingsVisibleCategories(diagnosticsState.profileEligible),
+            selectedCategory = selectedCategory,
+            categoryFocusRequesters = categoryFocusRequesters,
+            detailFocusRequester = detailFocusRequester,
+            onCategorySelected = onCategorySelected,
+            onEnterCategory = onEnterCategory,
+            onRailCategoryFocused = {
+                onDetailFocusChanged(false)
+                onRailCategoryFocusChanged(true)
+            },
+            onSwitchProfile = onSwitchProfile,
+            onRequestSignOut = onRequestSignOut,
+            modifier = Modifier.width(245.dp),
+        )
+        SettingsDetailPane(
+            state = state,
+            diagnosticsState = diagnosticsState,
+            diagnosticsViewModel = diagnosticsViewModel,
+            homeSectionsViewModel = homeSectionsViewModel,
+            selectedCategory = selectedCategory,
+            detailFocusRequester = detailFocusRequester,
+            onDetailFocusChanged = onDetailFocusChanged,
+            onShowAudiobooksTabChanged = onShowAudiobooksTabChanged,
+            onProfileLaunchBehaviorChanged = onProfileLaunchBehaviorChanged,
+            onManageServers = onManageServers,
+            onOpenDiagnosticsReport = onOpenDiagnosticsReport,
+            onResolutionSelected = onResolutionSelected,
+            onMaxBitrateSelected = onMaxBitrateSelected,
+            onAudioLanguageChanged = onAudioLanguageChanged,
+            onAutoPlayNextChanged = onAutoPlayNextChanged,
+            onIntroSkipModeChanged = onIntroSkipModeChanged,
+            onBufferingQualityModeChanged = onBufferingQualityModeChanged,
+            onResetLearnedLimit = onResetLearnedLimit,
+            onAutoSkipCreditsChanged = onAutoSkipCreditsChanged,
+            onHideUnwatchedEpisodeImagesChanged = onHideUnwatchedEpisodeImagesChanged,
+            onHideUnwatchedEpisodeOverviewsChanged = onHideUnwatchedEpisodeOverviewsChanged,
+            onMatchContentFrameRateChanged = onMatchContentFrameRateChanged,
+            onDolbyVisionEnabledChanged = onDolbyVisionEnabledChanged,
+            onDvProfile7HDR10FallbackChanged = onDvProfile7HDR10FallbackChanged,
+            onForceHdrPassthroughChanged = onForceHdrPassthroughChanged,
+            onTrueBlackBarsChanged = onTrueBlackBarsChanged,
+            onResumeRewindSecondsChanged = onResumeRewindSecondsChanged,
+            onPassOutThresholdChanged = onPassOutThresholdChanged,
+            onNextUpPromptSecondsChanged = onNextUpPromptSecondsChanged,
+            onResetPlaybackOverrides = onResetPlaybackOverrides,
+            onUseProfileSetting = onUseProfileSetting,
+            seekIntervals = seekIntervals,
+            connectionSpeed = connectionSpeed,
+            onSubtitleModeChanged = onSubtitleModeChanged,
+            onSubtitleLanguageChanged = onSubtitleLanguageChanged,
+            onMetadataLanguageChanged = onMetadataLanguageChanged,
+            metadataLanguageEnabled = metadataLanguageEnabled,
+            onShowForcedSubtitlesChanged = onShowForcedSubtitlesChanged,
+            onCardPresentationChanged = onCardPresentationChanged,
+            onCardPresentationDeviceOnlyChanged = onCardPresentationDeviceOnlyChanged,
+            onUseProfileCardDefault = onUseProfileCardDefault,
+            onSubtitleFontSizeChanged = onSubtitleFontSizeChanged,
+            onSubtitleFontFamilyChanged = onSubtitleFontFamilyChanged,
+            onSubtitleFontColorChanged = onSubtitleFontColorChanged,
+            onSubtitleTextOpacityChanged = onSubtitleTextOpacityChanged,
+            onSubtitleTextOutlineChanged = onSubtitleTextOutlineChanged,
+            onSubtitleTextOutlineColorChanged = onSubtitleTextOutlineColorChanged,
+            onSubtitleBackgroundStyleChanged = onSubtitleBackgroundStyleChanged,
+            onSubtitleBackgroundOpacityChanged = onSubtitleBackgroundOpacityChanged,
+            onSubtitleBackgroundColorChanged = onSubtitleBackgroundColorChanged,
+            onSubtitlePositionChanged = onSubtitlePositionChanged,
+            onResetSubtitleAppearance = onResetSubtitleAppearance,
+            onSubtitleDeviceOverrideEnabledChanged = onSubtitleDeviceOverrideEnabledChanged,
+            onSubtitleMatchesDeviceChanged = onSubtitleMatchesDeviceChanged,
+            // Contain Up at the pane's top row: escaping to the top menu from
+            // inside a category was disorienting (QA 2026-07-08). Left still
+            // exits to the category rail.
+            modifier = Modifier
+                .weight(1f)
+                .onFocusChanged { onDetailFocusChanged(it.hasFocus) }
+                .focusGroup()
+                .focusProperties {
+                    exit = { direction ->
+                        when (direction) {
+                            FocusDirection.Up -> FocusRequester.Cancel
+                            FocusDirection.Left -> categoryFocusRequesters.getValue(selectedCategory)
+                            else -> FocusRequester.Default
+                        }
+                    }
+                },
+        )
+    }
+}
+
+@Composable
+private fun SettingsRail(
+    state: TvSettingsViewModel.UiState,
+    visibleCategories: List<TvSettingsCategory>,
+    selectedCategory: TvSettingsCategory,
+    categoryFocusRequesters: Map<TvSettingsCategory, FocusRequester>,
+    detailFocusRequester: FocusRequester,
+    onCategorySelected: (TvSettingsCategory) -> Unit,
+    onEnterCategory: (TvSettingsCategory) -> Unit,
+    onRailCategoryFocused: () -> Unit,
+    onSwitchProfile: () -> Unit,
+    onRequestSignOut: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var railActionHasFocus by remember { mutableStateOf(false) }
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .focusGroup(),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Text(
+            text = stringResource(CommonR.string.settings_title),
+            style = MaterialTheme.typography.displayMedium.copy(fontSize = 24.sp, lineHeight = 29.sp),
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onBackground,
+            modifier = Modifier.padding(start = 12.dp, bottom = 10.dp),
+        )
+        SettingsAccountRow(
+            name = state.profileName ?: state.user?.username ?: "CinemaBay",
+            subtitle = accountSubtitle(state),
+            avatar = state.profileAvatar,
+            onClick = onSwitchProfile,
+        )
+        Spacer(modifier = Modifier.height(9.dp))
+        visibleCategories.forEach { category ->
+            SettingsRailCategoryRow(
+                category = category,
+                selected = category == selectedCategory && !railActionHasFocus,
+                onClick = { onEnterCategory(category) },
+                // tvOS parity: focusing a category live-swaps the detail pane.
+                onFocused = {
+                    railActionHasFocus = false
+                    onRailCategoryFocused()
+                    onCategorySelected(category)
+                },
+                // Entry focus lands on General, not the profile row.
+                focusRequester = categoryFocusRequesters.getValue(category),
+                rightFocusRequester = detailFocusRequester,
+            )
+        }
+        Spacer(modifier = Modifier.weight(1f))
+        SettingsRailActionRow(
+            label = stringResource(CommonR.string.settings_signOut),
+            icon = Icons.AutoMirrored.Filled.Logout,
+            onClick = onRequestSignOut,
+            destructive = true,
+            onFocused = { railActionHasFocus = true },
+        )
+        Text(
+            text = "CinemaBay ${clientVersionLabel(BuildConfig.VERSION_NAME, BuildConfig.BUILD_NUMBER)}", // i18n-ignore
+            style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            modifier = Modifier.padding(start = 12.dp, top = 6.dp),
+        )
+    }
+}
+
+/**
+ * tvOS `TVSettingsRailRowStyle` parity: a glyph beside the category title and
+ * its rail description. Rows rest transparent, the selected category keeps a
+ * soft white fill + hairline border while unfocused, and the focused row
+ * inverts to the white platter.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun SettingsRailCategoryRow(
+    category: TvSettingsCategory,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onFocused: () -> Unit = {},
+    focusRequester: FocusRequester? = null,
+    rightFocusRequester: FocusRequester? = null,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+    val foreground = if (isFocused) FocusedContent else Color.White
+    Surface(
+        onClick = onClick,
+        interactionSource = interactionSource,
+        shape = ClickableSurfaceDefaults.shape(shape = RowShape),
+        colors = ClickableSurfaceDefaults.colors(
+            containerColor = if (selected) Color.White.copy(alpha = 0.14f) else Color.Transparent,
+            contentColor = Color.White,
+            focusedContainerColor = FocusedContainer,
+            focusedContentColor = FocusedContent,
+            pressedContainerColor = FocusedContainer,
+            pressedContentColor = FocusedContent,
+        ),
+        border = ClickableSurfaceDefaults.border(
+            border = if (selected) {
+                Border(BorderStroke(1.dp, Color.White.copy(alpha = 0.10f)), shape = RowShape)
+            } else {
+                Border.None
+            },
+            focusedBorder = Border.None,
+            pressedBorder = Border.None,
+        ),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.0f),
+        modifier = (focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
+            .fillMaxWidth()
+            .height(RailRowHeight)
+            .focusProperties {
+                right = rightFocusRequester ?: FocusRequester.Default
+            }
+            .onFocusChanged { if (it.isFocused) onFocused() },
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(
+                imageVector = category.icon,
+                contentDescription = null,
+                tint = foreground,
+                modifier = Modifier.size(17.dp),
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                // One line each: the row is a fixed height, so a wrapped
+                // description at a large font scale would be cut off mid-line.
+                Text(
+                    text = stringResource(category.title),
+                    style = MaterialTheme.typography.titleMedium.copy(fontSize = 15.sp, lineHeight = 18.sp),
+                    fontWeight = FontWeight.Medium,
+                    color = foreground,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                // TV text keeps its 14sp floor, a little above tvOS's 16pt.
+                Text(
+                    text = stringResource(category.railDescription),
+                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 17.sp),
+                    color = foreground.copy(alpha = 0.62f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+/** Rail action row (Sign Out) — same transparent rest chrome as categories. */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun SettingsRailActionRow(
+    label: String,
+    icon: ImageVector,
+    onClick: () -> Unit,
+    destructive: Boolean = false,
+    onFocused: () -> Unit = {},
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+    val foreground = when {
+        isFocused && destructive -> DestructiveRedOnPlatter
+        isFocused -> FocusedContent
+        destructive -> DestructiveRed
+        else -> Color.White
+    }
+    Surface(
+        onClick = onClick,
+        interactionSource = interactionSource,
+        shape = ClickableSurfaceDefaults.shape(shape = RowShape),
+        colors = ClickableSurfaceDefaults.colors(
+            containerColor = Color.Transparent,
+            contentColor = Color.White,
+            focusedContainerColor = FocusedContainer,
+            focusedContentColor = FocusedContent,
+            pressedContainerColor = FocusedContainer,
+            pressedContentColor = FocusedContent,
+        ),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.0f),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(40.dp)
+            .onFocusChanged { if (it.isFocused) onFocused() },
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(9.dp),
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = foreground,
+                modifier = Modifier.size(17.dp),
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.titleMedium.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                color = foreground,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsDetailPane(
+    state: TvSettingsViewModel.UiState,
+    diagnosticsState: org.siloserver.silo.common.diagnostics.DiagnosticsUiState,
+    diagnosticsViewModel: TvDiagnosticsViewModel,
+    homeSectionsViewModel: HomeViewModel,
+    selectedCategory: TvSettingsCategory,
+    detailFocusRequester: FocusRequester,
+    onDetailFocusChanged: (Boolean) -> Unit,
+    onShowAudiobooksTabChanged: (Boolean) -> Unit,
+    onProfileLaunchBehaviorChanged: (ProfileLaunchBehavior) -> Unit,
+    onManageServers: () -> Unit,
+    onOpenDiagnosticsReport: (reportId: String) -> Unit,
+    /** Receives a [QualityChoices.RESOLUTIONS] value. */
+    onResolutionSelected: (String) -> Unit,
+    /** Receives a [QualityChoices.bitrateChoices] value; null is no limit. */
+    onMaxBitrateSelected: (Int?) -> Unit,
+    onAudioLanguageChanged: (String) -> Unit,
+    onAutoPlayNextChanged: (Boolean) -> Unit,
+    onIntroSkipModeChanged: (IntroSkipMode) -> Unit,
+    onBufferingQualityModeChanged: (BufferingQualityMode) -> Unit,
+    onResetLearnedLimit: () -> Unit,
+    onAutoSkipCreditsChanged: (Boolean) -> Unit,
+    onHideUnwatchedEpisodeImagesChanged: (Boolean) -> Unit,
+    onHideUnwatchedEpisodeOverviewsChanged: (Boolean) -> Unit,
+    onMatchContentFrameRateChanged: (Boolean) -> Unit,
+    onDolbyVisionEnabledChanged: (Boolean) -> Unit,
+    onDvProfile7HDR10FallbackChanged: (Boolean) -> Unit,
+    onForceHdrPassthroughChanged: (Boolean) -> Unit,
+    onTrueBlackBarsChanged: (Boolean) -> Unit,
+    onResumeRewindSecondsChanged: (Int) -> Unit,
+    onPassOutThresholdChanged: (Int) -> Unit,
+    onNextUpPromptSecondsChanged: (Int) -> Unit,
+    onResetPlaybackOverrides: () -> Unit,
+    onUseProfileSetting: (String) -> Unit,
+    seekIntervals: SeekIntervalSettingsModel? = null,
+    connectionSpeed: ConnectionSpeedSettingsModel? = null,
+    onSubtitleModeChanged: (SubtitleMode) -> Unit,
+    onSubtitleLanguageChanged: (String) -> Unit,
+    onMetadataLanguageChanged: (String) -> Unit,
+    metadataLanguageEnabled: Boolean,
+    onShowForcedSubtitlesChanged: (Boolean) -> Unit,
+    onCardPresentationChanged: (CardPresentation) -> Unit,
+    onCardPresentationDeviceOnlyChanged: (Boolean) -> Unit,
+    onUseProfileCardDefault: () -> Unit,
+    onSubtitleFontSizeChanged: (SubtitleFontSizePreset) -> Unit,
+    onSubtitleFontFamilyChanged: (String) -> Unit,
+    onSubtitleFontColorChanged: (String) -> Unit,
+    onSubtitleTextOpacityChanged: (Int) -> Unit,
+    onSubtitleTextOutlineChanged: (Boolean) -> Unit,
+    onSubtitleTextOutlineColorChanged: (String) -> Unit,
+    onSubtitleBackgroundStyleChanged: (SubtitleBackgroundStylePreset) -> Unit,
+    onSubtitleBackgroundOpacityChanged: (Int) -> Unit,
+    onSubtitleBackgroundColorChanged: (String) -> Unit,
+    onSubtitlePositionChanged: (SubtitlePositionPreset) -> Unit,
+    onResetSubtitleAppearance: () -> Unit,
+    onSubtitleDeviceOverrideEnabledChanged: (Boolean) -> Unit,
+    onSubtitleMatchesDeviceChanged: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    CompositionLocalProvider(LocalSettingsDetailFocusReporter provides onDetailFocusChanged) {
+      Column(modifier = modifier.fillMaxSize()) {
+        SettingsPaneHeader(selectedCategory)
+
+        when (selectedCategory) {
+            TvSettingsCategory.General -> TvGeneralSettingsPane(
+                state = state,
+                homeSectionsViewModel = homeSectionsViewModel,
+                firstFocusRequester = detailFocusRequester,
+                onShowAudiobooksTabChanged = onShowAudiobooksTabChanged,
+                onProfileLaunchBehaviorChanged = onProfileLaunchBehaviorChanged,
+                onCardPresentationChanged = onCardPresentationChanged,
+                onCardPresentationDeviceOnlyChanged = onCardPresentationDeviceOnlyChanged,
+                onUseProfileCardDefault = onUseProfileCardDefault,
+            )
+            TvSettingsCategory.Playback -> TvPlaybackSettingsPane(
+                state = state,
+                firstFocusRequester = detailFocusRequester,
+                onResolutionSelected = onResolutionSelected,
+                onMaxBitrateSelected = onMaxBitrateSelected,
+                onAudioLanguageChanged = onAudioLanguageChanged,
+                onAutoPlayNextChanged = onAutoPlayNextChanged,
+                onIntroSkipModeChanged = onIntroSkipModeChanged,
+                onBufferingQualityModeChanged = onBufferingQualityModeChanged,
+                onResetLearnedLimit = onResetLearnedLimit,
+                onAutoSkipCreditsChanged = onAutoSkipCreditsChanged,
+                onHideUnwatchedEpisodeImagesChanged = onHideUnwatchedEpisodeImagesChanged,
+                onHideUnwatchedEpisodeOverviewsChanged = onHideUnwatchedEpisodeOverviewsChanged,
+            onMatchContentFrameRateChanged = onMatchContentFrameRateChanged,
+            onDolbyVisionEnabledChanged = onDolbyVisionEnabledChanged,
+            onDvProfile7HDR10FallbackChanged = onDvProfile7HDR10FallbackChanged,
+            onForceHdrPassthroughChanged = onForceHdrPassthroughChanged,
+            onTrueBlackBarsChanged = onTrueBlackBarsChanged,
+                onResumeRewindSecondsChanged = onResumeRewindSecondsChanged,
+                onPassOutThresholdChanged = onPassOutThresholdChanged,
+                onNextUpPromptSecondsChanged = onNextUpPromptSecondsChanged,
+                onResetPlaybackOverrides = onResetPlaybackOverrides,
+                onUseProfileSetting = onUseProfileSetting,
+                seekIntervals = seekIntervals,
+                connectionSpeed = connectionSpeed,
+            )
+            TvSettingsCategory.Subtitles -> TvSubtitleSettingsPane(
+                state = state,
+                firstFocusRequester = detailFocusRequester,
+                onSubtitleModeChanged = onSubtitleModeChanged,
+                onSubtitleLanguageChanged = onSubtitleLanguageChanged,
+                onMetadataLanguageChanged = onMetadataLanguageChanged,
+                metadataLanguageEnabled = metadataLanguageEnabled,
+                onShowForcedSubtitlesChanged = onShowForcedSubtitlesChanged,
+                onSubtitleFontSizeChanged = onSubtitleFontSizeChanged,
+                onSubtitleFontFamilyChanged = onSubtitleFontFamilyChanged,
+                onSubtitleFontColorChanged = onSubtitleFontColorChanged,
+                onSubtitleTextOpacityChanged = onSubtitleTextOpacityChanged,
+                onSubtitleTextOutlineChanged = onSubtitleTextOutlineChanged,
+                onSubtitleTextOutlineColorChanged = onSubtitleTextOutlineColorChanged,
+                onSubtitleBackgroundStyleChanged = onSubtitleBackgroundStyleChanged,
+                onSubtitleBackgroundOpacityChanged = onSubtitleBackgroundOpacityChanged,
+                onSubtitleBackgroundColorChanged = onSubtitleBackgroundColorChanged,
+                onSubtitlePositionChanged = onSubtitlePositionChanged,
+                onResetSubtitleAppearance = onResetSubtitleAppearance,
+                onSubtitleDeviceOverrideEnabledChanged = onSubtitleDeviceOverrideEnabledChanged,
+            onSubtitleMatchesDeviceChanged = onSubtitleMatchesDeviceChanged,
+            )
+            TvSettingsCategory.Diagnostics -> TvDiagnosticsSettingsPane(
+                state = diagnosticsState,
+                serverName = state.serverName,
+                firstFocusRequester = detailFocusRequester,
+                onSetDestination = diagnosticsViewModel::setDestination,
+                onSetConsent = diagnosticsViewModel::setConsent,
+                onSetDebugLogging = diagnosticsViewModel::setDebugLogging,
+                onCaptureNow = { diagnosticsViewModel.captureNow(onOpenDiagnosticsReport) },
+                onStartTimedCapture = diagnosticsViewModel::startTimedCapture,
+                onStopTimedCapture = {
+                    diagnosticsViewModel.stopTimedCapture(onOpenDiagnosticsReport)
+                },
+                onCancelTimedCapture = diagnosticsViewModel::cancelTimedCapture,
+                onReportSelected = onOpenDiagnosticsReport,
+            )
+            TvSettingsCategory.Server -> TvServerSettingsPane(
+                state = state,
+                firstFocusRequester = detailFocusRequester,
+                onManageServers = onManageServers,
+            )
+        }
+      }
+    }
+}
+
+/**
+ * tvOS pane header (`TVSettingsView` detail header): the category glyph on a
+ * graphite tile beside the category title and its blurb.
+ */
+@Composable
+private fun SettingsPaneHeader(category: TvSettingsCategory) {
+    SettingsPaneHeader(
+        icon = category.icon,
+        title = stringResource(category.title),
+        blurb = stringResource(category.blurb),
+    )
+}
+
+/** The pane header for a settings page outside the rail (Settings › Accounts). */
+@Composable
+internal fun SettingsPaneHeader(icon: ImageVector, title: String, blurb: String) {
+    Row(
+        modifier = Modifier.padding(bottom = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(RoundedCornerShape(9.dp))
+                .background(PaneHeaderTile),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.displaySmall.copy(fontSize = 21.sp, lineHeight = 25.sp),
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground,
+            )
+            Text(
+                text = blurb,
+                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun TvGeneralSettingsPane(
+    state: TvSettingsViewModel.UiState,
+    homeSectionsViewModel: HomeViewModel,
+    firstFocusRequester: FocusRequester,
+    onShowAudiobooksTabChanged: (Boolean) -> Unit,
+    onProfileLaunchBehaviorChanged: (ProfileLaunchBehavior) -> Unit,
+    onCardPresentationChanged: (CardPresentation) -> Unit,
+    onCardPresentationDeviceOnlyChanged: (Boolean) -> Unit,
+    onUseProfileCardDefault: () -> Unit,
+) {
+    var showPosterSizePicker by remember { mutableStateOf(false) }
+    var showProfileLaunchPicker by remember { mutableStateOf(false) }
+    var showHomeSectionsEditor by remember { mutableStateOf(false) }
+    val startupContext = LocalContext.current
+    val appearancePreferences = remember(startupContext) { CinemaBayAppearancePreferences(startupContext) }
+    val cardTrailers = LocalCinemaBayCardTrailers.current
+    val lightMode = LocalCinemaBayLightMode.current
+    val startupPreferences = remember(startupContext) { CinemaBayStartupPreferences(startupContext) }
+    var showStartupIntro by remember { mutableStateOf(startupPreferences.showIntro) }
+    val titleArtStore: TitleArtStore = koinInject()
+    // Opening General is a refresh edge for a title art choice made on another
+    // device. Kept out of the LazyColumn item, which re-enters composition on
+    // scroll.
+    LaunchedEffect(titleArtStore) { titleArtStore.refresh() }
+    val appLanguageStore: AppLanguageStore = koinInject()
+    LaunchedEffect(appLanguageStore) { appLanguageStore.refresh() }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = Spacing.xxxl),
+    ) {
+        item {
+            // tvOS General → PROFILE AT LAUNCH. Device-wide and never synced,
+            // so it reads the same whichever profile is active.
+            SettingsGroup(title = stringResource(CommonR.string.settings_section_profileLaunch)) {
+                SettingsValueRow(
+                    label = stringResource(CommonR.string.settings_control_profileSelection),
+                    value = stringResource(profileLaunchTitle(state.profileLaunchBehavior)),
+                    onClick = { showProfileLaunchPicker = true },
+                    focusRequester = firstFocusRequester,
+                )
+                SettingsFooterText(text = stringResource(profileLaunchDescription(state.profileLaunchBehavior, CommonR.string.settings_profileLaunch_automatic_detailAndroidTv)))
+            }
+        }
+        item {
+            TvAppLanguageSettingsGroup(store = appLanguageStore)
+        }
+        item {
+            SettingsGroup(title = stringResource(R.string.cinemabay_appearance_title)) {
+                SettingsToggleRow(
+                    label = stringResource(R.string.cinemabay_light_mode),
+                    checked = lightMode,
+                    onCheckedChange = { appearancePreferences.lightMode = it },
+                )
+                SettingsFooterText(text = stringResource(R.string.cinemabay_light_mode_hint))
+                SettingsToggleRow(
+                    label = stringResource(R.string.cinemabay_card_trailers),
+                    checked = cardTrailers,
+                    onCheckedChange = { appearancePreferences.cardTrailers = it },
+                )
+                SettingsFooterText(text = stringResource(R.string.cinemabay_card_trailers_hint))
+
+            }
+        }
+        item {
+            SettingsGroup(title = stringResource(R.string.cinemabay_startup_title)) {
+                SettingsToggleRow(
+                    label = stringResource(R.string.cinemabay_startup_showIntro),
+                    checked = showStartupIntro,
+                    onCheckedChange = {
+                        showStartupIntro = it
+                        startupPreferences.showIntro = it
+                    },
+                )
+                SettingsFooterText(text = stringResource(R.string.cinemabay_startup_hint))
+            }
+        }
+        item {
+            // Device-local, server/profile-specific visibility and order for
+            // the populated rows returned by Home, matching tvOS General.
+            SettingsGroup(title = stringResource(CommonR.string.settings_homeSections_title)) {
+                SettingsValueRow(
+                    label = stringResource(CommonR.string.settings_homeSections_title),
+                    value = "",
+                    onClick = { showHomeSectionsEditor = true },
+                )
+                SettingsFooterText(
+                    text = stringResource(CommonR.string.settings_homeSections_description),
+                )
+            }
+        }
+        item {
+            // tvOS General → CARDS & POSTERS parity, backed by the
+            // server-driven `ui.card_presentation` setting. Unknown support
+            // (offline probe) keeps the controls up over the cached value;
+            // only a confirmed too-old server hides them.
+            SettingsGroup(title = stringResource(CommonR.string.settings_cards_title)) {
+                if (state.cardPresentationSupport == CardPresentationSupport.Unsupported) {
+                    SettingsFooterText(
+                        text = stringResource(CommonR.string.settings_cards_unsupported),
+                    )
+                } else {
+                    SettingsValueRow(
+                        label = stringResource(CommonR.string.settings_cards_posterSize),
+                        value = state.cardPresentation.posterSize.displayName.text(),
+                        onClick = { showPosterSizePicker = true },
+                    )
+                    SettingsToggleRow(
+                        label = stringResource(CommonR.string.settings_cards_onlyThisDevice),
+                        checked = state.cardPresentationSource ==
+                            CardPresentationSource.DeviceOverride,
+                        onCheckedChange = onCardPresentationDeviceOnlyChanged,
+                    )
+                    if (state.cardPresentationSource == CardPresentationSource.ClientFamily) {
+                        SettingsActionRow(
+                            label = stringResource(CommonR.string.settings_cards_useProfileDefault),
+                            onClick = onUseProfileCardDefault,
+                        )
+                    }
+                    SettingsFooterText(
+                        text = stringResource(CommonR.string.settings_cards_footer),
+                    )
+                }
+            }
+        }
+        item {
+            TvTitleArtSettingsGroup(store = titleArtStore)
+        }
+        item {
+            TvThemeMusicSettingsGroup(store = koinInject())
+        }
+        item {
+            // tvOS TVGeneralSettingsPane TOP MENU parity: the Audiobooks tab
+            // is opt-in (hidden by default) even when the server has an
+            // audiobook library.
+            SettingsGroup(title = stringResource(CommonR.string.settings_topMenu_title)) {
+                SettingsToggleRow(
+                    label = stringResource(CommonR.string.settings_experimental_showAudiobooks),
+                    checked = state.showAudiobooksTab,
+                    onCheckedChange = onShowAudiobooksTabChanged,
+                )
+                SettingsFooterText(
+                    text = stringResource(CommonR.string.settings_topMenu_footer),
+                )
+            }
+        }
+        item {
+            // Settings → Experimental (D1): device-local, never synced. Turning
+            // Watch Party off hides every entry point and leaves any party.
+            TvExperimentalSettingsGroup()
+        }
+        // No Library group — tvOS parity: Apple's TVSettingsView has no such
+        // section (it is iOS-only). On TV these destinations live in the
+        // For You dropdown (Watchlist/Favorites), the profile menu
+        // (Watchlist/Favorites/History), Home (Browse), and each library's
+        // cascade (Collections). (QA 2026-07-08.)
+    }
+
+    if (showPosterSizePicker) {
+        TvSettingsPickerSheet(
+            title = stringResource(CommonR.string.settings_cards_posterSize),
+            options = CardPosterSize.entries.map { PickerOption(it.raw, it.displayName.text()) },
+            selectedId = state.cardPresentation.posterSize.raw,
+            onSelect = { id ->
+                CardPosterSize.fromRaw(id)?.let {
+                    onCardPresentationChanged(state.cardPresentation.copy(posterSize = it))
+                }
+                showPosterSizePicker = false
+            },
+            onDismiss = { showPosterSizePicker = false },
+        )
+    }
+
+    if (showProfileLaunchPicker) {
+        TvSettingsPickerSheet(
+            title = stringResource(CommonR.string.settings_control_profileSelection),
+            options = ProfileLaunchBehavior.entries.map {
+                PickerOption(
+                    it.raw,
+                    stringResource(profileLaunchTitle(it)),
+                    detail = stringResource(profileLaunchDescription(it, CommonR.string.settings_profileLaunch_automatic_detailAndroidTv)),
+                )
+            },
+            selectedId = state.profileLaunchBehavior.raw,
+            onSelect = { id ->
+                onProfileLaunchBehaviorChanged(ProfileLaunchBehavior.fromRaw(id))
+                showProfileLaunchPicker = false
+            },
+            onDismiss = { showProfileLaunchPicker = false },
+        )
+    }
+
+    if (showHomeSectionsEditor) {
+        TvHomeSectionsEditor(
+            onDismiss = { showHomeSectionsEditor = false },
+            viewModel = homeSectionsViewModel,
+        )
+    }
+}
+
+/** The subtitle behavior's name, the same words as the phone's. */
+@StringRes
+private fun subtitleModeLabel(mode: SubtitleMode): Int = when (mode) {
+    SubtitleMode.Off -> CommonR.string.settingsManifest_playback_subtitle_mode_option_off
+    SubtitleMode.Auto -> CommonR.string.settingsManifest_playback_subtitle_mode_option_auto
+    SubtitleMode.Always -> CommonR.string.settings_subtitles_mode_always
+}
+
+/** Picker id for the Maximum Bitrate sheet's "No limit" row (never on the wire). */
+private const val NoBitrateLimitId = "no_limit"
+
+@Composable
+private fun TvPlaybackSettingsPane(
+    state: TvSettingsViewModel.UiState,
+    firstFocusRequester: FocusRequester,
+    /** Receives a [QualityChoices.RESOLUTIONS] value. */
+    onResolutionSelected: (String) -> Unit,
+    /** Receives a [QualityChoices.bitrateChoices] value; null is no limit. */
+    onMaxBitrateSelected: (Int?) -> Unit,
+    onAudioLanguageChanged: (String) -> Unit,
+    onAutoPlayNextChanged: (Boolean) -> Unit,
+    onIntroSkipModeChanged: (IntroSkipMode) -> Unit,
+    onBufferingQualityModeChanged: (BufferingQualityMode) -> Unit,
+    onResetLearnedLimit: () -> Unit,
+    onAutoSkipCreditsChanged: (Boolean) -> Unit,
+    onHideUnwatchedEpisodeImagesChanged: (Boolean) -> Unit,
+    onHideUnwatchedEpisodeOverviewsChanged: (Boolean) -> Unit,
+    onMatchContentFrameRateChanged: (Boolean) -> Unit,
+    onDolbyVisionEnabledChanged: (Boolean) -> Unit,
+    onDvProfile7HDR10FallbackChanged: (Boolean) -> Unit,
+    onForceHdrPassthroughChanged: (Boolean) -> Unit,
+    onTrueBlackBarsChanged: (Boolean) -> Unit,
+    onResumeRewindSecondsChanged: (Int) -> Unit,
+    onPassOutThresholdChanged: (Int) -> Unit,
+    onNextUpPromptSecondsChanged: (Int) -> Unit,
+    onResetPlaybackOverrides: () -> Unit,
+    /** Receives the key of the control going back to the profile's value. */
+    onUseProfileSetting: (String) -> Unit,
+    seekIntervals: SeekIntervalSettingsModel? = null,
+    connectionSpeed: ConnectionSpeedSettingsModel? = null,
+) {
+    var activePicker by remember { mutableStateOf<PlaybackPicker?>(null) }
+    var confirmingReset by remember { mutableStateOf(false) }
+    fun overridden(key: String) = PlaybackSettingsKeys.hasDeviceOverride(state.deviceOverrides, key)
+    // "Use profile setting" leads every profile-layered picker and is the
+    // checked choice while the device has no value of its own.
+    val useProfileOption = UseProfileSettingsCopy.option
+    fun profileLayered(key: String, options: List<PickerOption>, selectedId: String) =
+        Pair(
+            listOf(PickerOption(UseProfileSettingId, useProfileOption)) + options,
+            if (overridden(key)) selectedId else UseProfileSettingId,
+        )
+    // A switch's "Use Profile Setting" row leaves once used, so focus is
+    // handed back to the switch above it rather than lost.
+    val autoPlayNextFocus = remember { FocusRequester() }
+    val skipCreditsFocus = remember { FocusRequester() }
+    val bufferingQualityFocus = remember { FocusRequester() }
+    val seekState = seekIntervals?.state?.collectAsState()?.value
+    val connectionState = connectionSpeed?.state?.collectAsState()?.value
+    var seekPicker by remember { mutableStateOf<Pair<SeekMedia, SeekDirection>?>(null) }
+    // Where focus goes when a skip-interval group drops the focused row and
+    // has no row of its own left to take it (the row just above the groups).
+    val seekFallbackFocus = remember { FocusRequester() }
+    // No "No preference" entry: on a device that means going back to the
+    // profile's language, which "Use profile setting" already says.
+    val audioLanguages = remember(state.audioLanguage, state.audioLanguageSuggestions) {
+        LanguageOptions.namedOptions(
+            key = SettingKeys.PLAYBACK_AUDIO_LANGUAGE,
+            currentValue = state.audioLanguage,
+            runtimeValues = state.audioLanguageSuggestions,
+        )
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = Spacing.xxxl),
+    ) {
+        item {
+            SettingsGroup(title = stringResource(CommonR.string.settings_section_streaming)) {
+                SettingsValueRow(
+                    label = stringResource(CommonR.string.settings_control_resolution),
+                    value = QualityChoices.resolutionLabel(state.qualityResolution).text(),
+                    onClick = { activePicker = PlaybackPicker.Resolution },
+                    focusRequester = firstFocusRequester,
+                )
+                SettingsValueRow(
+                    label = stringResource(CommonR.string.settings_control_bitrate),
+                    value = QualityChoices.bitrateLabel(state.maxBitrateKbps).text(),
+                    onClick = { activePicker = PlaybackPicker.MaxBitrate },
+                    // Takes the learned-limit row's focus when the buffering row is hidden.
+                    focusRequester = bufferingQualityFocus.takeIf { !state.bufferingQualityModeSupported },
+                )
+                // Next to Maximum Bitrate, the manual cap on Auto it
+                // complements; the same value row and picker sheet as Skip
+                // Intros. Hidden against a server without the setting.
+                if (state.bufferingQualityModeSupported) {
+                    SettingsValueRow(
+                        label = stringResource(CommonR.string.settings_bufferingQuality_title),
+                        value = stringResource(bufferingQualityModeLabel(state.bufferingQualityMode)),
+                        onClick = { activePicker = PlaybackPicker.BufferingQualityMode },
+                        focusRequester = bufferingQualityFocus,
+                    )
+                    SettingsFooterText(text = stringResource(CommonR.string.settings_bufferingQuality_description))
+                }
+                state.learnedLimit.shownIn(state.bufferingQualityMode)?.let { limit ->
+                    // Leaves once the reset lands, so, as with a switch's "Use
+                    // Profile Setting" row, focus is handed to the row above it
+                    // rather than lost.
+                    SettingsValueRow(
+                        label = learnedLimitLabel(limit),
+                        value = stringResource(CommonR.string.settings_learnedLimit_reset),
+                        onClick = {
+                            bufferingQualityFocus.requestFocus()
+                            onResetLearnedLimit()
+                        },
+                    )
+                    if (state.learnedLimitResetFailed) {
+                        SettingsFooterText(text = stringResource(CommonR.string.settings_learnedLimit_resetFailed))
+                    }
+                }
+                SettingsValueRow(
+                    label = stringResource(CommonR.string.settings_control_audioLanguage),
+                    value = LanguageOptions.label(
+                        state.audioLanguage,
+                        SettingKeys.PLAYBACK_AUDIO_LANGUAGE,
+                    ).text(),
+                    onClick = { activePicker = PlaybackPicker.AudioLanguage },
+                )
+                // tvOS TVPlaybackSettingsPane STREAMING parity: Dolby Vision
+                // (default on; off plays the HDR10 base layer) with the
+                // narrower Profile 7 fallback nested under it — the P7 row
+                // only shows while Dolby Vision is on, as on Apple TV.
+                SettingsToggleRow(
+                    label = stringResource(CommonR.string.settingsManifest_player_dolby_vision_enabled_label),
+                    checked = state.dolbyVisionEnabled,
+                    onCheckedChange = onDolbyVisionEnabledChanged,
+                )
+                if (state.dolbyVisionEnabled) {
+                    SettingsToggleRow(
+                        label = stringResource(CommonR.string.settings_video_dvProfile7Fallback),
+                        checked = state.dvProfile7HDR10Fallback,
+                        onCheckedChange = onDvProfile7HDR10FallbackChanged,
+                    )
+                }
+                SettingsToggleRow(
+                    label = stringResource(CommonR.string.settings_video_matchFrameRate),
+                    checked = state.matchContentFrameRate,
+                    onCheckedChange = onMatchContentFrameRateChanged,
+                )
+                SettingsToggleRow(
+                    label = stringResource(CommonR.string.settings_video_forceHdrPassthrough),
+                    checked = state.forceHdrPassthrough,
+                    onCheckedChange = onForceHdrPassthroughChanged,
+                )
+                // Android TV only: tvOS composites its own letterbox, so the
+                // Apple pane has no counterpart (silo-android#475).
+                SettingsToggleRow(
+                    label = stringResource(CommonR.string.settings_video_trueBlackBars),
+                    checked = state.trueBlackBars,
+                    onCheckedChange = onTrueBlackBarsChanged,
+                )
+                // tvOS footer: what the quality choices do, then the caveat
+                // for Force HDR Passthrough. The True Black Bars sentence is
+                // Android TV's own.
+                SettingsFooterText(
+                    text = stringResource(
+                        CommonR.string.settings_streaming_footer,
+                        QualityChoices.description(state.qualityResolution, state.maxBitrateKbps).text(),
+                    ),
+                )
+            }
+        }
+        // Under Streaming, whose buffering and learned-limit rows it explains.
+        if (connectionState?.visible == true) {
+            item {
+                TvConnectionSettingsGroup(
+                    state = connectionState.shownIn(state.bufferingQualityMode, state.learnedLimit),
+                    onTestSpeed = { connectionSpeed?.testSpeed() },
+                )
+            }
+        }
+        item {
+            SettingsGroup(title = stringResource(CommonR.string.settings_section_episodes)) {
+                SettingsToggleRow(
+                    label = stringResource(CommonR.string.settings_control_autoplay),
+                    checked = state.autoPlayNext,
+                    onCheckedChange = onAutoPlayNextChanged,
+                    focusRequester = autoPlayNextFocus,
+                )
+                if (overridden(PlaybackSettingsKeys.AutoPlayNext)) {
+                    UseProfileSettingRow(
+                        setting = stringResource(CommonR.string.settings_control_autoplay),
+                        onClick = {
+                            autoPlayNextFocus.requestFocus()
+                            onUseProfileSetting(PlaybackSettingsKeys.AutoPlayNext)
+                        },
+                    )
+                }
+                SettingsValueRow(
+                    label = stringResource(CommonR.string.settings_nextUp_title),
+                    value = nextUpPromptLabel(state.nextUpPromptSeconds),
+                    onClick = { activePicker = PlaybackPicker.NextUpPrompt },
+                )
+                // Three-way, not a switch: the schema's recommended control
+                // is a select and TV has no segmented control, so this uses the
+                // same value row + picker sheet every other enum here does.
+                SettingsValueRow(
+                    label = stringResource(CommonR.string.settings_control_intros),
+                    value = stringResource(introSkipModeLabel(state.introSkipMode)),
+                    onClick = { activePicker = PlaybackPicker.IntroSkipMode },
+                )
+                SettingsToggleRow(
+                    label = stringResource(CommonR.string.settings_control_credits),
+                    checked = state.autoSkipCredits,
+                    onCheckedChange = onAutoSkipCreditsChanged,
+                    focusRequester = skipCreditsFocus,
+                )
+                if (overridden(PlaybackSettingsKeys.AutoSkipCredits)) {
+                    UseProfileSettingRow(
+                        setting = stringResource(CommonR.string.settings_control_credits),
+                        onClick = {
+                            skipCreditsFocus.requestFocus()
+                            onUseProfileSetting(PlaybackSettingsKeys.AutoSkipCredits)
+                        },
+                    )
+                }
+                SettingsValueRow(
+                    label = stringResource(CommonR.string.settings_resumeRewind_title),
+                    value = resumeRewindLabel(state.resumeRewindSeconds),
+                    onClick = { activePicker = PlaybackPicker.ResumeRewind },
+                )
+                SettingsValueRow(
+                    label = stringResource(CommonR.string.settings_stillWatching_title),
+                    value = passOutThresholdLabel(state.passOutThreshold),
+                    onClick = { activePicker = PlaybackPicker.PassOutThreshold },
+                    focusRequester = seekFallbackFocus,
+                )
+                SettingsFooterText(
+                    text = stringResource(CommonR.string.settings_episodes_footer),
+                )
+            }
+        }
+        if (state.episodeSpoilers.isSupported) {
+            item {
+                // Spoiler protection (see EpisodeSpoilers.MIN_CONTRACT_REVISION). Profile-wide, so
+                // the footer says it follows the profile to other devices.
+                // Hidden on servers that do not know the keys.
+                SettingsGroup(title = stringResource(CommonR.string.settings_section_spoilers)) {
+                    SettingsToggleRow(
+                        label = stringResource(CommonR.string.settingsManifest_catalog_hide_unwatched_episode_images_label),
+                        checked = state.episodeSpoilers.hideImages,
+                        onCheckedChange = onHideUnwatchedEpisodeImagesChanged,
+                    )
+                    SettingsToggleRow(
+                        label = stringResource(CommonR.string.settingsManifest_catalog_hide_unwatched_episode_overviews_label),
+                        checked = state.episodeSpoilers.hideOverviews,
+                        onCheckedChange = onHideUnwatchedEpisodeOverviewsChanged,
+                    )
+                    SettingsFooterText(
+                        text = stringResource(CommonR.string.settings_spoilers_footer),
+                    )
+                    state.episodeSpoilerSaveError?.let { SettingsFooterText(text = it.text()) }
+                }
+            }
+        }
+        if (seekState != null) {
+            item {
+                TvSeekIntervalGroup(
+                    media = SeekMedia.Video,
+                    state = seekState,
+                    onOpenPicker = { direction -> seekPicker = SeekMedia.Video to direction },
+                    onImportLegacyAudiobook = {},
+                    onRetry = { seekIntervals?.refresh() },
+                    fallbackFocus = seekFallbackFocus,
+                )
+            }
+            item {
+                TvSeekIntervalGroup(
+                    media = SeekMedia.Audiobook,
+                    state = seekState,
+                    onOpenPicker = { direction -> seekPicker = SeekMedia.Audiobook to direction },
+                    onImportLegacyAudiobook = { seekIntervals?.importLegacyAudiobook() },
+                    onRetry = { seekIntervals?.refresh() },
+                    fallbackFocus = seekFallbackFocus,
+                )
+            }
+        }
+        item {
+            SettingsGroup(title = stringResource(CommonR.string.settings_section_reset)) {
+                SettingsActionRow(
+                    label = UseProfileSettingsCopy.resetAllRow,
+                    onClick = { confirmingReset = true },
+                    destructive = true,
+                )
+                SettingsFooterText(text = UseProfileSettingsCopy.footer)
+            }
+        }
+    }
+
+    when (activePicker) {
+        PlaybackPicker.Resolution -> {
+            val (options, selectedId) = profileLayered(
+                PlaybackSettingsKeys.PreferredQuality,
+                QualityChoices.RESOLUTIONS.map { PickerOption(it.value, it.label.text()) },
+                QualityPresets.normalizeResolution(state.qualityResolution),
+            )
+            TvSettingsPickerSheet(
+                title = stringResource(CommonR.string.settings_control_resolution),
+                options = options,
+                selectedId = selectedId,
+                onSelect = { id ->
+                    if (id == UseProfileSettingId) {
+                        onUseProfileSetting(PlaybackSettingsKeys.PreferredQuality)
+                    } else {
+                        onResolutionSelected(id)
+                    }
+                    activePicker = null
+                },
+                onDismiss = { activePicker = null },
+            )
+        }
+        // A stored cap that is not one of the choices is listed in its place,
+        // so it stays visible and selected.
+        PlaybackPicker.MaxBitrate -> {
+            val (options, selectedId) = profileLayered(
+                PlaybackSettingsKeys.MaxBitrateKbps,
+                QualityChoices.bitrateChoices(state.maxBitrateKbps).map {
+                    PickerOption(it.value?.toString() ?: NoBitrateLimitId, it.label.text())
+                },
+                state.maxBitrateKbps?.toString() ?: NoBitrateLimitId,
+            )
+            TvSettingsPickerSheet(
+                title = stringResource(CommonR.string.settings_control_bitrate),
+                options = options,
+                selectedId = selectedId,
+                onSelect = { id ->
+                    when (id) {
+                        UseProfileSettingId -> onUseProfileSetting(PlaybackSettingsKeys.MaxBitrateKbps)
+                        NoBitrateLimitId -> onMaxBitrateSelected(null)
+                        else -> id.toIntOrNull()?.let(onMaxBitrateSelected)
+                    }
+                    activePicker = null
+                },
+                onDismiss = { activePicker = null },
+            )
+        }
+        PlaybackPicker.AudioLanguage -> {
+            val (options, selectedId) = profileLayered(
+                PlaybackSettingsKeys.AudioLanguage,
+                audioLanguages.map { PickerOption(it.first, it.second.text()) },
+                state.audioLanguage,
+            )
+            TvSettingsPickerSheet(
+                title = stringResource(CommonR.string.settings_control_audioLanguage),
+                options = options,
+                selectedId = selectedId,
+                onSelect = { id ->
+                    if (id == UseProfileSettingId) {
+                        onUseProfileSetting(PlaybackSettingsKeys.AudioLanguage)
+                    } else {
+                        onAudioLanguageChanged(id)
+                    }
+                    activePicker = null
+                },
+                onDismiss = { activePicker = null },
+            )
+        }
+        PlaybackPicker.NextUpPrompt -> {
+            val (options, selectedId) = profileLayered(
+                PlaybackSettingsKeys.NextUpPromptSeconds,
+                NextUpPromptOptions.map { PickerOption(it.toString(), nextUpPromptLabel(it)) },
+                state.nextUpPromptSeconds.toString(),
+            )
+            TvSettingsPickerSheet(
+                title = stringResource(CommonR.string.settings_nextUp_title),
+                options = options,
+                selectedId = selectedId,
+                onSelect = { id ->
+                    if (id == UseProfileSettingId) {
+                        onUseProfileSetting(PlaybackSettingsKeys.NextUpPromptSeconds)
+                    } else {
+                        id.toIntOrNull()?.let(onNextUpPromptSecondsChanged)
+                    }
+                    activePicker = null
+                },
+                onDismiss = { activePicker = null },
+            )
+        }
+        PlaybackPicker.IntroSkipMode -> {
+            val (options, selectedId) = profileLayered(
+                PlaybackSettingsKeys.IntroSkipMode,
+                IntroSkipMode.entries.map { mode ->
+                    PickerOption(mode.wireValue, stringResource(introSkipModeLabel(mode)))
+                },
+                state.introSkipMode.wireValue,
+            )
+            TvSettingsPickerSheet(
+                title = stringResource(CommonR.string.settings_control_intros),
+                options = options,
+                selectedId = selectedId,
+                onSelect = { id ->
+                    if (id == UseProfileSettingId) {
+                        onUseProfileSetting(PlaybackSettingsKeys.IntroSkipMode)
+                    } else {
+                        IntroSkipMode.entries.firstOrNull { it.wireValue == id }?.let(onIntroSkipModeChanged)
+                    }
+                    activePicker = null
+                },
+                onDismiss = { activePicker = null },
+            )
+        }
+        PlaybackPicker.BufferingQualityMode -> {
+            val (options, selectedId) = profileLayered(
+                PlaybackSettingsKeys.BufferingQualityMode,
+                BufferingQualityMode.entries.map { mode ->
+                    PickerOption(mode.wireValue, stringResource(bufferingQualityModeLabel(mode)))
+                },
+                state.bufferingQualityMode.wireValue,
+            )
+            TvSettingsPickerSheet(
+                title = stringResource(CommonR.string.settings_bufferingQuality_title),
+                options = options,
+                selectedId = selectedId,
+                onSelect = { id ->
+                    if (id == UseProfileSettingId) {
+                        onUseProfileSetting(PlaybackSettingsKeys.BufferingQualityMode)
+                    } else {
+                        BufferingQualityMode.entries.firstOrNull { it.wireValue == id }
+                            ?.let(onBufferingQualityModeChanged)
+                    }
+                    activePicker = null
+                },
+                onDismiss = { activePicker = null },
+            )
+        }
+        PlaybackPicker.ResumeRewind -> TvSettingsPickerSheet(
+            title = stringResource(CommonR.string.settings_resumeRewind_title),
+            options = ResumeRewindOptions.map { PickerOption(it.toString(), resumeRewindLabel(it)) },
+            selectedId = state.resumeRewindSeconds.toString(),
+            onSelect = { id ->
+                id.toIntOrNull()?.let(onResumeRewindSecondsChanged)
+                activePicker = null
+            },
+            onDismiss = { activePicker = null },
+        )
+        PlaybackPicker.PassOutThreshold -> TvSettingsPickerSheet(
+            title = stringResource(CommonR.string.settings_stillWatching_title),
+            options = PassOutThresholdOptions.map { PickerOption(it.toString(), passOutThresholdLabel(it)) },
+            selectedId = state.passOutThreshold.toString(),
+            onSelect = { id ->
+                id.toIntOrNull()?.let(onPassOutThresholdChanged)
+                activePicker = null
+            },
+            onDismiss = { activePicker = null },
+        )
+        null -> Unit
+    }
+
+    val openSeekPicker = seekPicker
+    if (openSeekPicker != null && seekState != null) {
+        val (media, direction) = openSeekPicker
+        val pair = if (media == SeekMedia.Video) seekState.video else seekState.audiobook
+        TvSettingsPickerSheet(
+            title = stringResource(seekIntervalPickerTitle(media, direction)),
+            options = seekState.choices.map { PickerOption(it.toString(), SeekIntervals.label(it).text()) },
+            selectedId = pair.seconds(direction).toString(),
+            onSelect = { id ->
+                id.toIntOrNull()?.let { seekIntervals?.select(media, direction, it) }
+                seekPicker = null
+            },
+            onDismiss = { seekPicker = null },
+        )
+    }
+
+    if (confirmingReset) {
+        TvSettingsConfirmDialog(
+            title = UseProfileSettingsCopy.confirmTitle,
+            message = UseProfileSettingsCopy.confirmMessage,
+            confirmLabel = UseProfileSettingsCopy.confirmButton,
+            onConfirm = {
+                confirmingReset = false
+                onResetPlaybackOverrides()
+            },
+            onDismiss = { confirmingReset = false },
+        )
+    }
+}
+
+/** Picker id for the synthetic "Use profile setting" row (never on the wire). */
+private const val UseProfileSettingId = "use_profile_setting"
+
+/**
+ * The action under a profile-layered switch while this device holds its own
+ * value. A switch has no picker to lead with "Use profile setting", so it gets
+ * a row of its own, as Cards & Posters' "Use Profile Default" does.
+ */
+@Composable
+private fun UseProfileSettingRow(setting: String, onClick: () -> Unit) {
+    val description = UseProfileSettingsCopy.rowDescription(setting)
+    SettingsActionRow(
+        label = UseProfileSettingsCopy.row,
+        onClick = onClick,
+        modifier = Modifier.semantics { contentDescription = description },
+    )
+}
+
+@StringRes
+private fun seekIntervalGroupTitle(media: SeekMedia): Int = when (media) {
+    SeekMedia.Video -> CommonR.string.settings_section_video
+    SeekMedia.Audiobook -> CommonR.string.settings_section_audiobooks
+}
+
+@StringRes
+private fun seekDirectionLabel(direction: SeekDirection): Int = when (direction) {
+    SeekDirection.Back -> CommonR.string.settings_control_skipBack
+    SeekDirection.Forward -> CommonR.string.settings_control_skipForward
+}
+
+/** "Video Skip Back", "Audiobooks Skip Forward": the skip-interval picker's title. */
+@StringRes
+private fun seekIntervalPickerTitle(media: SeekMedia, direction: SeekDirection): Int = when (media) {
+    SeekMedia.Video -> when (direction) {
+        SeekDirection.Back -> CommonR.string.settings_skipIntervals_picker_videoBack
+        SeekDirection.Forward -> CommonR.string.settings_skipIntervals_picker_videoForward
+    }
+    SeekMedia.Audiobook -> when (direction) {
+        SeekDirection.Back -> CommonR.string.settings_skipIntervals_picker_audiobookBack
+        SeekDirection.Forward -> CommonR.string.settings_skipIntervals_picker_audiobookForward
+    }
+}
+
+/**
+ * "Video" or "Audiobooks" group of the profile-wide skip intervals (settings
+ * revision 9). On an older server it explains the legacy behavior instead of
+ * offering rows that could not be saved; while the first check is pending it
+ * shows no values, and after a failed check it offers a retry.
+ */
+@Composable
+private fun TvSeekIntervalGroup(
+    media: SeekMedia,
+    state: SeekIntervalSettingsUiState,
+    onOpenPicker: (SeekDirection) -> Unit,
+    onImportLegacyAudiobook: () -> Unit,
+    onRetry: () -> Unit,
+    fallbackFocus: FocusRequester,
+) {
+    val showRows = state.editable
+    val showImport = showRows && media == SeekMedia.Audiobook && state.showLegacyImport
+    val showRetry = state.checkFailed
+
+    // The import and retry rows disappear once they succeed. If one of them
+    // held focus, hand it to this group's first row (or the row above the
+    // groups) instead of letting it fall to the root.
+    val firstRowFocus = remember { FocusRequester() }
+    var focusedAction by remember { mutableStateOf<SeekGroupAction?>(null) }
+    var handoffLanded by remember { mutableStateOf(false) }
+    val latestShowImport by rememberUpdatedState(showImport)
+    val latestShowRetry by rememberUpdatedState(showRetry)
+    val actionGone = when (focusedAction) {
+        SeekGroupAction.Import -> !showImport
+        SeekGroupAction.Retry -> !showRetry
+        null -> false
+    }
+    LaunchedEffect(actionGone) {
+        if (!actionGone) return@LaunchedEffect
+        focusedAction = null
+        handoffLanded = false
+        if (showRows) {
+            requestFocusUntilObserved(
+                maxAttempts = TvContentInitialFocusMaxAttempts,
+                awaitAttempt = { withFrameNanos { } },
+                requestFocus = firstRowFocus::requestFocus,
+                isFocused = { handoffLanded },
+            )
+        } else {
+            withFrameNanos { }
+            fallbackFocus.claimFocusOrReport(target = "settings_seek_interval", action = "action_row_removed")
+        }
+    }
+    // Ignores the callback a removed row fires on detach: by then the latest
+    // visibility is already false, and the handoff above needs the old value.
+    fun trackActionFocus(action: SeekGroupAction, visible: () -> Boolean) = Modifier.onFocusChanged {
+        if (!visible()) return@onFocusChanged
+        if (it.isFocused) {
+            focusedAction = action
+        } else if (focusedAction == action) {
+            focusedAction = null
+        }
+    }
+    val trackHandoff = Modifier.onFocusChanged { if (it.isFocused) handoffLanded = true }
+
+    SettingsGroup(title = stringResource(seekIntervalGroupTitle(media))) {
+        when (state.support) {
+            SeekIntervalSupport.Unsupported -> SettingsFooterText(
+                text = when (media) {
+                    SeekMedia.Video -> stringResource(CommonR.string.settings_skipIntervals_unsupportedVideo)
+                    SeekMedia.Audiobook -> stringResource(CommonR.string.settings_skipIntervals_unsupportedAudiobook)
+                },
+            )
+            SeekIntervalSupport.Unknown -> SettingsFooterText(
+                text = stringResource(CommonR.string.settings_skipIntervals_checking),
+            )
+            SeekIntervalSupport.Unavailable -> {
+                SettingsFooterText(
+                    text = when (media) {
+                        SeekMedia.Video -> stringResource(CommonR.string.settings_skipIntervals_unavailableVideo)
+                        SeekMedia.Audiobook -> stringResource(CommonR.string.settings_skipIntervals_unavailableAudiobook)
+                    },
+                )
+                SettingsActionRow(
+                    label = stringResource(CommonR.string.settings_skipIntervals_tryAgain),
+                    onClick = onRetry,
+                    modifier = trackActionFocus(SeekGroupAction.Retry) { latestShowRetry },
+                )
+            }
+            SeekIntervalSupport.Supported -> {
+                val pair = if (media == SeekMedia.Video) state.video else state.audiobook
+                SeekDirection.entries.forEach { direction ->
+                    SettingsValueRow(
+                        label = stringResource(seekDirectionLabel(direction)),
+                        value = SeekIntervals.label(pair.seconds(direction)).text(),
+                        onClick = { onOpenPicker(direction) },
+                        focusRequester = if (direction == SeekDirection.Back) firstRowFocus else null,
+                        modifier = if (direction == SeekDirection.Back) trackHandoff else Modifier,
+                    )
+                }
+                if (showImport) {
+                    // Stays enabled while importing so it keeps focus; the model
+                    // ignores a second press until the first import finishes.
+                    SettingsActionRow(
+                        label = if (state.importInProgress) {
+                            stringResource(CommonR.string.settings_skipIntervals_importing)
+                        } else {
+                            stringResource(CommonR.string.settings_skipIntervals_importThisTv)
+                        },
+                        onClick = onImportLegacyAudiobook,
+                        modifier = trackActionFocus(SeekGroupAction.Import) { latestShowImport },
+                    )
+                    SettingsFooterText(
+                        text = stringResource(CommonR.string.settings_skipIntervals_importFooter, state.legacyAudiobookSummary),
+                    )
+                }
+                SettingsFooterText(
+                    text = when (media) {
+                        SeekMedia.Video -> stringResource(CommonR.string.settings_skipIntervals_footerVideo)
+                        SeekMedia.Audiobook -> stringResource(CommonR.string.settings_skipIntervals_footerAudiobook)
+                    },
+                )
+                state.saveErrorFor(media)?.let { SettingsFooterText(text = it) }
+            }
+        }
+        if (media == SeekMedia.Audiobook) {
+            state.importMessage?.let { SettingsFooterText(text = it) }
+        }
+    }
+}
+
+private enum class SeekGroupAction { Import, Retry }
+
+@Composable
+private fun TvSubtitleSettingsPane(
+    state: TvSettingsViewModel.UiState,
+    firstFocusRequester: FocusRequester,
+    onSubtitleModeChanged: (SubtitleMode) -> Unit,
+    onSubtitleLanguageChanged: (String) -> Unit,
+    onMetadataLanguageChanged: (String) -> Unit,
+    metadataLanguageEnabled: Boolean,
+    onShowForcedSubtitlesChanged: (Boolean) -> Unit,
+    onSubtitleFontSizeChanged: (SubtitleFontSizePreset) -> Unit,
+    onSubtitleFontFamilyChanged: (String) -> Unit,
+    onSubtitleFontColorChanged: (String) -> Unit,
+    onSubtitleTextOpacityChanged: (Int) -> Unit,
+    onSubtitleTextOutlineChanged: (Boolean) -> Unit,
+    onSubtitleTextOutlineColorChanged: (String) -> Unit,
+    onSubtitleBackgroundStyleChanged: (SubtitleBackgroundStylePreset) -> Unit,
+    onSubtitleBackgroundOpacityChanged: (Int) -> Unit,
+    onSubtitleBackgroundColorChanged: (String) -> Unit,
+    onSubtitlePositionChanged: (SubtitlePositionPreset) -> Unit,
+    onResetSubtitleAppearance: () -> Unit,
+    onSubtitleDeviceOverrideEnabledChanged: (Boolean) -> Unit,
+    onSubtitleMatchesDeviceChanged: (Boolean) -> Unit,
+) {
+    var activePicker by remember { mutableStateOf<SubtitlePicker?>(null) }
+    var showResetConfirmation by remember { mutableStateOf(false) }
+    val appearance = state.subtitleAppearance
+    val appearanceLabels = tvLabelResources()
+    val subtitleLanguages = remember(
+        state.subtitleLanguage,
+        state.subtitleLanguageSuggestions,
+    ) {
+        LanguageOptions.options(
+            key = SettingKeys.PLAYBACK_SUBTITLE_LANGUAGE,
+            currentValue = state.subtitleLanguage,
+            runtimeValues = state.subtitleLanguageSuggestions,
+        )
+    }
+    val metadataLanguages = remember(
+        state.metadataLanguage,
+        state.metadataLanguageSuggestions,
+    ) {
+        LanguageOptions.options(
+            key = SettingKeys.CATALOG_METADATA_LANGUAGE,
+            currentValue = state.metadataLanguage,
+            runtimeValues = state.metadataLanguageSuggestions,
+        )
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = Spacing.xxxl),
+    ) {
+        item {
+            SettingsGroup(title = stringResource(CommonR.string.settings_subtitles_profile)) {
+                SettingsValueRow(
+                    label = stringResource(CommonR.string.settings_control_language),
+                    value = LanguageOptions.label(
+                        state.subtitleLanguage,
+                        SettingKeys.PLAYBACK_SUBTITLE_LANGUAGE,
+                    ).text(),
+                    onClick = { activePicker = SubtitlePicker.Language },
+                    focusRequester = firstFocusRequester,
+                )
+                SettingsValueRow(
+                    label = stringResource(CommonR.string.settings_control_behavior),
+                    value = stringResource(subtitleModeLabel(state.subtitleMode)),
+                    onClick = { activePicker = SubtitlePicker.Mode },
+                )
+                SettingsToggleRow(
+                    label = stringResource(CommonR.string.settings_control_forced),
+                    checked = state.showForcedSubtitles,
+                    onCheckedChange = onShowForcedSubtitlesChanged,
+                )
+                SettingsFooterText(
+                    text = stringResource(CommonR.string.settings_subtitles_languageFooter),
+                )
+            }
+        }
+        if (metadataLanguageEnabled) {
+            item {
+                // The footer is the settings contract's own description of the key.
+                SettingsGroup(title = stringResource(CommonR.string.settings_section_metadata)) {
+                    SettingsValueRow(
+                        label = stringResource(CommonR.string.settings_control_metadataLanguage),
+                        value = LanguageOptions.label(
+                            state.metadataLanguage,
+                            SettingKeys.CATALOG_METADATA_LANGUAGE,
+                        ).text(),
+                        onClick = { activePicker = SubtitlePicker.MetadataLanguage },
+                    )
+                    SettingsFooterText(
+                        text = stringResource(CommonR.string.settingsManifest_catalog_metadata_language_description),
+                    )
+                }
+            }
+        }
+        item {
+            SettingsGroup(title = stringResource(CommonR.string.settings_section_appearance)) {
+                TvSettingsSubtitlePreview(state.effectiveSubtitleAppearance)
+                SettingsToggleRow(
+                    // tvOS parity: appearance follows the OS captioning
+                    // settings while this is on.
+                    label = stringResource(CommonR.string.settings_subtitles_useDeviceSettings),
+                    checked = state.subtitleMatchesDevice,
+                    onCheckedChange = onSubtitleMatchesDeviceChanged,
+                )
+                // Appearance is a profile preference; this keeps a separate
+                // one (and subtitle timing) for this TV only.
+                SettingsToggleRow(
+                    label = stringResource(CommonR.string.settings_subtitles_onlyOnThisDevice),
+                    checked = state.subtitleUsesDeviceOverride,
+                    onCheckedChange = onSubtitleDeviceOverrideEnabledChanged,
+                )
+                SettingsNestedGroup(enabled = true) {
+                    SettingsValueRow(
+                        label = stringResource(CommonR.string.settings_subtitles_fontSize),
+                        value = TvSubtitleAppearanceOptions.fontSizeLabel(appearance.fontSize, appearanceLabels),
+                        onClick = { activePicker = SubtitlePicker.FontSize },
+                    )
+                    SettingsValueRow(
+                        label = stringResource(CommonR.string.settings_subtitles_fontFamily),
+                        value = TvSubtitleAppearanceOptions.fontFamilyLabel(appearance.fontFamily, appearanceLabels),
+                        onClick = { activePicker = SubtitlePicker.FontFamily },
+                    )
+                    SettingsValueRow(
+                        label = stringResource(CommonR.string.settings_subtitles_fontColor),
+                        value = TvSubtitleAppearanceOptions.fontColorLabel(appearance.fontColor, appearanceLabels),
+                        onClick = { activePicker = SubtitlePicker.FontColor },
+                    )
+                    if (state.subtitleTextOpacitySupported) {
+                        SettingsValueRow(
+                            label = stringResource(CommonR.string.settings_subtitles_textOpacity),
+                            value = stringResource(CommonR.string.settings_subtitles_percent, appearance.textOpacity),
+                            onClick = { activePicker = SubtitlePicker.TextOpacity },
+                            )
+                    }
+                    SettingsToggleRow(
+                        label = stringResource(CommonR.string.settings_subtitles_textOutline),
+                        checked = appearance.textOutline,
+                        onCheckedChange = onSubtitleTextOutlineChanged,
+                    )
+                    SettingsValueRow(
+                        label = stringResource(CommonR.string.settings_subtitles_outlineColor),
+                        value = TvSubtitleAppearanceOptions.outlineColorLabel(appearance.textOutlineColor, appearanceLabels),
+                        onClick = { activePicker = SubtitlePicker.OutlineColor },
+                    )
+                    SettingsValueRow(
+                        label = stringResource(CommonR.string.settings_subtitles_backgroundStyle),
+                        value = TvSubtitleAppearanceOptions.backgroundStyleLabel(appearance.backgroundStyle, appearanceLabels),
+                        onClick = { activePicker = SubtitlePicker.BackgroundStyle },
+                    )
+                    SettingsValueRow(
+                        label = stringResource(CommonR.string.settings_subtitles_backgroundOpacity),
+                        value = stringResource(CommonR.string.settings_subtitles_percent, appearance.backgroundOpacity),
+                        onClick = { activePicker = SubtitlePicker.BackgroundOpacity },
+                    )
+                    SettingsValueRow(
+                        label = stringResource(CommonR.string.settings_subtitles_backgroundColor),
+                        value = TvSubtitleAppearanceOptions.backgroundColorLabel(appearance.backgroundColor, appearanceLabels),
+                        onClick = { activePicker = SubtitlePicker.BackgroundColor },
+                    )
+                    SettingsValueRow(
+                        label = stringResource(CommonR.string.settings_subtitles_position),
+                        value = TvSubtitleAppearanceOptions.positionLabel(appearance.position, appearanceLabels),
+                        onClick = { activePicker = SubtitlePicker.Position },
+                    )
+                    SettingsActionRow(
+                        label = stringResource(CommonR.string.settings_subtitles_resetAppearance),
+                        onClick = { showResetConfirmation = true },
+                        destructive = true,
+                    )
+                }
+            }
+        }
+        item {
+            SettingsFooterText(
+                text = if (state.subtitleUsesDeviceOverride) {
+                    stringResource(CommonR.string.settings_subtitles_scopeDevice)
+                } else {
+                    stringResource(CommonR.string.settings_subtitles_scopeProfile)
+                },
+            )
+        }
+    }
+
+    when (activePicker) {
+        SubtitlePicker.Mode -> TvSettingsPickerSheet(
+            title = stringResource(CommonR.string.settings_control_behavior),
+            options = SubtitleMode.values().map { PickerOption(it.name, stringResource(subtitleModeLabel(it))) },
+            selectedId = state.subtitleMode.name,
+            onSelect = { id ->
+                SubtitleMode.values().firstOrNull { it.name == id }?.let(onSubtitleModeChanged)
+                activePicker = null
+            },
+            onDismiss = { activePicker = null },
+        )
+        SubtitlePicker.Language -> TvSettingsPickerSheet(
+            title = stringResource(CommonR.string.settings_control_language),
+            options = subtitleLanguages.map { PickerOption(it.first, it.second.text()) },
+            selectedId = state.subtitleLanguage,
+            onSelect = { onSubtitleLanguageChanged(it); activePicker = null },
+            onDismiss = { activePicker = null },
+        )
+        SubtitlePicker.MetadataLanguage -> TvSettingsPickerSheet(
+            title = stringResource(CommonR.string.settings_control_metadataLanguage),
+            options = metadataLanguages.map { PickerOption(it.first, it.second.text()) },
+            selectedId = state.metadataLanguage,
+            onSelect = { onMetadataLanguageChanged(it); activePicker = null },
+            onDismiss = { activePicker = null },
+        )
+        SubtitlePicker.FontSize -> TvSettingsPickerSheet(
+            title = stringResource(CommonR.string.settings_subtitles_fontSize),
+            options = TvSubtitleAppearanceOptions.fontSizes(appearanceLabels).map { PickerOption(it.first.name, it.second) },
+            selectedId = appearance.fontSize.name,
+            onSelect = { id ->
+                TvSubtitleAppearanceOptions.fontSizes(appearanceLabels).firstOrNull { it.first.name == id }?.let {
+                    onSubtitleFontSizeChanged(it.first)
+                }
+                activePicker = null
+            },
+            onDismiss = { activePicker = null },
+        )
+        SubtitlePicker.FontFamily -> TvSettingsPickerSheet(
+            title = stringResource(CommonR.string.settings_subtitles_fontFamily),
+            options = TvSubtitleAppearanceOptions.fontFamilies(appearanceLabels).map { PickerOption(it.first, it.second) },
+            selectedId = appearance.fontFamily,
+            onSelect = { id ->
+                TvSubtitleAppearanceOptions.fontFamilies(appearanceLabels).firstOrNull { it.first == id }?.let {
+                    onSubtitleFontFamilyChanged(it.first)
+                }
+                activePicker = null
+            },
+            onDismiss = { activePicker = null },
+        )
+        SubtitlePicker.FontColor -> TvSettingsPickerSheet(
+            title = stringResource(CommonR.string.settings_subtitles_fontColor),
+            options = TvSubtitleAppearanceOptions.fontColors(appearanceLabels).map { PickerOption(it.first, it.second) },
+            selectedId = appearance.fontColor.lowercase(),
+            onSelect = { id ->
+                onSubtitleFontColorChanged(id)
+                activePicker = null
+            },
+            onDismiss = { activePicker = null },
+        )
+        SubtitlePicker.TextOpacity -> TvSettingsPickerSheet(
+            title = stringResource(CommonR.string.settings_subtitles_textOpacity),
+            options = TvSubtitleAppearanceOptions.percentOptions(
+                TvSubtitleAppearanceOptions.TEXT_OPACITY_PERCENT_STEPS,
+                appearance.textOpacity,
+            ).map { PickerOption(it.toString(), stringResource(CommonR.string.settings_subtitles_percent, it)) },
+            selectedId = appearance.textOpacity.toString(),
+            onSelect = { id ->
+                id.toIntOrNull()?.let { onSubtitleTextOpacityChanged(it) }
+                activePicker = null
+            },
+            onDismiss = { activePicker = null },
+        )
+        SubtitlePicker.OutlineColor -> TvSettingsPickerSheet(
+            title = stringResource(CommonR.string.settings_subtitles_outlineColor),
+            options = TvSubtitleAppearanceOptions.outlineColors(appearanceLabels).map { PickerOption(it.first, it.second) },
+            selectedId = appearance.textOutlineColor.lowercase(),
+            onSelect = { id ->
+                onSubtitleTextOutlineColorChanged(id)
+                activePicker = null
+            },
+            onDismiss = { activePicker = null },
+        )
+        SubtitlePicker.BackgroundStyle -> TvSettingsPickerSheet(
+            title = stringResource(CommonR.string.settings_subtitles_backgroundStyle),
+            options = TvSubtitleAppearanceOptions.backgroundStyles(appearanceLabels).map { PickerOption(it.first.name, it.second) },
+            selectedId = appearance.backgroundStyle.name,
+            onSelect = { id ->
+                TvSubtitleAppearanceOptions.backgroundStyles(appearanceLabels).firstOrNull { it.first.name == id }?.let {
+                    onSubtitleBackgroundStyleChanged(it.first)
+                }
+                activePicker = null
+            },
+            onDismiss = { activePicker = null },
+        )
+        SubtitlePicker.BackgroundOpacity -> TvSettingsPickerSheet(
+            title = stringResource(CommonR.string.settings_subtitles_backgroundOpacity),
+            options = TvSubtitleAppearanceOptions.percentOptions(
+                TvSubtitleAppearanceOptions.OPACITY_PERCENT_STEPS,
+                appearance.backgroundOpacity,
+            ).map { PickerOption(it.toString(), stringResource(CommonR.string.settings_subtitles_percent, it)) },
+            selectedId = appearance.backgroundOpacity.toString(),
+            onSelect = { id ->
+                id.toIntOrNull()?.let { onSubtitleBackgroundOpacityChanged(it) }
+                activePicker = null
+            },
+            onDismiss = { activePicker = null },
+        )
+        SubtitlePicker.BackgroundColor -> TvSettingsPickerSheet(
+            title = stringResource(CommonR.string.settings_subtitles_backgroundColor),
+            options = TvSubtitleAppearanceOptions.backgroundColors(appearanceLabels).map { PickerOption(it.first, it.second) },
+            selectedId = appearance.backgroundColor.lowercase(),
+            onSelect = { id ->
+                onSubtitleBackgroundColorChanged(id)
+                activePicker = null
+            },
+            onDismiss = { activePicker = null },
+        )
+        SubtitlePicker.Position -> TvSettingsPickerSheet(
+            title = stringResource(CommonR.string.settings_subtitles_position),
+            options = TvSubtitleAppearanceOptions.positions(appearanceLabels).map { PickerOption(it.first.name, it.second) },
+            selectedId = appearance.position.name,
+            onSelect = { id ->
+                TvSubtitleAppearanceOptions.positions(appearanceLabels).firstOrNull { it.first.name == id }?.let {
+                    onSubtitlePositionChanged(it.first)
+                }
+                activePicker = null
+            },
+            onDismiss = { activePicker = null },
+        )
+        null -> Unit
+    }
+
+    if (showResetConfirmation) {
+        TvSettingsConfirmDialog(
+            title = stringResource(CommonR.string.settings_subtitles_resetTitle),
+            message = stringResource(CommonR.string.settings_subtitles_resetMessage),
+            confirmLabel = stringResource(CommonR.string.settings_subtitles_resetConfirm),
+            onConfirm = {
+                showResetConfirmation = false
+                onResetSubtitleAppearance()
+            },
+            onDismiss = { showResetConfirmation = false },
+        )
+    }
+}
+
+/** Live approximation of the effective subtitle style, matching tvOS Settings. */
+@Composable
+private fun TvSettingsSubtitlePreview(appearance: SubtitleAppearance) {
+    val safe = appearance.sanitized()
+    val previewText = stringResource(CommonR.string.settings_subtitles_preview)
+    val alignment = when (safe.position) {
+        SubtitlePositionPreset.Top -> Alignment.TopCenter
+        SubtitlePositionPreset.LowerThird -> Alignment.BottomCenter
+        SubtitlePositionPreset.Bottom -> Alignment.BottomCenter
+    }
+    val bottomPadding = if (safe.position == SubtitlePositionPreset.LowerThird) 18.dp else 7.dp
+    val fontFamily = when (safe.fontFamily.lowercase()) {
+        SubtitleAppearance.SERIF -> FontFamily.Serif
+        SubtitleAppearance.MONOSPACE -> FontFamily.Monospace
+        else -> FontFamily.SansSerif
+    }
+    val fontSize = (safe.fontSize.pointSize * 0.36).sp
+    val foreground = settingsHexColor(safe.fontColor).copy(
+        alpha = TvSubtitleAppearanceOptions.previewOpacityAlpha(safe.textOpacity, floor = 1),
+    )
+    val outline = settingsHexColor(safe.textOutlineColor)
+    val showOutline = safe.textOutline || safe.backgroundStyle == SubtitleBackgroundStylePreset.Outline
+    val boxColor = settingsHexColor(safe.backgroundColor).copy(
+        alpha = if (safe.backgroundStyle == SubtitleBackgroundStylePreset.Box) {
+            TvSubtitleAppearanceOptions.previewOpacityAlpha(safe.backgroundOpacity, floor = 0)
+        } else {
+            0f
+        },
+    )
+
+    Box(
+        modifier = Modifier
+            .widthIn(max = RowMaxWidth)
+            .fillMaxWidth()
+            .height(76.dp)
+            .padding(bottom = 7.dp)
+            .clip(RoundedCornerShape(9.dp))
+            .background(
+                Brush.linearGradient(
+                    colors = listOf(Color(0xFF55575A), Color(0xFF101113)),
+                ),
+            )
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        contentAlignment = alignment,
+    ) {
+        Box(
+            modifier = Modifier
+                .padding(bottom = bottomPadding)
+                .clip(RoundedCornerShape(3.dp))
+                .background(boxColor)
+                .padding(
+                    horizontal = if (safe.backgroundStyle == SubtitleBackgroundStylePreset.Box) 7.dp else 0.dp,
+                    vertical = if (safe.backgroundStyle == SubtitleBackgroundStylePreset.Box) 2.dp else 0.dp,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (showOutline) {
+                listOf(-1 to -1, -1 to 1, 1 to -1, 1 to 1).forEach { (x, y) ->
+                    Text(
+                        text = previewText,
+                        color = outline,
+                        fontFamily = fontFamily,
+                        fontSize = fontSize,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.offset(x.dp, y.dp),
+                    )
+                }
+            }
+            Text(
+                text = previewText,
+                color = foreground,
+                fontFamily = fontFamily,
+                fontSize = fontSize,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun TvServerSettingsPane(
+    state: TvSettingsViewModel.UiState,
+    firstFocusRequester: FocusRequester,
+    onManageServers: () -> Unit,
+) {
+    var showPrivacyPolicy by remember { mutableStateOf(false) }
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = Spacing.xxxl),
+    ) {
+        item {
+            SettingsGroup(title = stringResource(CommonR.string.settings_activeServer_title)) {
+                SettingsInfoRow(
+                    label = stringResource(CommonR.string.settings_activeServer_server),
+                    value = state.serverName.ifBlank { stringResource(CommonR.string.settings_activeServer_notConfigured) },
+                )
+                if (state.serverUrl.isNotBlank() && state.serverName != state.serverUrl) {
+                    SettingsInfoRow(label = stringResource(CommonR.string.settings_activeServer_address), value = state.serverUrl, singleLine = false)
+                }
+                // Settings › Accounts: every saved server and its accounts
+                // (multi-account spec §4.5), where the server list was.
+                SettingsActionRow(
+                    label = stringResource(CommonR.string.accounts_title),
+                    onClick = onManageServers,
+                    focusRequester = firstFocusRequester,
+                )
+            }
+        }
+        // Diagnostics used to hang off this pane as a "Diagnostics & Crash
+        // Reports" drill-in to a route outside the shell. It is its own
+        // category now (tvOS parity), so nothing here points at it.
+        item {
+            SettingsGroup(title = stringResource(CommonR.string.settings_about_title)) {
+                // Same "1.0.0 (5)" form as the phone About row, so a TV support
+                // report names the build the server's admin Activity page shows.
+                SettingsInfoRow(
+                    label = stringResource(CommonR.string.settings_about_appVersion),
+                    value = clientVersionLabel(BuildConfig.VERSION_NAME, BuildConfig.BUILD_NUMBER),
+                )
+                // tvOS About: the policy as a QR code, for a device with a browser.
+                SettingsActionRow(
+                    label = stringResource(CommonR.string.settings_about_privacyPolicy),
+                    onClick = { showPrivacyPolicy = true },
+                )
+            }
+        }
+    }
+
+    if (showPrivacyPolicy) {
+        TvPrivacyPolicyDialog(onDismiss = { showPrivacyPolicy = false })
+    }
+}
+
+private fun settingsHexColor(value: String): Color = runCatching {
+    val normalized = value.trim().removePrefix("#")
+    Color(0xFF000000.toInt() or (normalized.toLong(16).toInt() and 0x00FFFFFF))
+}.getOrElse { Color.White }
+
+// tvOS `accountSubtitle` parity: "Administrator" for admins, else the
+// username, else a generic signed-in line.
+@Composable
+private fun accountSubtitle(state: TvSettingsViewModel.UiState): String {
+    val role = state.user?.role?.trim().orEmpty()
+    if (role.equals("admin", ignoreCase = true)) return stringResource(CommonR.string.settings_account_administrator)
+    return state.user?.username?.takeIf { it.isNotBlank() } ?: stringResource(CommonR.string.settings_account_signedIn)
+}
+
+private enum class PlaybackPicker {
+    Resolution,
+    MaxBitrate,
+    AudioLanguage,
+    NextUpPrompt,
+    IntroSkipMode,
+    BufferingQualityMode,
+    ResumeRewind,
+    PassOutThreshold,
+}
+
+/** The label each intro-skip mode is offered under. The copy is fixed by the contract. */
+@StringRes
+private fun introSkipModeLabel(mode: IntroSkipMode): Int = when (mode) {
+    IntroSkipMode.NEVER -> CommonR.string.settings_introSkip_never
+    IntroSkipMode.ASK -> CommonR.string.settings_introSkip_ask
+    IntroSkipMode.ALWAYS -> CommonR.string.settings_introSkip_always
+}
+
+private enum class SubtitlePicker {
+    Mode,
+    Language,
+    MetadataLanguage,
+    FontSize,
+    FontFamily,
+    FontColor,
+    TextOpacity,
+    OutlineColor,
+    BackgroundStyle,
+    BackgroundOpacity,
+    BackgroundColor,
+    Position,
+}
+
+// ---------------------------------------------------------------------------
+// Reusable picker sheet (centered modal vertical option list)
+// ---------------------------------------------------------------------------
+
+/** [detail] is an optional second line explaining the choice (tvOS `TVSettingsOption.detail`). */
+data class PickerOption(val id: String, val label: String, val detail: String? = null)
+
+/**
+ * Reusable centered modal option picker. Renders a vertical list with a
+ * checkmark on the current selection, auto-focuses the selected row and
+ * scrolls it into view, and dismisses on selection or Back. Mirrors the
+ * tvOS `TVSettingsPickerSheet`.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+fun TvSettingsPickerSheet(
+    title: String,
+    options: List<PickerOption>,
+    selectedId: String,
+    onSelect: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    BackHandler(onBack = onDismiss)
+
+    val initialFocus = remember { FocusRequester() }
+    val selectedIndex = options.indexOfFirst { it.id == selectedId }.coerceAtLeast(0)
+    // The target row's own focus, not the sheet's: the dialog hands focus to
+    // its first row as it opens, so "something in the sheet is focused" was
+    // already true before the request landed, and focus stayed on the first
+    // row instead of the current choice.
+    var targetHasFocus by remember { mutableStateOf(false) }
+    val focusTargetIndex = if (options.isEmpty()) -1 else selectedIndex
+    val listState: LazyListState = rememberLazyListState()
+
+    LaunchedEffect(title, selectedId) {
+        if (focusTargetIndex >= 0) {
+            runCatching { listState.scrollToItem(focusTargetIndex) }
+            requestFocusUntilObserved(
+                maxAttempts = TvContentInitialFocusMaxAttempts,
+                awaitAttempt = { withFrameNanos { } },
+                requestFocus = initialFocus::requestFocus,
+                isFocused = { targetHasFocus },
+            )
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        // tvOS `TVSettingsPickerSheet`: a card over a dark scrim, with the
+        // title, a "Choose an option" line and a close hint above a hairline,
+        // then the option list.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.88f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(380.dp)
+                    .heightIn(max = 460.dp)
+                    .tvDialogSurface(),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 18.dp, end = 14.dp, top = 16.dp, bottom = 12.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.displaySmall.copy(fontSize = 21.sp, lineHeight = 25.sp),
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                        )
+                        Text(
+                            text = stringResource(CommonR.string.settings_picker_chooseOption),
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                            color = Color.White.copy(alpha = 0.6f),
+                        )
+                    }
+                    Row(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.055f))
+                            .padding(horizontal = 9.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Undo,
+                            contentDescription = null,
+                            tint = Color.White.copy(alpha = 0.6f),
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Text(
+                            text = stringResource(CommonR.string.settings_picker_backToClose),
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                            color = Color.White.copy(alpha = 0.6f),
+                        )
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(Color.White.copy(alpha = 0.08f)),
+                )
+                LazyColumn(
+                    state = listState,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    items(options, key = { it.id }) { option ->
+                        val isFocusTarget = option.id == (options.getOrNull(focusTargetIndex)?.id)
+                        TvSettingsPickerOptionRow(
+                            option = option,
+                            selected = option.id == selectedId,
+                            onClick = { onSelect(option.id) },
+                            modifier = if (isFocusTarget) {
+                                Modifier
+                                    .focusRequester(initialFocus)
+                                    .onFocusChanged { targetHasFocus = it.isFocused }
+                            } else {
+                                Modifier
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun TvSettingsPickerOptionRow(
+    option: PickerOption,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+    val foreground = if (isFocused) FocusedContent else Color.White
+
+    Surface(
+        onClick = onClick,
+        interactionSource = interactionSource,
+        shape = ClickableSurfaceDefaults.shape(shape = RowShape),
+        colors = ClickableSurfaceDefaults.colors(
+            // tvOS: the current option keeps the "selected" fill at rest.
+            containerColor = Color.White.copy(alpha = if (selected) 0.14f else 0.07f),
+            contentColor = Color.White,
+            focusedContainerColor = FocusedContainer,
+            focusedContentColor = FocusedContent,
+            pressedContainerColor = FocusedContainer,
+            pressedContentColor = FocusedContent,
+        ),
+        border = invertedRowBorder(),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.0f),
+        modifier = modifier
+            .fillMaxWidth()
+            .semantics { this.selected = selected },
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = RowHeight)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = option.label,
+                    style = SettingsRowTextStyle(),
+                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                    color = foreground,
+                )
+                option.detail?.let { detail ->
+                    Text(
+                        text = detail,
+                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                        color = foreground.copy(alpha = 0.72f),
+                    )
+                }
+            }
+            // tvOS TVSettingsPickerOptionRow: a filled check circle trails the
+            // current option.
+            if (selected) {
+                Icon(
+                    imageVector = Icons.Filled.CheckCircle,
+                    contentDescription = null,
+                    tint = foreground,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Confirm dialog
+// ---------------------------------------------------------------------------
+
+@Composable
+internal fun TvSettingsConfirmDialog(
+    title: String,
+    message: String,
+    confirmLabel: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+    destructive: Boolean = true,
+) {
+    // Cancel comes first and takes focus, so a stray OK press never runs the
+    // action. A destructive action reads red at rest and fills red on focus.
+    TvDialog(
+        title = title,
+        message = message,
+        onDismissRequest = onDismiss,
+        actions = listOf(
+            TvDialogAction(label = stringResource(CommonR.string.common_cancel), onClick = onDismiss),
+            TvDialogAction(
+                label = confirmLabel,
+                onClick = onConfirm,
+                style = if (destructive) TvDialogActionStyle.Destructive else TvDialogActionStyle.Primary,
+            ),
+        ),
+    )
+}
+
+/** The Experimental group: features that are not finished yet. */
+@Composable
+private fun TvExperimentalSettingsGroup(
+    watchPartyExperiment: WatchPartyExperiment = koinInject(),
+) {
+    val watchPartyEnabled by watchPartyExperiment.enabled.collectAsState()
+    SettingsGroup(title = stringResource(CommonR.string.settings_experimental_title)) {
+        SettingsToggleRow(
+            label = stringResource(CommonR.string.watchParty_title),
+            checked = watchPartyEnabled,
+            onCheckedChange = watchPartyExperiment::setEnabled,
+        )
+        SettingsFooterText(
+            text = stringResource(CommonR.string.settings_experimental_watchPartyFooter),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared row primitives — inverted-capsule focus chrome
+// ---------------------------------------------------------------------------
+
+/**
+ * tvOS `TVSettingsSectionHeader` parity: a small uppercase semibold label in
+ * the secondary colour, aligned with the row text, above tightly packed rows.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+internal fun SettingsGroup(
+    title: String,
+    content: @Composable () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(SettingsGroupRowSpacing)) {
+        Text(
+            text = title.uppercase(),
+            style = SettingsGroupHeaderStyle(),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 12.dp, top = 8.dp, bottom = 2.dp),
+        )
+        content()
+    }
+}
+
+@Composable
+private fun SettingsNestedGroup(
+    enabled: Boolean,
+    content: @Composable () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .widthIn(max = RowMaxWidth)
+            .fillMaxWidth()
+            .padding(start = 14.dp, top = 2.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color.White.copy(alpha = 0.025f))
+            .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(10.dp))
+            .padding(6.dp)
+            .alpha(if (enabled) 1f else 0.42f),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        content()
+    }
+}
+
+@Composable
+internal fun SettingsGroupHeaderStyle() =
+    MaterialTheme.typography.labelMedium.copy(
+        fontSize = 14.sp,
+        lineHeight = 18.sp,
+        letterSpacing = 1.sp,
+        fontWeight = FontWeight.SemiBold,
+    )
+
+/** Shared text for all detail-pane row labels and values (tvOS 26pt). */
+@Composable
+private fun SettingsRowTextStyle() =
+    MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp, lineHeight = 19.sp)
+
+// tvOS pane rows: 14pt corners, content capped at 1080pt — halved to dp.
+private val RowShape = RoundedCornerShape(7.dp)
+private val RowMaxWidth = 540.dp
+
+/**
+ * Gap between the rows (and the trailing footer) inside one [SettingsGroup].
+ *
+ * Exposed rather than inlined because a pane that asks a focused row to pull
+ * its group's footer into view has to add this gap to the footer's measured
+ * height — see `TvDiagnosticsSettingsPane`. Two copies of the number would
+ * silently drift.
+ */
+internal val SettingsGroupRowSpacing = 4.dp
+// tvOS rows are 66pt tall around 26pt text; 38dp keeps that proportion for
+// the 15sp row text.
+private val RowHeight = 38.dp
+
+/** Rail category rows carry a title over a description (tvOS rail rows). */
+private val RailRowHeight = 50.dp
+
+/**
+ * The one settings-surface ground color: black, like the Apple apps'
+ * `siloBackground`. Shared so no screen re-hardcodes it.
+ */
+internal val SettingsBackground = Color(0xFF000000)
+
+/** Graphite tile behind the pane header glyph (Apple `siloIconTile`). */
+private val PaneHeaderTile = Color(0xFF3A3A3C)
+
+/** Picker and confirmation cards (Apple `siloSurfaceElevated`), 30pt corners. */
+
+// tvOS destructive row colors: bright red at rest on black, deeper red on the
+// focused white platter (TVSettingsRailRowStyle).
+private val DestructiveRed = Color(0xFFD22F3F)
+private val DestructiveRedOnPlatter = Color(0xFFB00020)
+
+/**
+ * tvOS rail profile row: the profile's avatar, its name over the account line,
+ * and a chevron. Selecting it switches profile.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun SettingsAccountRow(
+    name: String,
+    subtitle: String,
+    avatar: ProfileAvatarRef,
+    onClick: () -> Unit,
+    focusRequester: FocusRequester? = null,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+    val foreground = if (isFocused) FocusedContent else Color.White
+    val avatarImage = rememberProfileAvatarImage(avatar)
+    Surface(
+        onClick = onClick,
+        interactionSource = interactionSource,
+        shape = ClickableSurfaceDefaults.shape(shape = RowShape),
+        // tvOS rail parity: the profile row rests transparent (no card fill)
+        // and only inverts to the platter on focus.
+        colors = ClickableSurfaceDefaults.colors(
+            containerColor = Color.Transparent,
+            contentColor = Color.White,
+            focusedContainerColor = FocusedContainer,
+            focusedContentColor = FocusedContent,
+            pressedContainerColor = FocusedContainer,
+            pressedContentColor = FocusedContent,
+        ),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.0f),
+        modifier = (focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
+            .fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (avatarImage != null) {
+                    ThumbhashImage(
+                        url = avatarImage.url,
+                        thumbhash = null,
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                        transparent = true,
+                        cacheKey = avatarImage.cacheKey,
+                        onError = avatarImage.onLoadFailed,
+                    )
+                } else {
+                    Text(
+                        text = profileAvatarDisplayText(avatar, name),
+                        style = MaterialTheme.typography.titleMedium.copy(fontSize = 14.sp),
+                        color = foreground,
+                    )
+                }
+            }
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                Text(
+                    text = name,
+                    style = MaterialTheme.typography.titleMedium.copy(fontSize = 14.sp, lineHeight = 17.sp),
+                    fontWeight = FontWeight.SemiBold,
+                    color = foreground,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                    color = foreground.copy(alpha = 0.62f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = null,
+                tint = foreground.copy(alpha = 0.5f),
+                modifier = Modifier.size(14.dp),
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+internal fun SettingsValueRow(
+    label: String,
+    value: String,
+    onClick: () -> Unit,
+    focusRequester: FocusRequester? = null,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+    val reportDetailFocus = LocalSettingsDetailFocusReporter.current
+    Surface(
+        onClick = onClick,
+        enabled = enabled,
+        interactionSource = interactionSource,
+        shape = ClickableSurfaceDefaults.shape(shape = RowShape),
+        colors = invertedRowColors(),
+        border = invertedRowBorder(),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.0f),
+        // widthIn must precede fillMaxWidth: as the outer constraint it caps
+        // the row at RowMaxWidth, and fillMaxWidth then stretches to that cap
+        // (the reverse order lets fillMaxWidth's fixed constraints win).
+        modifier = modifier
+            .then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
+            .widthIn(max = RowMaxWidth)
+            .fillMaxWidth()
+            .height(RowHeight)
+            .onFocusChanged { if (it.isFocused) reportDetailFocus(true) },
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = label,
+                style = SettingsRowTextStyle(),
+                color = if (isFocused) FocusedContent else Color.White,
+                modifier = Modifier.weight(1f),
+            )
+            if (value.isNotBlank()) {
+                Text(
+                    text = value,
+                    style = SettingsRowTextStyle(),
+                    color = (if (isFocused) FocusedContent else Color.White).copy(alpha = 0.68f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = null,
+                tint = (if (isFocused) FocusedContent else Color.White).copy(alpha = 0.55f),
+                modifier = Modifier.size(14.dp),
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+internal fun SettingsActionRow(
+    label: String,
+    onClick: () -> Unit,
+    destructive: Boolean = false,
+    focusRequester: FocusRequester? = null,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+    val reportDetailFocus = LocalSettingsDetailFocusReporter.current
+    Surface(
+        onClick = onClick,
+        enabled = enabled,
+        interactionSource = interactionSource,
+        shape = ClickableSurfaceDefaults.shape(shape = RowShape),
+        colors = invertedRowColors(),
+        border = invertedRowBorder(),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.0f),
+        // widthIn must precede fillMaxWidth: as the outer constraint it caps
+        // the row at RowMaxWidth, and fillMaxWidth then stretches to that cap
+        // (the reverse order lets fillMaxWidth's fixed constraints win).
+        modifier = modifier
+            .then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
+            .widthIn(max = RowMaxWidth)
+            .fillMaxWidth()
+            .height(RowHeight)
+            .onFocusChanged { if (it.isFocused) reportDetailFocus(true) },
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = label,
+                style = SettingsRowTextStyle(),
+                color = when {
+                    isFocused && destructive -> DestructiveRedOnPlatter
+                    isFocused -> FocusedContent
+                    destructive -> DestructiveRed
+                    else -> Color.White
+                },
+                modifier = Modifier.weight(1f),
+            )
+            if (!destructive) {
+                Icon(
+                    imageVector = Icons.Default.ChevronRight,
+                    contentDescription = null,
+                    tint = (if (isFocused) FocusedContent else Color.White).copy(alpha = 0.55f),
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+internal fun SettingsToggleRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    focusRequester: FocusRequester? = null,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+    val reportDetailFocus = LocalSettingsDetailFocusReporter.current
+    Surface(
+        onClick = { onCheckedChange(!checked) },
+        enabled = enabled,
+        interactionSource = interactionSource,
+        shape = ClickableSurfaceDefaults.shape(shape = RowShape),
+        colors = invertedRowColors(),
+        border = invertedRowBorder(),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.0f),
+        // widthIn must precede fillMaxWidth: as the outer constraint it caps
+        // the row at RowMaxWidth, and fillMaxWidth then stretches to that cap
+        // (the reverse order lets fillMaxWidth's fixed constraints win).
+        modifier = modifier
+            .then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
+            .widthIn(max = RowMaxWidth)
+            .fillMaxWidth()
+            .height(RowHeight)
+            .onFocusChanged { if (it.isFocused) reportDetailFocus(true) },
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = label,
+                style = SettingsRowTextStyle(),
+                color = if (isFocused) FocusedContent else Color.White,
+                modifier = Modifier.weight(1f),
+            )
+            // tvOS TVSettingsToggleRow: the state reads as text — semibold and
+            // near-opaque when on, faded when off. No accent color.
+            Text(
+                text = if (checked) stringResource(CommonR.string.settings_on) else stringResource(CommonR.string.settings_off),
+                style = SettingsRowTextStyle(),
+                fontWeight = if (checked) FontWeight.SemiBold else FontWeight.Normal,
+                color = (if (isFocused) FocusedContent else Color.White)
+                    .copy(alpha = if (checked) 0.9f else 0.55f),
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+internal fun SettingsInfoRow(label: String, value: String, singleLine: Boolean = true) {
+    Row(
+        modifier = Modifier
+            .widthIn(max = RowMaxWidth)
+            .fillMaxWidth()
+            .let { if (singleLine) it.height(RowHeight) else it.heightIn(min = RowHeight) }
+            .clip(RowShape)
+            .background(Color.White.copy(alpha = 0.07f))
+            .border(1.dp, Color.White.copy(alpha = 0.09f), RowShape)
+            .padding(horizontal = 12.dp, vertical = if (singleLine) 0.dp else 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = SettingsRowTextStyle(),
+            color = MaterialTheme.colorScheme.onBackground,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            text = value,
+            style = SettingsRowTextStyle(),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            // Long values (the server URL) wrap instead of truncating into
+            // unreadability (QA 2026-07-08).
+            maxLines = if (singleLine) 1 else 3,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.End,
+            modifier = Modifier.weight(2f),
+        )
+    }
+}
+
+/** Non-focusable explanatory footer below a settings group (tvOS `TVSettingsFooter`). */
+@Composable
+internal fun SettingsFooterText(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 21.sp),
+        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.85f),
+        // The modifier goes outermost so a caller measuring this footer sees the
+        // laid-out block, not the text before its width cap and padding apply.
+        modifier = modifier
+            .widthIn(max = RowMaxWidth)
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 2.dp),
+    )
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun invertedRowColors() = ClickableSurfaceDefaults.colors(
+    containerColor = Color.White.copy(alpha = 0.07f),
+    contentColor = Color.White,
+    focusedContainerColor = FocusedContainer,
+    focusedContentColor = FocusedContent,
+    pressedContainerColor = FocusedContainer,
+    pressedContentColor = FocusedContent,
+)
+
+/**
+ * tvOS `TVSettingsPaneRowStyle` parity: resting rows carry a hairline
+ * `white 0.09` border over the `white 0.07` fill; the focused platter drops it.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun invertedRowBorder() = ClickableSurfaceDefaults.border(
+    border = Border(BorderStroke(1.dp, Color.White.copy(alpha = 0.09f)), shape = RowShape),
+    focusedBorder = Border.None,
+    pressedBorder = Border.None,
+)
+
+// ---------------------------------------------------------------------------
+// Option data + value formatting
+// ---------------------------------------------------------------------------
+
+// Discrete choices for the F1/F2 behavior settings (0 = off).
+private val ResumeRewindOptions = listOf(0, 3, 5, 7, 10, 15, 20, 30)
+private val PassOutThresholdOptions = listOf(0, 2, 3, 4, 5)
+
+// Up-Next prompt timing (seconds before end; 0 = at end). Mirrors tvOS.
+private val NextUpPromptOptions = listOf(0, 10, 30, 60, 120)
+
+@Composable
+private fun resumeRewindLabel(seconds: Int): String =
+    if (seconds <= 0) stringResource(CommonR.string.settings_off) else stringResource(CommonR.string.settings_resumeRewind_seconds, seconds)
+
+@Composable
+private fun passOutThresholdLabel(count: Int): String =
+    if (count <= 0) stringResource(CommonR.string.settings_off) else "$count"
+
+@Composable
+private fun nextUpPromptLabel(seconds: Int): String = when {
+    seconds <= 0 -> stringResource(CommonR.string.settings_nextUp_atEnd)
+    seconds < 60 -> pluralStringResource(CommonR.plurals.settings_nextUp_secondsBeforeEnd, seconds, seconds)
+    else -> (seconds / 60).let { pluralStringResource(CommonR.plurals.settings_nextUp_minutesBeforeEnd, it, it) }
+}
+
+/**
+ * "Theme Music" and "Loop Theme Music", as the web app's device settings offer
+ * them. Each switch writes this TV's value; one set for the profile elsewhere
+ * applies until then.
+ */
+@Composable
+private fun TvThemeMusicSettingsGroup(store: PlayerSettingsStore) {
+    val enabled by store.themeMusicEnabledFlow.collectAsState(initial = false)
+    val loop by store.themeMusicLoopFlow.collectAsState(initial = false)
+    val overrides by store.deviceOverrideKeysFlow.collectAsState(initial = emptySet())
+    val scope = rememberCoroutineScope()
+    val enabledFocus = remember { FocusRequester() }
+    val loopFocus = remember { FocusRequester() }
+    fun overridden(key: String) = PlaybackSettingsKeys.hasDeviceOverride(overrides, key)
+    SettingsGroup(title = stringResource(CommonR.string.settings_section_themeMusic)) {
+        SettingsToggleRow(
+            label = stringResource(CommonR.string.settings_section_themeMusic),
+            checked = enabled,
+            onCheckedChange = { scope.launch { store.setThemeMusicEnabled(it) } },
+            focusRequester = enabledFocus,
+        )
+        if (overridden(PlaybackSettingsKeys.ThemeMusicEnabled)) {
+            UseProfileSettingRow(
+                setting = stringResource(CommonR.string.settings_section_themeMusic),
+                onClick = {
+                    enabledFocus.requestFocus()
+                    scope.launch { store.resetDeviceSetting(PlaybackSettingsKeys.ThemeMusicEnabled) }
+                },
+            )
+        }
+        SettingsToggleRow(
+            label = stringResource(CommonR.string.settings_control_themeMusicLoop),
+            checked = loop,
+            onCheckedChange = { scope.launch { store.setThemeMusicLoop(it) } },
+            focusRequester = loopFocus,
+        )
+        if (overridden(PlaybackSettingsKeys.ThemeMusicLoop)) {
+            UseProfileSettingRow(
+                setting = stringResource(CommonR.string.settings_control_themeMusicLoop),
+                onClick = {
+                    loopFocus.requestFocus()
+                    scope.launch { store.resetDeviceSetting(PlaybackSettingsKeys.ThemeMusicLoop) }
+                },
+            )
+        }
+        SettingsFooterText(
+            text = stringResource(CommonR.string.settings_themeMusic_footer),
+        )
+    }
+}
+
+/**
+ * "Show title art" and "Apply to all devices" (settings revision 16). Hidden
+ * until the server confirms the key; older servers keep logos on. The
+ * switches stay disabled until this session's read lands.
+ */
+@Composable
+private fun TvTitleArtSettingsGroup(store: TitleArtStore) {
+    val state by store.state.collectAsState()
+    val saveError by store.saveError.collectAsState()
+    if (!state.isSupported) return
+    SettingsGroup(title = stringResource(CommonR.string.settings_titleArt_title)) {
+        SettingsToggleRow(
+            label = stringResource(CommonR.string.settingsManifest_ui_title_art_label),
+            checked = state.showTitleArt,
+            onCheckedChange = store::setShowTitleArt,
+            enabled = state.canEdit,
+        )
+        SettingsFooterText(text = stringResource(CommonR.string.settings_titleArt_footer))
+        SettingsToggleRow(
+            label = stringResource(CommonR.string.settings_titleArt_applyToAll),
+            checked = state.appliesToAllDevices,
+            onCheckedChange = store::setAppliesToAllDevices,
+            enabled = state.canEdit,
+        )
+        SettingsFooterText(
+            text = when {
+                !state.appliesToAllDevices -> stringResource(CommonR.string.settings_titleArt_thisTvOnly)
+                state.showTitleArt -> stringResource(CommonR.string.settings_titleArt_allDevicesShown)
+                else -> stringResource(CommonR.string.settings_titleArt_allDevicesHidden)
+            },
+        )
+        saveError?.let { SettingsFooterText(text = it.text()) }
+    }
+}
+
+/**
+ * App language (`ui.app_language`). Android TV has no system per-app language
+ * screen, so this is the only place to choose it on TV. Saves this TV's choice
+ * for the profile. Renders nothing until the server confirms the key.
+ */
+@Composable
+private fun TvAppLanguageSettingsGroup(store: AppLanguageStore) {
+    val state by store.state.collectAsState()
+    if (!state.supported) return
+    val activity = LocalActivity.current ?: return
+    var showPicker by remember { mutableStateOf(false) }
+    val title = stringResource(CommonR.string.settings_control_appLanguage)
+    val options = appLanguageOptions(stringResource(CommonR.string.settings_appLanguage_matchDevice), state, store.offeredPseudoLocales(state))
+    val appliedPseudo = remember(state, LocalConfiguration.current) { store.appliedPseudoLocale() }
+    val selectedId = appliedPseudo ?: state.choice.orEmpty()
+    SettingsGroup(title = title) {
+        SettingsValueRow(
+            label = title,
+            value = options.firstOrNull { it.id == selectedId }?.label.orEmpty(),
+            onClick = { showPicker = true },
+        )
+        SettingsFooterText(text = stringResource(CommonR.string.android_settings_appLanguageFooter))
+    }
+    if (showPicker) {
+        TvSettingsPickerSheet(
+            title = title,
+            options = options.map { PickerOption(it.id, it.label) },
+            selectedId = selectedId,
+            onSelect = { id ->
+                if (id != selectedId) store.choose(activity, id.ifEmpty { null })
+                showPicker = false
+            },
+            onDismiss = { showPicker = false },
+        )
+    }
+}

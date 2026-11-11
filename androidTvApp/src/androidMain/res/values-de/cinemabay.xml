@@ -1,0 +1,36 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+  <string name="app_name">CinemaBay</string>
+  <string name="android_settings_appLanguageFooter">Die Sprache der Menüs und Schaltflächen von CinemaBay für dieses Profil, auf allen Geräten. Audio-, Untertitel- und Metadatensprache sind eigene Einstellungen.</string>
+  <plurals name="diagnostics_capture_hostedFooter">
+    <item quantity="one">Berichte enthalten Version und Build der CinemaBay-App, die Android-Version, das Gerätemodell, Absturzdetails und die Diagnoseprotokolle, die du prüfst. Eine pseudonyme Installationskennung ist nicht mit einem Konto auf deinem selbst gehosteten Server verknüpft. Benutzername, E-Mail-Adresse, Profil, Serveradresse und Wiedergabe-Sitzungs-IDs werden ausgelassen. Berichte werden nie automatisch gesendet und können bis zu %1$d Tag aufbewahrt werden.</item>
+    <item quantity="other">Berichte enthalten Version und Build der CinemaBay-App, die Android-Version, das Gerätemodell, Absturzdetails und die Diagnoseprotokolle, die du prüfst. Eine pseudonyme Installationskennung ist nicht mit einem Konto auf deinem selbst gehosteten Server verknüpft. Benutzername, E-Mail-Adresse, Profil, Serveradresse und Wiedergabe-Sitzungs-IDs werden ausgelassen. Berichte werden nie automatisch gesendet und können bis zu %1$d Tage aufbewahrt werden.</item>
+  </plurals>
+  <plurals name="diagnostics_capture_hostedFooterTv">
+    <item quantity="one">Berichte enthalten Version und Build der CinemaBay-App, die Android-Version, das Gerätemodell, Absturzdetails und die Diagnoseprotokolle, die du prüfst. Eine pseudonyme Installationskennung ist nicht mit einem Konto auf deinem selbst gehosteten Server verknüpft. Benutzername, E-Mail-Adresse, Profil, Serveradresse und Wiedergabe-Sitzungs-IDs werden ausgelassen. Berichte werden nie automatisch gesendet und können bis zu %1$d Tag aufbewahrt werden. Vollständige Datenschutzerklärung: %2$s</item>
+    <item quantity="other">Berichte enthalten Version und Build der CinemaBay-App, die Android-Version, das Gerätemodell, Absturzdetails und die Diagnoseprotokolle, die du prüfst. Eine pseudonyme Installationskennung ist nicht mit einem Konto auf deinem selbst gehosteten Server verknüpft. Benutzername, E-Mail-Adresse, Profil, Serveradresse und Wiedergabe-Sitzungs-IDs werden ausgelassen. Berichte werden nie automatisch gesendet und können bis zu %1$d Tage aufbewahrt werden. Vollständige Datenschutzerklärung: %2$s</item>
+  </plurals>
+  <string name="diagnostics_prompt_privacyNotice">Der Bericht enthält Version und Build der CinemaBay-App, die Android-Version, das Gerätemodell, Absturzdetails und Diagnoseprotokolle. Seine pseudonyme Kennung ist nicht mit einem Konto auf deinem selbst gehosteten Server verknüpft. Benutzername, E-Mail-Adresse, Profil, Serveradresse und Wiedergabe-Sitzungs-IDs werden ausgelassen. Er wird nie automatisch gesendet und kann bis zu 30 Tage aufbewahrt werden.</string>
+  <string name="diagnostics_prompt_title">Bei CinemaBay ist ein Problem aufgetreten</string>
+  <string name="settings_bufferingQuality_description">Was CinemaBay bei Auto tut, wenn die Wiedergabe immer wieder puffert. Bevor CinemaBay eine von dir gewählte Qualität senkt, fragt es immer nach.</string>
+  <string name="settings_episodes_footer">„Beim Fortsetzen zurückspulen“ springt zurück, wenn du zu einem teilweise angesehenen Titel zurückkehrst. „Nachfrage beim Weiterschauen“ legt fest, wie viele Folgen nacheinander laufen, bevor CinemaBay fragt, ob du noch zuschaust.</string>
+  <string name="settings_notifications_inAppFooter">Zeigt in CinemaBay Hinweise an, sobald neue Titel erscheinen.</string>
+  <string name="settings_profileLaunch_afterOneHour_detail">Zeigt „Wer schaut?“ an, wenn du CinemaBay 1 Stunde lang nicht genutzt hast.</string>
+  <string name="settings_profileLaunch_afterTwelveHours_detail">Zeigt „Wer schaut?“ an, wenn du CinemaBay 12 Stunden lang nicht genutzt hast.</string>
+  <string name="settings_profileLaunch_askEveryLaunch_detail">Zeigt „Wer schaut?“ an, wann immer du zu CinemaBay zurückkehrst.</string>
+  <string name="settings_profileSelection_footer">Wähle, wann CinemaBay fragt, wer schaut. Dies gilt nur für dieses Gerät.</string>
+  <string name="settings_streaming_footer">%1$s „HDR-Passthrough erzwingen“ ermöglicht die HDR-Wiedergabe, auch wenn dieser Fernseher keine Unterstützung meldet. Der HDMI-Ausgang wird dadurch nicht auf HDR umgestellt; Android kann das Bild weiterhin in SDR umwandeln. Aktiviere die Option nur, wenn du sichergestellt hast, dass dein Fernseher das Quellformat unterstützt. Nicht unterstützte Formate können zu einem schwarzen Bild oder falschen Farben führen. „Echte schwarze Balken“ verhindert, dass CinemaBay während der Wiedergabe die Balken um das Bild zeichnet. Probiere die Option aus, wenn die Balken in HDR oder Dolby Vision grau aussehen, und schalte sie wieder aus, wenn sie heller werden oder eine dünne Linie zeigen.</string>
+  <string name="settingsManifest_catalog_metadata_language_description">Ersatzsprache, die CinemaBay für Titel, Beschreibungen und Bilder bevorzugt.</string>
+  <string name="settingsManifest_playback_audio_language_description">Wähle, welche gesprochene Sprache CinemaBay zuerst bevorzugen soll.</string>
+  <string name="settingsManifest_playback_auto_skip_intro_description">Überspringt Intros automatisch, wenn CinemaBay sie erkennen kann.</string>
+  <string name="settingsManifest_playback_auto_skip_recap_description">Überspringt Rückblicke („Was bisher geschah“) automatisch, wenn CinemaBay sie erkennen kann.</string>
+  <string name="settingsManifest_playback_buffering_quality_mode_description">Was CinemaBay bei der Qualität Auto tut, wenn die Wiedergabe immer wieder puffert. CinemaBay fragt immer, bevor eine von dir gewählte Qualität gesenkt wird.</string>
+  <string name="settingsManifest_playback_intro_skip_mode_description">Was CinemaBay tut, wenn ein Intro beginnt: nichts, die Schaltfläche „Intro überspringen“ anbieten oder es überspringen und Rückgängigmachen anbieten.</string>
+  <string name="settingsManifest_playback_max_bitrate_kbps_description">Begrenzt, wie viel Bandbreite die Wiedergabe nutzen darf. Ohne Grenze wählt CinemaBay passend zur gewählten Auflösung.</string>
+  <string name="settingsManifest_playback_preferred_quality_description">Wähle die Qualität, die CinemaBay bevorzugen soll.</string>
+  <string name="settingsManifest_playback_subtitle_language_description">Wähle, welche Untertitelsprache CinemaBay zuerst bevorzugen soll.</string>
+  <string name="settingsManifest_playback_subtitle_mode_description">Wann CinemaBay Untertitel einschalten soll.</string>
+  <string name="settingsManifest_player_passout_threshold_description">Wie viele Folgen automatisch abgespielt werden, bevor CinemaBay fragt, ob du noch schaust. Bei 0 wird nie gefragt.</string>
+  <string name="settingsManifest_subtitle_matches_device_description">Den Untertitelstil des Betriebssystems statt dem von CinemaBay verwenden.</string>
+  <string name="settingsManifest_ui_theme_description">Farbschema der CinemaBay-Oberfläche.</string>
+</resources>

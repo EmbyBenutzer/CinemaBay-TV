@@ -1,0 +1,1132 @@
+package org.siloserver.silo.android.ui.screens.downloads
+
+import android.content.res.Resources
+import android.util.Log
+import androidx.annotation.StringRes
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import org.siloserver.silo.common.R as CommonR
+import org.siloserver.silo.common.downloads.DownloadEnqueuer
+import org.siloserver.silo.common.downloads.DownloadReclaimCandidate
+import org.siloserver.silo.common.downloads.DownloadReclaimPlan
+import org.siloserver.silo.common.downloads.DownloadReclaimPlanner
+import org.siloserver.silo.common.downloads.DownloadSlotLocks
+import org.siloserver.silo.common.downloads.DownloadStorage
+import org.siloserver.silo.common.downloads.DownloadSubscriptionEvaluatorFactory
+import org.siloserver.silo.common.downloads.tileArtwork
+import org.siloserver.silo.common.settings.PlayerSettingsStore
+import org.siloserver.silo.model.download.DownloadMediaType
+import org.siloserver.silo.model.catalog.LeafItemUserData
+import org.siloserver.silo.model.download.DownloadRecord
+import org.siloserver.silo.model.download.DownloadSidecar
+import org.siloserver.silo.model.download.DownloadStatus
+import org.siloserver.silo.model.download.DownloadSubscription
+import org.siloserver.silo.model.download.statusEnum
+import org.siloserver.silo.network.ApiResult
+import org.siloserver.silo.network.ServerRegistry
+import org.siloserver.silo.network.errorMessage
+import org.siloserver.silo.repository.DownloadSubscriptionRepository
+import org.siloserver.silo.repository.CatalogRepository
+import org.siloserver.silo.repository.DownloadsRepository
+import org.siloserver.silo.repository.ProfileRepository
+import org.siloserver.silo.repository.port.UserItemStatePort
+import org.siloserver.silo.repository.port.LocalContentState
+import org.siloserver.silo.repository.port.LocalPlaybackProgress
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.dropWhile
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import org.siloserver.silo.common.i18n.UiText
+import org.siloserver.silo.common.i18n.text
+import org.siloserver.silo.network.isTimeout
+
+/**
+ * Leaf row in the Downloads tab. Movies / ebooks / audiobooks / single
+ * episodes all render as a single [DownloadItem]. Progress is
+ * `bytesSent / fileSize` clamped to [0, 1]; `isComplete` derives from
+ * server status plus local file presence (so stale completed records whose
+ * public file was removed by another app do not render as ready).
+ */
+data class DownloadItem(
+    val id: String,
+    val contentId: String,
+    val title: String,
+    val subtitle: String? = null,
+    val posterUrl: String? = null,
+    val posterThumbhash: String? = null,
+    val posterIsEpisodeStill: Boolean? = null,
+    val episodeUserData: LeafItemUserData? = null,
+    val fileSizeBytes: Long = 0,
+    val progress: Float = 0f,
+    val isComplete: Boolean = false,
+    val status: DownloadStatus = DownloadStatus.Unknown,
+    /** True when the record finished in a non-success terminal state
+     *  (failed / cancelled / unknown). The UI shows a red badge. */
+    val isFailed: Boolean = false,
+    val isMissingLocal: Boolean = false,
+    val mediaType: DownloadMediaType = DownloadMediaType.Unknown,
+    val fileId: Int? = null,
+    val localUri: String? = null,
+    val displayName: String? = null,
+    val container: String? = null,
+    /** Requested public quality wire string (e.g. "original", "5mbps"). */
+    val quality: String? = null,
+    /** What the server actually delivered after any compatibility fallback;
+     *  preferred over [quality] for display. Null on older/plain rows. */
+    val effectiveQuality: String? = null,
+)
+
+data class DownloadSubscriptionUiItem(
+    val id: String,
+    val title: String,
+    val subtitle: String,
+    val enabled: Boolean,
+    val lastEvaluatedAt: Long?,
+    val lastError: String?,
+)
+
+internal data class DownloadItemFileState(
+    val isComplete: Boolean,
+    val isMissingLocal: Boolean,
+    val isFailed: Boolean,
+)
+
+/**
+ * Server readiness describes transfer admission; this device's terminal outcome
+ * describes the saved file. The server only learns `downloading`/`completed`, so
+ * a worker that failed for good leaves it at `downloading` and only the local
+ * row knows nothing is running.
+ */
+internal fun downloadItemDisplayStatus(local: DownloadStatus, server: DownloadStatus?): DownloadStatus =
+    if (local == DownloadStatus.Completed || local == DownloadStatus.Failed) local else server ?: local
+
+internal fun downloadItemFileState(
+    status: DownloadStatus,
+    hasLocalMedia: Boolean,
+): DownloadItemFileState {
+    val isMissingLocal = status == DownloadStatus.Completed && !hasLocalMedia
+    return DownloadItemFileState(
+        isComplete = status == DownloadStatus.Completed && hasLocalMedia,
+        isMissingLocal = isMissingLocal,
+        // Only genuinely-terminal failures are red. Preparing/Ready are the
+        // early transcode lifecycle states and Unknown is a not-yet-mapped
+        // status from a newer server — all three are in-progress, not failed,
+        // so a just-requested bitrate download no longer flashes a red badge
+        // (issue #20 GAP 1).
+        isFailed = isMissingLocal ||
+            status in setOf(
+                DownloadStatus.Failed,
+                DownloadStatus.Cancelled,
+            ),
+    )
+}
+
+internal fun downloadItemDisplayProgress(
+    status: DownloadStatus,
+    rawProgress: Float,
+    hasLocalMedia: Boolean,
+): Float {
+    if (status == DownloadStatus.Completed) return if (hasLocalMedia) 1f else 0f
+    return rawProgress.coerceIn(0f, 1f)
+}
+
+internal fun resolveDownloadEpisodeUserData(
+    saved: LeafItemUserData?, remote: LeafItemUserData?, localState: LocalContentState?,
+    progress: LocalPlaybackProgress?, localOverridesRemote: Boolean,
+): LeafItemUserData = if (remote != null && !localOverridesRemote) remote
+    else overlayDownloadEpisodeUserData(remote ?: saved, localState, progress)
+
+internal fun overlayDownloadEpisodeUserData(
+    saved: LeafItemUserData?,
+    localState: LocalContentState?,
+    progress: LocalPlaybackProgress?,
+): LeafItemUserData {
+    val original = saved ?: LeafItemUserData()
+    // Watched mutations clear local resume state. Do not resurrect progress
+    // captured when the download started after the user marks it unwatched.
+    val resetProgress = localState?.watched != null && progress == null
+    return original.copy(
+        played = localState?.watched ?: original.played,
+        positionSeconds = progress?.positionSeconds ?: if (resetProgress) 0.0 else original.positionSeconds,
+        isInProgress = progress?.let { it.positionSeconds > 0 } ?: if (resetProgress) false else original.isInProgress,
+    )
+}
+
+/**
+ * Recursive hierarchy of downloaded content for the Downloads tab.
+ *
+ * - [Single] — a movie, ebook, audiobook, or standalone episode.
+ * - [Season] — a season of a TV series; children are [Single] episodes.
+ * - [Series] — a TV series; children are [Season]s (just one in the
+ *   single-season case).
+ *
+ * Every node aggregates `totalBytesUsed`, `recordIds`, and
+ * `progress` from its children so the renderer can show storage +
+ * delete-all at every level.
+ */
+sealed class DownloadEntry {
+    abstract val id: String
+    abstract val title: String
+    abstract val subtitle: String?
+    abstract val posterUrl: String?
+    abstract val posterThumbhash: String?
+    abstract val totalBytesUsed: Long
+    abstract val progress: Float
+    abstract val isComplete: Boolean
+    /** Flat list of every server record id under this node — used by
+     *  the delete-at-this-level handler. */
+    abstract val recordIds: List<String>
+
+    data class Single(val item: DownloadItem) : DownloadEntry() {
+        override val id = item.id
+        override val title = item.title
+        override val subtitle = item.subtitle
+        override val posterUrl = item.posterUrl
+        override val posterThumbhash = item.posterThumbhash
+        override val totalBytesUsed = item.fileSizeBytes
+        override val progress = item.progress
+        override val isComplete = item.isComplete
+        override val recordIds = listOf(item.id)
+    }
+
+    data class Season(
+        /** Stable grouping key (series contentId, else title) — keeps the
+         *  LazyColumn key + expansion state stable across renames/title collisions. */
+        val seriesKey: String,
+        val seriesTitle: String,
+        val seasonNumber: Int,
+        val episodes: List<Single>,
+        override val posterUrl: String?,
+        override val posterThumbhash: String?,
+        /** The download whose artwork [posterUrl] is; it may be in another season. */
+        val posterSource: DownloadItem? = null,
+    ) : DownloadEntry() {
+        override val id = "season:$seriesKey:$seasonNumber"
+        /** The series; rows show "Season N" ([downloadEntryTitle]). */
+        override val title = seriesTitle
+        val completedCount = episodes.count { it.isComplete }
+        /** Rows show "N of M episodes" ([downloadEntrySubtitle]). */
+        override val subtitle: String? = null
+        override val totalBytesUsed = episodes.sumOf { it.totalBytesUsed }
+        override val progress = if (episodes.isEmpty()) 0f
+            else episodes.map { it.progress }.average().toFloat()
+        override val isComplete = episodes.isNotEmpty() && episodes.all { it.isComplete }
+        override val recordIds = episodes.flatMap { it.recordIds }
+    }
+
+    data class Series(
+        /** Stable grouping key (series contentId, else title). */
+        val seriesKey: String,
+        val seriesTitle: String,
+        val seasons: List<Season>,
+        override val posterUrl: String?,
+        override val posterThumbhash: String?,
+        /** The download whose artwork [posterUrl] is. */
+        val posterSource: DownloadItem? = null,
+    ) : DownloadEntry() {
+        override val id = "series:$seriesKey"
+        override val title = seriesTitle
+        val totalEpisodes = seasons.sumOf { it.episodes.size }
+        val completedEpisodes = seasons.sumOf { it.completedCount }
+        /** Rows show "N of M episodes" ([downloadEntrySubtitle]). */
+        override val subtitle: String? = null
+        override val totalBytesUsed = seasons.sumOf { it.totalBytesUsed }
+        override val progress = if (totalEpisodes == 0) 0f
+            else seasons.sumOf { it.episodes.sumOf { ep -> ep.progress.toDouble() } }
+                .div(totalEpisodes).toFloat()
+        override val isComplete = seasons.isNotEmpty() && seasons.all { it.isComplete }
+        override val recordIds = seasons.flatMap { it.recordIds }
+    }
+
+    /** Books grouped under an author (audiobooks/ebooks). One level: author →
+     *  book. Only used when an author has 2+ downloaded books — a lone book
+     *  renders as a flat [Single] (no needless drill-down). */
+    data class Author(
+        val authorName: String,
+        val books: List<Single>,
+        override val posterUrl: String?,
+        override val posterThumbhash: String?,
+    ) : DownloadEntry() {
+        override val id = "author:$authorName"
+        override val title = authorName
+        val completedCount = books.count { it.isComplete }
+        /** Rows show "N of M books" ([downloadEntrySubtitle]). */
+        override val subtitle: String? = null
+        override val totalBytesUsed = books.sumOf { it.totalBytesUsed }
+        override val progress = if (books.isEmpty()) 0f
+            else books.map { it.progress }.average().toFloat()
+        override val isComplete = books.isNotEmpty() && books.all { it.isComplete }
+        override val recordIds = books.flatMap { it.recordIds }
+    }
+}
+
+/**
+ * A media-type section: one of Movies, TV Shows, Audiobooks, eBooks,
+ * or Other. Each section's [entries] is type-shaped — TV has [Series]
+ * roots, everything else is flat [Single]s.
+ */
+data class DownloadTypeSection(
+    val mediaType: DownloadMediaType,
+    val entries: List<DownloadEntry>,
+    val totalBytesUsed: Long,
+    val recordIds: List<String>,
+) {
+    val displayName: String get() = mediaType.displayName
+    val itemCount: Int get() = entries.sumOf { it.recordIds.size }
+}
+
+/**
+ * A Downloads message: a catalog message resolved when it is shown, or text
+ * the server or a failure supplied, shown as it arrived.
+ */
+sealed interface DownloadsText {
+    data class Res(@StringRes val id: Int, val args: List<Any>) : DownloadsText {
+        constructor(@StringRes id: Int, vararg args: Any) : this(id, args.toList())
+    }
+
+    data class Verbatim(val text: String) : DownloadsText
+
+    /** Text the shared module names, such as an app-built error's [ApiResult.Error.text]. */
+    data class Shared(val text: UiText) : DownloadsText
+
+    fun resolve(resources: Resources): String = when (this) {
+        is Res -> resources.getString(id, *args.toTypedArray())
+        is Verbatim -> text
+        is Shared -> text.text(resources)
+    }
+}
+
+/** As [errorMessage]: the server's message, the network copy, else [fallback] with [args]. */
+private fun ApiResult<*>.downloadsError(@StringRes fallback: Int, vararg args: Any): DownloadsText = when (this) {
+    is ApiResult.Error -> text?.let(DownloadsText::Shared)
+        ?: if (message.isBlank()) DownloadsText.Res(fallback, args.toList()) else DownloadsText.Verbatim(message)
+    is ApiResult.NetworkError -> DownloadsText.Res(if (isTimeout) CommonR.string.catalog_error_timeout else CommonR.string.catalog_error_network)
+    is ApiResult.Success -> DownloadsText.Res(fallback, args.toList())
+}
+
+data class DownloadsUiState(
+    val sections: List<DownloadTypeSection> = emptyList(),
+    val subscriptions: List<DownloadSubscriptionUiItem> = emptyList(),
+    val reclaimPlan: DownloadReclaimPlan? = null,
+    val totalBytesUsed: Long = 0,
+    val keepWatchedDownloads: Boolean = false,
+    val isLoading: Boolean = false,
+    val isRunningMonitoredDownloads: Boolean = false,
+    val isReclaiming: Boolean = false,
+    val isRemovingAllDownloads: Boolean = false,
+    val error: DownloadsText? = null,
+) {
+    /** "Is there anything?" — drives the Downloads-tab visibility in
+     *  the bottom nav + the empty-state branch. */
+    val isEmpty: Boolean get() = sections.isEmpty()
+}
+
+/**
+ * Disk-as-truth Downloads orchestrator with hierarchical grouping.
+ *
+ * Boot sequence:
+ *   1. Seed cache from on-disk sidecars so offline launches populate
+ *      instantly.
+ *   2. Best-effort server refresh — merges, never overwrites.
+ *   3. Render UI tree.
+ *
+ * Render tree:
+ *   sections [Movies / TV / Audiobooks / eBooks / Other]
+ *     → entries (Single for leaves, Series → Season → Single for TV)
+ *
+ * Sidecar metadata is re-read on every records emission so an active
+ * download's poster + title surface the moment its sidecar lands
+ * (previously the row showed bare contentId until the next launch).
+ */
+class DownloadsViewModel(
+    private val repository: DownloadsRepository,
+    private val storage: DownloadStorage,
+    private val metadataStore: org.siloserver.silo.common.downloads.DownloadMetadataStore,
+    private val serverRegistry: ServerRegistry,
+    private val profileRepository: ProfileRepository,
+    private val downloadEnqueuer: DownloadEnqueuer,
+    private val legacyImporter: org.siloserver.silo.common.downloads.LegacyDownloadImporter,
+    private val subscriptionRepository: DownloadSubscriptionRepository,
+    private val subscriptionEvaluatorFactory: DownloadSubscriptionEvaluatorFactory,
+    private val userItemStatePort: UserItemStatePort,
+    private val playerSettingsStore: PlayerSettingsStore,
+    private val catalogRepository: CatalogRepository,
+    private val episodeSpoilerStore: org.siloserver.silo.common.settings.EpisodeSpoilerStore,
+) : ViewModel() {
+
+    private val _uiState = MutableStateFlow(DownloadsUiState(isLoading = true))
+    val uiState: StateFlow<DownloadsUiState> = _uiState.asStateFlow()
+
+    /** Sidecar map keyed by record id. Refreshed on every records
+     *  emission via [reloadSidecarMetadata]. */
+    @Volatile private var metadataByRecordId: Map<String, DownloadSidecar> = emptyMap()
+
+    /** `(serverId, accountId, profileId)` scope each fileId's sidecar lives under,
+     *  captured during the same walk that loads [metadataByRecordId] so
+     *  [toItem] doesn't re-walk the filesystem per record per emission. */
+    @Volatile private var scopeByFileId: Map<Int, DownloadScope> = emptyMap()
+
+    /** The slot owner of a download. Two accounts on one server can share a profile id. */
+    private data class DownloadScope(val serverId: String, val accountId: String, val profileId: String)
+
+    // All publication tokens are owned by the main-thread ViewModel scope.
+    private var sectionsGeneration = 0L
+    // One section build at a time, so a build never starts from a sidecar map
+    // that an in-flight reload is about to replace and then wins publication.
+    private val sectionsLock = Mutex()
+    private val watchRefreshLock = Mutex()
+    private data class EpisodeWatchSnapshot(val userData: LeafItemUserData, val requestedAtMs: Long)
+    private data class ServerEpisodeWatchState(
+        val scope: DownloadScope, val snapshots: Map<String, EpisodeWatchSnapshot>,
+    )
+    @Volatile private var serverEpisodeWatchState: ServerEpisodeWatchState? = null
+
+    init {
+        playerSettingsStore.keepWatchedDownloadsFlow.onEach { keepWatched ->
+            _uiState.update { it.copy(keepWatchedDownloads = keepWatched) }
+        }.launchIn(viewModelScope)
+
+        // Episode watch state only feeds image protection; fetch it once the
+        // profile turns protection on.
+        episodeSpoilerStore.state.map { it.prefs.hideImages }.distinctUntilChanged().drop(1).onEach { hidden ->
+            if (hidden) refreshLocalUserState()
+        }.launchIn(viewModelScope)
+
+        viewModelScope.launch {
+            // Bootstrap: finish the one-time legacy sidecar→Room import before the
+            // first metadata read, so pre-cutover downloads aren't briefly missing
+            // on a cold start. Memoized — a no-op once the app-start pass has run.
+            legacyImporter.awaitImport(System.currentTimeMillis())
+            // Finish any offline delete interrupted by a crash between the durable
+            // tombstone and the on-device cleanup (idempotent byte/metadata delete).
+            finishPendingDeletions()
+            // The capture saves artwork after the completed status the records
+            // collector reloads on, so a later artwork write needs its own
+            // reload. Subscribed before the initial read below, so the dropped
+            // first emission describes the state that read also sees.
+            launch {
+                metadataStore.savedArtworkChanges().drop(1).collect {
+                    publishSections(repository.records.value, forceReload = true)
+                }
+            }
+            // A permanent worker failure is written only to Room: the server
+            // row stays `downloading` and a refresh overwrites the in-memory push.
+            // A non-empty first emission is kept: a worker restarted with the
+            // process can fail between it and the initial read below.
+            launch {
+                metadataStore.failedRecordIdChanges().dropWhile { it.isEmpty() }.collect {
+                    publishSections(repository.records.value, forceReload = true)
+                }
+            }
+            // Backfill + initial sidecar read.
+            reloadSidecarMetadata()
+            refreshSubscriptionsInternal()
+            val seeded = metadataByRecordId.values.toList()
+            repository.seedFromSidecars(seeded.map { it.record })
+            launch { refreshEpisodeWatchState() }
+
+            val keep = seeded.map { it.record.id }.toSet()
+            val (refreshServerId, refreshAccountId, refreshProfileId) = activeDownloadScope()
+            launch {
+                val result = repository.refresh(
+                    keepIdsAbsentFromServer = keep,
+                    serverId = refreshServerId,
+                    profileId = refreshProfileId,
+                    accountId = refreshAccountId,
+                )
+                if (result is ApiResult.Success) publishSections(repository.records.value, forceReload = true)
+            }
+
+            repository.records.collect { records -> publishSections(records) }
+        }
+    }
+
+    /**
+     * Rebuilds the tab from [records] and the Room sidecars and publishes it.
+     * [forceReload] re-reads the sidecars even when no record is new or newly
+     * completed (a later sidecar write, such as saved artwork).
+     */
+    private suspend fun publishSections(records: List<DownloadRecord>, forceReload: Boolean = false) = sectionsLock.withLock {
+        val generation = ++sectionsGeneration
+        // Room is the source of truth for what's downloaded locally; the
+        // tab is built from the Room sidecars (which always carry
+        // title/poster/mediaType/series), NOT from server records joined
+        // to a map that can be empty (the old path rendered a bare
+        // contentId + MOVIES + "missing file" whenever the join missed).
+        // Live byte-progress/status is overlaid from the in-memory server
+        // records for in-flight items. Reload sidecars when a record the
+        // map doesn't know about appears (newly enqueued), or when a
+        // download finished: the worker writes the completed sidecar
+        // (status + final file URI) before publishing the record, and
+        // the local completion is what the row's Ready/Play state reads.
+        val (sections, bytesUsed) = withContext(Dispatchers.IO) {
+            val unseenCompletions = records.filter { sidecarMissesCompletion(it) }.map { it.id }
+            // A registry read elsewhere (item detail, a background worker) can
+            // remove a revoked download's saved copy; its row leaves [records].
+            val recordIds = records.mapTo(mutableSetOf()) { it.id }
+            val droppedSaved = (publishedRecordIds - recordIds).any { it in metadataByRecordId }
+            publishedRecordIds = recordIds
+            if (forceReload || droppedSaved || unseenCompletions.isNotEmpty() || records.any { it.id !in metadataByRecordId }) {
+                reloadSidecarMetadata()
+                // Reload once per disagreement: a row the server holds as
+                // completed while it downloads again locally must not
+                // re-read Room on every progress tick.
+                completionReloadIds = (completionReloadIds + unseenCompletions).filterTo(mutableSetOf()) {
+                    metadataByRecordId[it]?.record?.statusEnum() != DownloadStatus.Completed
+                }
+            }
+            val sects = buildSections(records.associateBy { it.id })
+            sects to sects.sumOf { it.totalBytesUsed }
+        }
+        if (generation != sectionsGeneration) return@withLock
+        _uiState.update {
+            it.copy(
+                isLoading = false,
+                // Preserve any delete/refresh failure — refresh() and
+                // clearError() manage the error lifecycle explicitly;
+                // a progress tick must not wipe it before it's shown.
+                error = it.error,
+                sections = sections,
+                totalBytesUsed = bytesUsed,
+            )
+        }
+    }
+
+    fun refreshLocalUserState() {
+        viewModelScope.launch {
+            // Before the first load the sidecars aren't read yet, and
+            // publishing would show the empty state: wait for that load.
+            if (_uiState.value.isLoading) _uiState.first { !it.isLoading }
+            else sectionsLock.withLock {
+                val generation = ++sectionsGeneration
+                val sections = withContext(Dispatchers.IO) {
+                    buildSections(repository.records.value.associateBy { it.id })
+                }
+                if (generation == sectionsGeneration) {
+                    _uiState.update { it.copy(sections = sections, isLoading = false,
+                        totalBytesUsed = sections.sumOf { section -> section.totalBytesUsed }) }
+                }
+            }
+            refreshEpisodeWatchState()
+        }
+    }
+
+    /** Episode watch state is read only for image protection. */
+    private fun protectsEpisodeArtwork(): Boolean = episodeSpoilerStore.state.value.prefs.hideImages
+
+    private suspend fun refreshEpisodeWatchState() {
+        // One read per downloaded episode: skip it unless it can change a tile.
+        if (!protectsEpisodeArtwork()) return
+        // Entry and ON_RESUME can arrive together; share the in-flight refresh.
+        if (!watchRefreshLock.tryLock()) return
+        try {
+            val scope = activeDownloadScope()
+            val owner = catalogRepository.captureWatchAuthority() ?: return
+            val ids = metadataByRecordId.values.filter { it.resolveSidecarMediaType() == DownloadMediaType.TvShow }
+                .map { it.record.episodeId ?: it.record.contentId }.distinct()
+            if (ids.isEmpty()) return
+            val startedAt = System.currentTimeMillis()
+            val limit = Semaphore(4)
+            val snapshots = coroutineScope {
+                ids.map { id -> async {
+                    limit.withPermit {
+                        val response = catalogRepository.getWatchDetail(id, owner)
+                        val data = (response as? ApiResult.Success)?.data?.let { it.userData ?: LeafItemUserData() }
+                        data?.let { id to EpisodeWatchSnapshot(it, startedAt) }
+                    }
+                } }.awaitAll().filterNotNull().toMap()
+            }
+            if (activeDownloadScope() != scope || !catalogRepository.isWatchAuthorityCurrent(owner)) return
+            serverEpisodeWatchState = ServerEpisodeWatchState(scope,
+                serverEpisodeWatchState?.takeIf { it.scope == scope }?.snapshots.orEmpty() + snapshots)
+            sectionsLock.withLock {
+                val generation = ++sectionsGeneration
+                val sections = withContext(Dispatchers.IO) { buildSections(repository.records.value.associateBy { it.id }) }
+                if (activeDownloadScope() == scope && catalogRepository.isWatchAuthorityCurrent(owner) &&
+                    generation == sectionsGeneration) {
+                    _uiState.update { it.copy(sections = sections, isLoading = false,
+                        totalBytesUsed = sections.sumOf { section -> section.totalBytesUsed }) }
+                }
+            }
+        } finally {
+            watchRefreshLock.unlock()
+        }
+    }
+
+    fun refresh() {
+        viewModelScope.launch {
+            reloadSidecarMetadata()
+            refreshSubscriptionsInternal()
+            launch { refreshEpisodeWatchState() }
+            val keep = metadataByRecordId.keys
+            val (serverId, accountId, profileId) = activeDownloadScope()
+            when (val r = repository.refresh(keepIdsAbsentFromServer = keep, serverId = serverId, profileId = profileId, accountId = accountId)) {
+                is ApiResult.Success -> {
+                    _uiState.update { it.copy(error = null) }
+                    // A refresh can remove revoked downloads' local copies, which
+                    // only the Room sidecars show; re-read them.
+                    publishSections(repository.records.value, forceReload = true)
+                }
+                is ApiResult.Error, is ApiResult.NetworkError ->
+                    _uiState.update { it.copy(error = r.downloadsError(CommonR.string.downloads_error_refresh)) }
+            }
+        }
+    }
+
+    fun runMonitoredDownloadsNow() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isRunningMonitoredDownloads = true) }
+            val (serverId, accountId, profileId) = activeDownloadScope()
+            val now = System.currentTimeMillis()
+            val evaluator = subscriptionEvaluatorFactory.create()
+            var firstError: DownloadsText? = null
+
+            val active = runCatching { subscriptionRepository.active(serverId, accountId, profileId) }
+                .getOrElse { error ->
+                    _uiState.update {
+                        it.copy(
+                            isRunningMonitoredDownloads = false,
+                            error = error.message?.let(DownloadsText::Verbatim)
+                                ?: DownloadsText.Res(CommonR.string.downloads_error_loadMonitored),
+                        )
+                    }
+                    return@launch
+                }
+
+            for (subscription in active) {
+                runCatching {
+                    evaluator.evaluate(subscription)
+                    subscriptionRepository.updateEvaluation(serverId, accountId, profileId, subscription.id, now, null, now)
+                }.onFailure { error ->
+                    if (firstError == null) {
+                        firstError = error.message?.let(DownloadsText::Verbatim)
+                            ?: DownloadsText.Res(CommonR.string.downloads_error_monitoredFailed)
+                    }
+                    subscriptionRepository.updateEvaluation(
+                        serverId = serverId,
+                        accountId = accountId,
+                        profileId = profileId,
+                        id = subscription.id,
+                        evaluatedAt = now,
+                        error = error.message ?: error::class.simpleName,
+                        updatedAt = now,
+                    )
+                }
+            }
+
+            refreshSubscriptionsInternal()
+            refresh()
+            _uiState.update {
+                it.copy(
+                    isRunningMonitoredDownloads = false,
+                    error = firstError ?: it.error,
+                )
+            }
+        }
+    }
+
+    fun calculateReclaimWatched() {
+        viewModelScope.launch {
+            val plan = buildReclaimWatchedPlan()
+            _uiState.update { it.copy(reclaimPlan = plan) }
+        }
+    }
+
+    fun clearReclaimPlan() {
+        _uiState.update { it.copy(reclaimPlan = null) }
+    }
+
+    fun reclaimWatched() {
+        viewModelScope.launch {
+            val plan = _uiState.value.reclaimPlan ?: buildReclaimWatchedPlan()
+            if (plan.count == 0) {
+                _uiState.update { it.copy(reclaimPlan = null) }
+                return@launch
+            }
+
+            _uiState.update { it.copy(isReclaiming = true) }
+            removeRecords(plan.items.map { it.recordId })
+            _uiState.update { it.copy(isReclaiming = false, reclaimPlan = null) }
+        }
+    }
+
+    /** Idempotently complete on-device cleanup for any durable delete tombstone
+     *  in the active scope — covers a crash between tombstone enqueue and byte
+     *  deletion. The server side is replayed by [repository.refresh]'s reconcile. */
+    private suspend fun finishPendingDeletions() {
+        val (serverId, accountId, profileId) = activeDownloadScope()
+        val pending = runCatching { repository.pendingDeletionsForScope(serverId, accountId, profileId) }
+            .getOrElse { emptyList() }
+        for (p in pending) {
+            val fileId = p.mediaFileId ?: continue
+            DownloadSlotLocks.of(p.serverId, p.accountId, p.profileId, fileId).withLock {
+                metadataStore.completePendingDeletion(p.serverId, p.accountId, p.profileId, fileId, p.recordId) {
+                    withContext(Dispatchers.IO) {
+                        storage.delete(p.serverId, p.accountId, p.profileId, fileId) ||
+                            !storage.exists(p.serverId, p.accountId, p.profileId, fileId)
+                    }
+                }
+            }
+        }
+    }
+
+    /** Clear a surfaced error once the UI has shown it (e.g. after the
+     *  snackbar is dismissed). */
+    fun clearError() {
+        _uiState.update { it.copy(error = null) }
+    }
+
+    /** Remove a single record by id (leaf row). */
+    fun removeDownload(id: String) {
+        viewModelScope.launch { removeRecords(listOf(id)) }
+    }
+
+    /** Bulk delete for the list's multi-select mode — [ids] aggregates the
+     *  recordIds of every selected top-level entry. */
+    fun removeDownloadIds(ids: List<String>) {
+        viewModelScope.launch { removeRecords(ids) }
+    }
+
+    /** Remove every record under an entry (Series, Season, or single
+     *  leaf). [DownloadEntry.recordIds] aggregates across all
+     *  descendants, so this works at every level. */
+    fun removeEntry(entry: DownloadEntry) {
+        viewModelScope.launch { removeRecords(entry.recordIds) }
+    }
+
+    /** Remove every record in a media-type section (e.g. "Delete all
+     *  Movies", "Delete all TV"). */
+    fun removeSection(section: DownloadTypeSection) {
+        viewModelScope.launch { removeRecords(section.recordIds) }
+    }
+
+    fun removeAllDownloads() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isRemovingAllDownloads = true) }
+            try {
+                reloadSidecarMetadata()
+                val ids = (repository.records.value.map { it.id } + metadataByRecordId.keys).distinct()
+                removeRecords(ids)
+            } finally {
+                _uiState.update { it.copy(isRemovingAllDownloads = false) }
+            }
+        }
+    }
+
+    private suspend fun removeRecords(ids: List<String>) {
+        if (ids.isEmpty()) return
+        ++sectionsGeneration
+        val activeScope = activeDownloadScope()
+
+        var firstError: DownloadsText? = null
+        for (id in ids) {
+            val record = repository.records.value.firstOrNull { it.id == id }
+            val sidecar = metadataByRecordId[id]
+            val fileId = record?.mediaFileId ?: sidecar?.record?.mediaFileId
+            val (serverId, accountId, profileId) = fileId?.let { scopeByFileId[it] } ?: activeScope
+            Log.i(TAG, "remove($id): record=${record?.status ?: "(missing)"} fileId=$fileId")
+
+            // Local-first, offline-safe delete. A download delete only removes the
+            // on-device copy + the server's *download record* (never the library
+            // media), so it must not require the network. Cancel any active worker,
+            // write a DURABLE tombstone (so the record can't resurrect as a ghost on
+            // the next online refresh — written BEFORE byte deletion so a crash can't
+            // lose the server-delete intent), then drop the bytes + metadata.
+            // Completed media can still be capturing subtitle sidecars. Wait
+            // for that worker too, before removing files or its metadata row.
+            downloadEnqueuer.cancel(id)
+            // Drop the in-memory sidecar maps BEFORE the tombstone: enqueueDurableDelete
+            // emits on repository.records and the collector rebuilds sections from
+            // metadataByRecordId — if the entry were still present the deleted row would
+            // survive that emission, and no later emission is guaranteed.
+            metadataByRecordId = metadataByRecordId - id
+            if (fileId != null) scopeByFileId = scopeByFileId - fileId
+            removingRecordIds = removingRecordIds + id
+            try {
+                repository.enqueueDurableDelete(serverId, accountId, profileId, id, fileId)
+                if (fileId != null) {
+                    // A subtitle refresh rewrites this slot's files and row
+                    // under the same lock, so it cannot write the row back.
+                    DownloadSlotLocks.of(serverId, accountId, profileId, fileId).withLock {
+                        withContext(Dispatchers.IO) {
+                            storage.delete(serverId, accountId, profileId, fileId)
+                        }
+                        metadataStore.deleteSidecar(serverId, accountId, profileId, fileId)
+                    }
+                }
+            } finally {
+                // Also covers the fileId == null branch, which never reaches
+                // deleteSidecar and would otherwise hold the guard forever.
+                removingRecordIds = removingRecordIds - id
+            }
+
+            // Best-effort server reconcile now. Offline → NetworkError: the durable
+            // tombstone replays the DELETE on the next online refresh, so the local
+            // delete still "succeeds" — no blocking error. A real server error (4xx)
+            // is surfaced but the local copy is already gone.
+            when (val result = repository.delete(id)) {
+                is ApiResult.Success -> Log.i(TAG, "remove($id): server delete OK")
+                is ApiResult.Error -> {
+                    Log.w(TAG, "remove($id): server returned ${result.code} ${result.message}")
+                    if (firstError == null) firstError = result.downloadsError(CommonR.string.downloads_error_delete, result.code)
+                }
+                is ApiResult.NetworkError -> {
+                    Log.i(TAG, "remove($id): offline — tombstoned, will reconcile on reconnect")
+                }
+            }
+        }
+        val (serverId, accountId, profileId) = activeDownloadScope()
+        // repository.delete() filters an already-filtered list, so the records
+        // StateFlow conflates it and the collector never re-emits — rebuild the tree
+        // here or the deleted rows stay on screen until the next refresh.
+        val generation = ++sectionsGeneration
+        val (sections, bytesUsed) = withContext(Dispatchers.IO) {
+            buildSections(repository.records.value.associateBy { it.id }) to
+                storage.totalBytesUsed(serverId, accountId, profileId)
+        }
+        _uiState.update {
+            if (generation != sectionsGeneration) it.copy(error = firstError ?: it.error) else it.copy(
+                error = firstError,
+                sections = sections,
+                totalBytesUsed = bytesUsed,
+            )
+        }
+    }
+
+    private suspend fun refreshSubscriptionsInternal() {
+        val (serverId, accountId, profileId) = activeDownloadScope()
+        val subscriptions = subscriptionRepository.all(serverId, accountId, profileId).map { it.toUiItem() }
+        _uiState.update { it.copy(subscriptions = subscriptions) }
+    }
+
+    private suspend fun buildReclaimWatchedPlan(): DownloadReclaimPlan {
+        reloadSidecarMetadata()
+        val sidecars = metadataByRecordId.values.toList()
+        val watchedStates = userItemStatePort.localContentStates(sidecars.map { it.record.contentId })
+        val liveById = repository.records.value.associateBy { it.id }
+        // toDownloadItem stats the media file and saved artwork on disk.
+        val rows = withContext(Dispatchers.IO) {
+            sidecars.map { sidecar ->
+                val live = liveById[sidecar.record.id]
+                val item = sidecar.toDownloadItem(live)
+                DownloadReclaimCandidate(
+                    recordId = sidecar.record.id,
+                    contentId = sidecar.record.contentId,
+                    mediaFileId = sidecar.record.mediaFileId,
+                    title = sidecar.title,
+                    status = (live ?: sidecar.record).status,
+                    fileSizeBytes = item.fileSizeBytes,
+                    completed = watchedStates[sidecar.record.contentId]?.watched == true,
+                    updatedAtMs = sidecar.updatedAtMs,
+                )
+            }
+        }
+        // Never plan the file the player is currently using (reachable via
+        // PiP -> Downloads): deleting it yanks the bytes out from under a live
+        // offline playback.
+        val activeFileId = org.siloserver.silo.common.player.ActivePlaybackFile.fileId.value
+        val safeRows = if (activeFileId != null) rows.filterNot { it.mediaFileId == activeFileId } else rows
+        return DownloadReclaimPlanner().plan(safeRows)
+    }
+
+    /** One filesystem walk loads both lookup maps. Call on Dispatchers.IO. */
+    /**
+     * Records whose sidecar is mid-deletion.
+     *
+     * The in-memory maps are dropped before the durable tombstone (so the row
+     * disappears at once), but the Room sidecar is only removed after a
+     * file/MediaStore delete. The tombstone's own emission wakes the records
+     * collector, which reloads sidecars wholesale — resurrecting the row as a
+     * red "file missing" entry until some later emission. Reloads subtract
+     * these ids so a delete in flight cannot be undone by a concurrent reload.
+     */
+    private var removingRecordIds: Set<String> = emptySet()
+
+    private suspend fun reloadSidecarMetadata() {
+        val active = activeDownloadScope()
+        // Only the active account's downloads: another account on this server
+        // can have the same profile id (`default`).
+        val scoped = run {
+            runCatching { metadataStore.listAllSidecarsWithScope() }.getOrElse { emptyList() }
+                .filter {
+                    it.serverId == active.serverId && it.accountId == active.accountId && it.profileId == active.profileId
+                }
+        }
+        // A queued delete (the user's, or a revoked download whose local copy
+        // could not be removed yet) must not show its saved file as playable.
+        val pendingDeletes = runCatching {
+            repository.pendingDeletionsForScope(active.serverId, active.accountId, active.profileId)
+        }.getOrElse { emptyList() }.mapTo(mutableSetOf()) { it.recordId }
+        metadataByRecordId = scoped
+            .associate { it.sidecar.record.id to it.sidecar }
+            .filterKeys { it !in removingRecordIds && it !in pendingDeletes }
+        scopeByFileId = scoped.associate {
+            it.sidecar.record.mediaFileId to DownloadScope(it.serverId, it.accountId, it.profileId)
+        }
+    }
+
+    /** Record ids of the last [publishSections] call, guarded by its lock. */
+    private var publishedRecordIds: Set<String> = emptySet()
+
+    /** Completed records whose sidecar still disagreed after a reload. */
+    private var completionReloadIds: Set<String> = emptySet()
+
+    private fun sidecarMissesCompletion(record: DownloadRecord): Boolean =
+        record.statusEnum() == DownloadStatus.Completed && record.id !in completionReloadIds &&
+            metadataByRecordId[record.id]?.record?.statusEnum()?.let { it != DownloadStatus.Completed } == true
+
+    private suspend fun activeDownloadScope(): DownloadScope {
+        val serverId = serverRegistry.activeServerId.value ?: DownloadEnqueuer.DEFAULT_SERVER_ID
+        val accountId = serverRegistry.activeAccountId.value.orEmpty()
+        val profileId = withContext(Dispatchers.IO) {
+            profileRepository.getActiveProfileId()
+        } ?: DownloadEnqueuer.DEFAULT_PROFILE_ID
+        return DownloadScope(serverId, accountId, profileId)
+    }
+
+    private fun DownloadSubscription.toUiItem(): DownloadSubscriptionUiItem =
+        DownloadSubscriptionUiItem(
+            id = id,
+            title = displayTitle,
+            subtitle = "${mediaKind.name} · ${targetType.name} · ${quality.label}",
+            enabled = enabled,
+            lastEvaluatedAt = lastEvaluatedAt,
+            lastError = lastError,
+        )
+
+    companion object {
+        private const val TAG = "DownloadsViewModel"
+    }
+
+    // ── Sectioning + grouping ─────────────────────────────────────────────
+
+    /**
+     * Build a [DownloadItem] from a Room sidecar (the authoritative local
+     * picture — always carries title/poster/mediaType/series). Live status +
+     * bytes are overlaid from [live] (the in-memory server record) for in-flight
+     * items; a completed local-only download (server forgot it) uses the sidecar.
+     */
+    private fun DownloadSidecar.toDownloadItem(live: DownloadRecord?): DownloadItem {
+        val rec = live ?: record
+        val mediaType = resolveSidecarMediaType()
+        val located = scopeByFileId[record.mediaFileId]?.let { (serverId, accountId, profileId) ->
+            storage.locateLocalMedia(serverId, accountId, profileId, record.mediaFileId)
+        }
+        val knownSize = if (rec.fileSize > 0) rec.fileSize else record.fileSize
+        val progress = if (knownSize > 0) {
+            (rec.bytesSent.toFloat() / knownSize.toFloat()).coerceIn(0f, 1f)
+        } else 0f
+        val status = downloadItemDisplayStatus(record.statusEnum(), live?.statusEnum())
+        val fileState = downloadItemFileState(status = status, hasLocalMedia = located != null)
+        val displayProgress = downloadItemDisplayProgress(
+            status = status,
+            rawProgress = progress,
+            hasLocalMedia = located != null,
+        )
+        // Shown size = REAL on-disk bytes via fd-stat (MediaStore SIZE is stale/0
+        // while the item is pending, so don't trust located.sizeBytes mid-download),
+        // falling back to the live record's bytesSent. Never the sidecar's claimed
+        // fileSize, which overstates queued/failed/missing rows (Codex).
+        val sizeUri = localUri ?: located?.uriString
+        val shownBytes = (sizeUri?.let { storage.partialSize(it) }?.takeIf { it > 0 })
+        // No real bytes on disk: a completed-but-missing row is 0 (don't show a
+        // stale size or inflate the header); an in-flight row uses live bytesSent.
+            ?: if (status == DownloadStatus.Completed) 0L else rec.bytesSent
+        // Saved artwork is checked on disk here, like the media file above;
+        // callers build items on Dispatchers.IO.
+        val artwork = tileArtwork()
+        return DownloadItem(
+            id = record.id,
+            contentId = record.contentId,
+            title = title,
+            subtitle = subtitle,
+            posterUrl = artwork.url,
+            posterThumbhash = artwork.thumbhash,
+            posterIsEpisodeStill = artwork.isEpisodeStill,
+            episodeUserData = episodeUserData,
+            fileSizeBytes = shownBytes,
+            progress = displayProgress,
+            isComplete = fileState.isComplete,
+            status = status,
+            isFailed = fileState.isFailed,
+            isMissingLocal = fileState.isMissingLocal,
+            mediaType = mediaType,
+            fileId = record.mediaFileId,
+            localUri = located?.uriString,
+            displayName = located?.displayName ?: fileName,
+            container = container,
+            // Prefer the live record's quality (fresher for in-flight rows),
+            // falling back to the sidecar's stored record (issue #20 GAP 5).
+            quality = rec.quality ?: record.quality,
+            effectiveQuality = rec.effectiveQuality ?: record.effectiveQuality,
+        )
+    }
+
+    private fun DownloadSidecar.resolveSidecarMediaType(): DownloadMediaType {
+        val explicit = DownloadMediaType.fromWire(mediaType)
+        if (explicit != DownloadMediaType.Unknown) return explicit
+        return if (!seriesTitle.isNullOrBlank()) DownloadMediaType.TvShow else DownloadMediaType.Movie
+    }
+
+    /**
+     * Top-level: build per-mediaType sections from the Room sidecars (source of
+     * truth), in stable display order. [liveById] overlays in-flight progress.
+     */
+    /** Each episode download's current user data: saved, server, and local state merged. */
+    private suspend fun currentEpisodeUserData(sidecars: List<DownloadSidecar>): Map<String, LeafItemUserData> {
+        val episodes = sidecars.filter { it.resolveSidecarMediaType() == DownloadMediaType.TvShow }
+        val ids = episodes.map { it.record.episodeId ?: it.record.contentId }
+        val states = userItemStatePort.localContentStates(ids)
+        val positions = userItemStatePort.localPlaybackProgressForContent(ids)
+        val serverState = serverEpisodeWatchState?.takeIf { it.scope == activeDownloadScope() }?.snapshots.orEmpty()
+        val localOverrides = serverState.entries.groupBy { it.value.requestedAtMs }.flatMap { (startedAt, snapshots) ->
+            userItemStatePort.contentIdsWithPendingOrNewerUserState(snapshots.map { it.key }, startedAt)
+        }.toSet()
+        return episodes.associate { sidecar ->
+            val id = sidecar.record.episodeId ?: sidecar.record.contentId
+            val data = resolveDownloadEpisodeUserData(sidecar.episodeUserData, serverState[id]?.userData,
+                states[id], positions[id], id in localOverrides)
+            sidecar.record.id to data
+        }
+    }
+
+    private suspend fun buildSections(liveById: Map<String, DownloadRecord>): List<DownloadTypeSection> {
+        val sidecars = metadataByRecordId.values.toList()
+        if (sidecars.isEmpty()) return emptyList()
+        // Watch state only decides image protection: with it off, skip the
+        // Room reads that would otherwise run on every progress tick.
+        val episodeUserDataByRecordId =
+            if (protectsEpisodeArtwork()) currentEpisodeUserData(sidecars) else emptyMap()
+        val byType = sidecars.map { sidecar ->
+            if (sidecar.record.id in episodeUserDataByRecordId) {
+                sidecar.copy(episodeUserData = episodeUserDataByRecordId[sidecar.record.id])
+            } else sidecar
+        }.groupBy { it.resolveSidecarMediaType() }
+        val sectionOrder = listOf(
+            DownloadMediaType.Movie,
+            DownloadMediaType.TvShow,
+            DownloadMediaType.Audiobook,
+            DownloadMediaType.Ebook,
+            DownloadMediaType.Unknown,
+        )
+        return sectionOrder.mapNotNull { type ->
+            val group = byType[type].orEmpty()
+            if (group.isEmpty()) return@mapNotNull null
+            val entries = when (type) {
+                DownloadMediaType.TvShow -> group.toTvEntries(liveById)
+                DownloadMediaType.Audiobook, DownloadMediaType.Ebook -> group.toBookEntries(liveById)
+                else -> group.sortedByDescending { it.updatedAtMs }
+                    .map { DownloadEntry.Single(it.toDownloadItem(liveById[it.record.id])) }
+            }
+            DownloadTypeSection(
+                mediaType = type,
+                entries = entries,
+                totalBytesUsed = entries.sumOf { it.totalBytesUsed },
+                recordIds = entries.flatMap { it.recordIds },
+            )
+        }
+    }
+
+    /**
+     * TV branch: sidecars → [Series] → [Season] → [Single]. Grouped by STABLE
+     * series content id (rename-safe), falling back to seriesTitle only when the
+     * id is absent (rows written before seriesContentId existed). A sidecar with
+     * no series at all surfaces as a Single so it's still deletable.
+     */
+    private fun List<DownloadSidecar>.toTvEntries(liveById: Map<String, DownloadRecord>): List<DownloadEntry> {
+        val bySeries = LinkedHashMap<String, MutableList<DownloadSidecar>>()
+        val orphans = mutableListOf<DownloadSidecar>()
+        for (sc in this) {
+            val key = sc.seriesContentId?.takeIf { it.isNotBlank() }
+                ?: sc.seriesTitle?.takeIf { it.isNotBlank() }
+            if (key == null) orphans += sc else bySeries.getOrPut(key) { mutableListOf() } += sc
+        }
+        val seriesEntries = bySeries.map { (seriesKey, group) ->
+            // Empty when no download named its series; rows then show "Series" ([downloadEntryTitle]).
+            val seriesTitle = group.firstNotNullOfOrNull { it.seriesTitle?.takeIf { t -> t.isNotBlank() } }.orEmpty()
+            val artwork = group.tileArtwork()
+            val poster = artwork.url
+            val thumb = artwork.thumbhash
+            // The download the rows' artwork belongs to; a saved series
+            // poster is never a still, whichever download saved it.
+            val posterSource = group.firstOrNull { it.posterUrl != null }?.let {
+                it.toDownloadItem(liveById[it.record.id]).copy(posterIsEpisodeStill = artwork.isEpisodeStill)
+            }
+            val bySeason = LinkedHashMap<Int, MutableList<DownloadSidecar>>()
+            for (sc in group) bySeason.getOrPut(sc.seasonNumber ?: -1) { mutableListOf() } += sc
+            val seasons = bySeason.toSortedMap().map { (season, seasonScs) ->
+                val episodes = seasonScs
+                    .sortedBy { it.episodeNumber ?: Int.MAX_VALUE }
+                    .map { DownloadEntry.Single(it.toDownloadItem(liveById[it.record.id])) }
+                DownloadEntry.Season(
+                    seriesKey = seriesKey,
+                    seriesTitle = seriesTitle,
+                    seasonNumber = season,
+                    episodes = episodes,
+                    posterUrl = poster,
+                    posterThumbhash = thumb,
+                    posterSource = posterSource,
+                )
+            }
+            DownloadEntry.Series(
+                seriesKey = seriesKey,
+                seriesTitle = seriesTitle,
+                seasons = seasons,
+                posterUrl = poster,
+                posterThumbhash = thumb,
+                posterSource = posterSource,
+            )
+        }
+        return seriesEntries + orphans.map { DownloadEntry.Single(it.toDownloadItem(liveById[it.record.id])) }
+    }
+
+    /**
+     * Books branch (audiobooks/ebooks): group by author → book. An author with a
+     * single downloaded book renders as a flat [Single] (no drill-down clutter);
+     * 2+ become an [Author] aggregate. Books with no author surface as Singles.
+     */
+    private fun List<DownloadSidecar>.toBookEntries(liveById: Map<String, DownloadRecord>): List<DownloadEntry> {
+        val byAuthor = LinkedHashMap<String, MutableList<DownloadSidecar>>()
+        val orphans = mutableListOf<DownloadSidecar>()
+        for (sc in this) {
+            val author = sc.author?.trim()?.takeIf { it.isNotBlank() }
+            if (author == null) orphans += sc else byAuthor.getOrPut(author) { mutableListOf() } += sc
+        }
+        val authorEntries = byAuthor.map { (author, group) ->
+            val books = group
+                .sortedBy { it.title }
+                .map { DownloadEntry.Single(it.toDownloadItem(liveById[it.record.id])) }
+            if (books.size == 1) {
+                books.first()
+            } else {
+                DownloadEntry.Author(
+                    authorName = author,
+                    books = books,
+                    posterUrl = group.firstNotNullOfOrNull { it.posterUrl },
+                    posterThumbhash = group.firstNotNullOfOrNull { it.posterThumbhash },
+                )
+            }
+        }
+        return authorEntries + orphans
+            .sortedByDescending { it.updatedAtMs }
+            .map { DownloadEntry.Single(it.toDownloadItem(liveById[it.record.id])) }
+    }
+}

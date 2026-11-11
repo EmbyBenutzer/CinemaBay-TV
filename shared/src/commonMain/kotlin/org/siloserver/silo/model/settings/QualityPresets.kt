@@ -1,0 +1,132 @@
+package org.siloserver.silo.model.settings
+
+import org.siloserver.silo.common.i18n.SharedString
+import org.siloserver.silo.common.i18n.UiText
+
+/**
+ * The cellular quality picker's presets.
+ *
+ * The server stores each quality choice as two orthogonal values — a
+ * resolution cap and a bandwidth cap, null for uncapped. The main pair
+ * (`playback.preferred_quality`, `playback.max_bitrate_kbps`) is edited as two
+ * pickers; the phone's cellular pair is picked from this table, because
+ * bitrate is what matters on a data plan. The labels match the presets the
+ * web client offered, so a stored pair reads back the same everywhere.
+ *
+ * Presets live here rather than in the contract on purpose. Baking "high" into
+ * an enum member would freeze what it means: retuning 1080p High from 10 to 12
+ * Mbps would be a contract change every client has to agree to. As a
+ * client-side table it is a one-line edit, and older servers keep working
+ * because they only ever see the two axes they already understand.
+ *
+ * The compound legacy spellings (`1080p-high`, `720p-high`, …) were never a
+ * third dimension, only a bitrate written into the resolution string. They are
+ * dead: nothing here produces one, and [presetFor] decomposes any that a
+ * pre-contract local value still holds.
+ *
+ * There is no Original preset. Auto plays the original file whenever the
+ * device and connection can, so a stored `original` (still a legal,
+ * deprecated contract member, and what older servers may hold) reads as Auto.
+ */
+data class QualityPreset(
+    val id: String,
+    val label: UiText,
+    /** A `playback.preferred_quality` enum member. */
+    val resolution: String,
+    /** null is uncapped — the absence of a `playback.max_bitrate_kbps` row. */
+    val bitrateKbps: Int?,
+)
+
+object QualityPresets {
+
+    const val RESOLUTION_AUTO = "auto"
+
+    /** Retired spellings of "play the source", which Auto now does whenever it can. */
+    private val SOURCE_ALIASES = setOf("original", "source", "max")
+
+    val ALL: List<QualityPreset> = listOf(
+        QualityPreset(
+            id = "auto",
+            label = QualityChoices.resolutionText(RESOLUTION_AUTO),
+            resolution = RESOLUTION_AUTO,
+            bitrateKbps = null,
+        ),
+        QualityPreset(
+            id = "2160p",
+            label = QualityChoices.resolutionText("2160p"),
+            resolution = "2160p",
+            bitrateKbps = null,
+        ),
+        QualityPreset(
+            id = "1080p-high",
+            label = preset(SharedString.QualityPresetHigh, "1080p"),
+            resolution = "1080p",
+            bitrateKbps = 10000,
+        ),
+        QualityPreset(
+            id = "1080p",
+            label = QualityChoices.resolutionText("1080p"),
+            resolution = "1080p",
+            bitrateKbps = 6000,
+        ),
+        QualityPreset(
+            id = "1080p-low",
+            label = preset(SharedString.QualityPresetLow, "1080p"),
+            resolution = "1080p",
+            bitrateKbps = 3000,
+        ),
+        QualityPreset(
+            id = "720p-high",
+            label = preset(SharedString.QualityPresetHigh, "720p"),
+            resolution = "720p",
+            bitrateKbps = 4000,
+        ),
+        QualityPreset(
+            id = "720p",
+            label = QualityChoices.resolutionText("720p"),
+            resolution = "720p",
+            bitrateKbps = 2000,
+        ),
+        QualityPreset(
+            id = "480p",
+            label = QualityChoices.resolutionText("480p"),
+            resolution = "480p",
+            bitrateKbps = 1500,
+        ),
+    )
+
+    /** The preset for a stored (resolution, bitrate) pair, or null for a combination no preset covers. */
+    fun presetFor(resolution: String?, bitrateKbps: Int?): QualityPreset? {
+        val normalizedResolution = normalizeResolution(resolution)
+        val normalizedBitrate = bitrateKbps?.takeIf { it > 0 }
+        return ALL.firstOrNull {
+            it.resolution == normalizedResolution && it.bitrateKbps == normalizedBitrate
+        }
+    }
+
+    fun byId(id: String?): QualityPreset? = ALL.firstOrNull { it.id == id }
+
+    /**
+     * Reduces any stored resolution — including the compound transcode-ladder
+     * spellings older builds wrote (`1080p-high`, `720p-8`, `4k`) — to a member
+     * of the contract's enum. The bitrate half of a compound value is dropped
+     * rather than guessed at: the bitrate axis carries it now, and inventing a
+     * cap the user never chose would silently throttle playback. `original`
+     * and its aliases become Auto.
+     */
+    fun normalizeResolution(value: String?): String {
+        val trimmed = value?.trim()?.lowercase().orEmpty()
+        if (trimmed.isEmpty() || trimmed == RESOLUTION_AUTO || trimmed in SOURCE_ALIASES) return RESOLUTION_AUTO
+        if (trimmed == "4k") return "2160p"
+        val head = trimmed.substringBefore('-')
+        return when (head) {
+            "480p", "720p", "1080p", "2160p" -> head
+            "4k" -> "2160p"
+            else -> RESOLUTION_AUTO
+        }
+    }
+
+    /** "1080p High" for a preset with a bitrate step in its name. */
+    private fun preset(step: SharedString, resolution: String): UiText =
+        UiText.Key(step, listOf(QualityChoices.resolutionText(resolution)))
+}

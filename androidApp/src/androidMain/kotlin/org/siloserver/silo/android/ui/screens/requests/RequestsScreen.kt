@@ -1,0 +1,247 @@
+package org.siloserver.silo.android.ui.screens.requests
+
+import org.siloserver.silo.common.i18n.text
+import androidx.annotation.PluralsRes
+import androidx.compose.ui.unit.Dp
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import org.koin.compose.koinInject
+import org.koin.compose.viewmodel.koinViewModel
+import org.siloserver.silo.android.ui.components.EmptyStateView
+import org.siloserver.silo.android.ui.components.ErrorView
+import org.siloserver.silo.android.ui.components.MediaGridDefaults
+import org.siloserver.silo.android.ui.components.rememberShimmerProgress
+import org.siloserver.silo.android.ui.components.skeleton
+import org.siloserver.silo.android.ui.theme.SiloSecondaryText
+import org.siloserver.silo.common.R as CommonR
+import org.siloserver.silo.common.i18n.LocaleFormat
+import org.siloserver.silo.common.requests.RequestRouter
+import org.siloserver.silo.common.requests.rememberRequestRouter
+import org.siloserver.silo.model.request.RequestMediaResult
+import org.siloserver.silo.model.request.RequestStatusTint
+import org.siloserver.silo.viewmodel.RequestsUiState
+import org.siloserver.silo.viewmodel.RequestsViewModel
+
+/**
+ * The Requests hub, in the same grammar as the library pages: search TMDB to
+ * request, a status summary and the user's own requests one glance down, then
+ * the discover carousels.
+ */
+@Composable
+fun RequestsScreen(
+    onBackClick: () -> Unit,
+    onMyRequestsClick: () -> Unit,
+    onRequestDetailClick: (mediaType: String, tmdbId: Int) -> Unit,
+    onLibraryItemClick: (String) -> Unit,
+    onDiscoverRowClick: (key: String, title: String) -> Unit,
+    viewModel: RequestsViewModel = koinViewModel(),
+) {
+    val state by viewModel.uiState.collectAsState()
+    val router = rememberRequestRouter(koinInject(), onLibraryItemClick, onRequestDetailClick)
+
+    RequestsLargeTitlePage(
+        title = stringResource(CommonR.string.requests_title),
+        onBackClick = onBackClick,
+        isRefreshing = state.isRefreshing,
+        onRefresh = viewModel::refresh,
+    ) {
+        item(key = "search", contentType = "search") {
+            RequestsSearchField(
+                query = state.query,
+                onQueryChange = viewModel::onQueryChanged,
+                onSearch = viewModel::submitSearch,
+            )
+        }
+        when {
+            !state.isShowingDiscover -> searchResults(state, router::openResult)
+            state.error != null -> item(key = "error") {
+                ErrorView(message = state.error?.text().orEmpty(), onRetry = viewModel::load, modifier = Modifier.padding(top = 60.dp))
+            }
+            state.isLoading -> item(key = "loading") {
+                val progress = rememberShimmerProgress()
+                Column(verticalArrangement = Arrangement.spacedBy(24.dp)) {
+                    RequestRailSkeleton(progress, title = stringResource(CommonR.string.requests_yourRequests))
+                    RequestRailSkeleton(progress)
+                }
+            }
+            state.myRequests.isEmpty() && state.sections.isEmpty() -> item(key = "empty") {
+                EmptyStateView(
+                    title = stringResource(CommonR.string.requests_empty),
+                    subtitle = stringResource(CommonR.string.requests_hub_emptyBody),
+                    icon = Icons.Outlined.AutoAwesome,
+                    modifier = Modifier.padding(top = 80.dp),
+                )
+            }
+            else -> discover(state, router, onMyRequestsClick, onDiscoverRowClick)
+        }
+    }
+}
+
+private fun LazyListScope.discover(
+    state: RequestsUiState,
+    router: RequestRouter,
+    onMyRequestsClick: () -> Unit,
+    onDiscoverRowClick: (key: String, title: String) -> Unit,
+) {
+    val moving = state.inProgressCount + state.needsAttentionCount
+    if (moving > 0) {
+        item(key = "summary", contentType = "summary") {
+            RequestSummaryCard(title = summaryTitle(state), parts = summaryParts(state), onClick = onMyRequestsClick)
+        }
+    }
+    if (state.myRequests.isNotEmpty()) {
+        item(key = "mine", contentType = "rail") {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                RequestsSectionHeader(
+                    title = stringResource(CommonR.string.requests_yourRequests),
+                    trailing = stringResource(CommonR.string.requests_seeAll),
+                    onTrailingClick = onMyRequestsClick,
+                )
+                RequestCardRail(items = state.myRequests, key = { it.id }) { record ->
+                    RequestRecordCard(record = record, onClick = { router.openRecord(record) })
+                }
+            }
+        }
+    }
+    state.sections.forEachIndexed { index, section ->
+        item(key = "discover:${section.key}", contentType = "rail") {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                // Only the server's own rows page; the merged carousels an
+                // older server gets have no single row behind them.
+                // A row trimmed to its size has more titles even on a one-page source.
+                val browsable = state.rowsBrowsable &&
+                    (section.totalPages > 1 || section.totalResults > section.results.size)
+                RequestsSectionHeader(
+                    title = section.title,
+                    label = if (index == 0) stringResource(CommonR.string.requests_hub_discover) else null,
+                    trailing = if (browsable) stringResource(CommonR.string.requests_seeAll) else null,
+                    onTrailingClick = if (browsable) ({ onDiscoverRowClick(section.key, section.title) }) else null,
+                )
+                RequestCardRail(items = section.results, key = { "${it.mediaType}:${it.tmdbId}" }) { result ->
+                    RequestMediaCard(item = result, onClick = { router.openResult(result) })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun summaryTitle(state: RequestsUiState): String {
+    val count = state.inProgressCount
+    return if (count == 0) {
+        stringResource(CommonR.string.requests_summary_needYouTitle)
+    } else {
+        requestCount(CommonR.plurals.requests_summary_inProgress, count)
+    }
+}
+
+/** A plural whose count can pass 999: the count also goes in as text, so every language groups it alike. */
+@Composable
+private fun requestCount(@PluralsRes id: Int, count: Int): String = pluralStringResource(id, count, count, LocaleFormat.integer(count))
+
+@Composable
+private fun summaryParts(state: RequestsUiState): List<Pair<RequestStatusTint, String>> = buildList {
+    if (state.onTheWayCount > 0) {
+        add(RequestStatusTint.Sky to requestCount(CommonR.plurals.requests_summary_onTheWay, state.onTheWayCount))
+    }
+    if (state.pendingCount > 0) {
+        add(RequestStatusTint.Amber to requestCount(CommonR.plurals.requests_summary_pending, state.pendingCount))
+    }
+    if (state.needsAttentionCount > 0) {
+        add(RequestStatusTint.Rose to requestCount(CommonR.plurals.requests_summary_needYou, state.needsAttentionCount))
+    }
+}
+
+/** Library search's grid: adaptive columns from the card presentation, placeholders in the same cells while searching. */
+private fun LazyListScope.searchResults(state: RequestsUiState, onOpen: (RequestMediaResult) -> Unit) {
+    when {
+        state.isSearching && state.searchResults.isEmpty() -> item(key = "search-loading") {
+            SearchGrid(count = 9) { width, _ ->
+                val progress = rememberShimmerProgress()
+                Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Box(
+                        modifier = Modifier.width(width).aspectRatio(RequestPosterAspect).skeleton(progress),
+                    )
+                    Box(
+                        modifier = Modifier.width(width * 0.7f).height(10.dp).skeleton(progress, RoundedCornerShape(3.dp)),
+                    )
+                }
+            }
+        }
+        state.hasSearched && state.searchResults.isEmpty() -> item(key = "search-empty") {
+            EmptyStateView(
+                title = stringResource(CommonR.string.requests_search_emptyTitle),
+                subtitle = stringResource(CommonR.string.requests_search_emptyBody),
+                icon = Icons.Outlined.Search,
+                modifier = Modifier.padding(top = 80.dp),
+            )
+        }
+        else -> {
+            item(key = "search-count") {
+                Text(
+                    text = requestCount(CommonR.plurals.requests_search_resultCount, state.searchTotal),
+                    fontSize = 12.sp,
+                    color = SiloSecondaryText,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+            }
+            item(key = "search-grid") {
+                SearchGrid(count = state.searchResults.size) { width, index ->
+                    val result = state.searchResults[index]
+                    RequestMediaCard(item = result, width = width, onClick = { onOpen(result) })
+                }
+            }
+        }
+    }
+}
+
+/** How many columns [SearchGrid] lays out in [width], and how wide each cell is. */
+internal data class SearchGridLayout(val columns: Int, val cellWidth: Dp)
+
+@Composable
+internal fun searchGridLayout(width: Dp): SearchGridLayout {
+    val columns = requestGridColumns(width, MediaGridDefaults.scaledPosterGridMinWidth)
+    val spacing = MediaGridDefaults.PosterGridHorizontalSpacing
+    return SearchGridLayout(columns, (width - 32.dp - spacing * (columns - 1)) / columns)
+}
+
+/** Poster cells in adaptive columns, as library search lays them out. */
+@Composable
+internal fun SearchGrid(count: Int, cell: @Composable (width: Dp, index: Int) -> Unit) {
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val (columns, cellWidth) = searchGridLayout(maxWidth)
+        val spacing = MediaGridDefaults.PosterGridHorizontalSpacing
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(MediaGridDefaults.PosterGridVerticalSpacing),
+        ) {
+            (0 until count).chunked(columns).forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(spacing)) {
+                    row.forEach { index -> cell(cellWidth, index) }
+                }
+            }
+        }
+    }
+}

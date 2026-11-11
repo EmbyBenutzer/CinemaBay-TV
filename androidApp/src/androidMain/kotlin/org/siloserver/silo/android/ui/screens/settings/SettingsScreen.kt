@@ -1,0 +1,460 @@
+package org.siloserver.silo.android.ui.screens.settings
+
+import org.siloserver.silo.common.i18n.text
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.ArrowCircleDown
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.CollectionsBookmark
+import androidx.compose.material.icons.filled.ConnectedTv
+import androidx.compose.material.icons.filled.Dashboard
+import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.MonitorHeart
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.PanTool
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material.icons.filled.SwitchAccount
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.annotation.StringRes
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import org.koin.compose.viewmodel.koinViewModel
+import org.siloserver.silo.android.BuildConfig
+import org.siloserver.silo.android.ui.components.SignOutConfirmDialog
+import org.siloserver.silo.android.ui.components.SiloTopBar
+import org.siloserver.silo.android.ui.screens.settings.diagnostics.DiagnosticsViewModel
+import org.siloserver.silo.android.ui.screens.settings.diagnostics.shouldShowDiagnosticsEntry
+import org.siloserver.silo.android.ui.theme.SettingsDimens
+import org.siloserver.silo.android.ui.theme.SettingsTextStyles
+import org.siloserver.silo.android.ui.theme.SiloOnSurface
+import org.siloserver.silo.android.ui.theme.SiloSecondaryText
+import org.siloserver.silo.android.ui.theme.SiloSettingsBackground
+import org.siloserver.silo.common.R as CommonR
+import org.siloserver.silo.common.diagnostics.DiagnosticsAvailabilityUi
+import org.siloserver.silo.common.i18n.stringResourceWithNames
+import org.siloserver.silo.common.network.clientVersionLabel
+import org.siloserver.silo.common.diagnostics.diagnosticsAvailabilityTitle
+import org.siloserver.silo.common.settings.profileLaunchTitle
+import org.siloserver.silo.common.settings.CardPresentationSupport
+import org.siloserver.silo.model.settings.LanguageOptions
+import org.siloserver.silo.model.settings.QualityChoices
+import org.siloserver.silo.model.settings.SettingKeys
+
+/** Silo's privacy policy, linked from About and from Diagnostics. */
+internal const val SILO_PRIVACY_POLICY_URL = "https://siloserver.org/privacy"
+
+/**
+ * The Settings overview, laid out like the Apple apps' (silo-apple
+ * `IOSSettingsOverview`): a large title, the account card, a search field,
+ * then grouped one-line rows with graphite icon tiles that open the sub-pages.
+ *
+ * Android adds what the Apple apps keep elsewhere: Notifications, the Library
+ * shortcuts (Watchlist, Favorites, History, Collections — reachable only from
+ * here on the phone) and Sign in a TV. Each sits in the group it belongs to
+ * rather than in a group of its own. The Sign-in group
+ * (the server's external sign-in providers) appears only on servers that
+ * offer one.
+ */
+@Composable
+fun SettingsScreen(
+    onLoggedOut: () -> Unit,
+    onBackClick: (() -> Unit)? = null,
+    onOpenInterface: () -> Unit = {},
+    onOpenPlayback: () -> Unit = {},
+    onOpenSubtitles: () -> Unit = {},
+    onOpenDownloads: () -> Unit = {},
+    onOpenNotifications: () -> Unit = {},
+    onOpenProfileSelection: () -> Unit = {},
+    onNavigateToServers: () -> Unit = {},
+    onPairDevice: () -> Unit = {},
+    onSwitchProfile: () -> Unit = {},
+    onNavigateToWatchlist: () -> Unit = {},
+    onNavigateToFavorites: () -> Unit = {},
+    onNavigateToHistory: () -> Unit = {},
+    onNavigateToCollections: () -> Unit = {},
+    onNavigateToDiagnostics: () -> Unit = {},
+    viewModel: SettingsViewModel = koinViewModel(),
+    diagnosticsViewModel: DiagnosticsViewModel = koinViewModel(),
+    signInViewModel: SignInSettingsViewModel = koinViewModel(),
+) {
+    val state by viewModel.uiState.collectAsState()
+    val signInState by signInViewModel.uiState.collectAsState()
+    val diagnosticsState by diagnosticsViewModel.state.collectAsState()
+    val uriHandler = LocalUriHandler.current
+    var query by rememberSaveable { mutableStateOf("") }
+    var confirmSignOut by rememberSaveable { mutableStateOf(false) }
+    val listState = rememberLazyListState()
+    // The large title scrolls away and the bar takes the title over, the way
+    // a large navigation title collapses to an inline one.
+    val titleScrolledAway by remember { derivedStateOf { listState.firstVisibleItemIndex > 0 } }
+    val watchPartyExperiment: org.siloserver.silo.common.watchparty.WatchPartyExperiment =
+        org.koin.compose.koinInject()
+    val watchPartyEnabled by watchPartyExperiment.enabled.collectAsState()
+    val profileLaunchPreferences: org.siloserver.silo.common.profiles.ProfileLaunchPreferences =
+        org.koin.compose.koinInject()
+    val profileLaunchState by profileLaunchPreferences.state.collectAsState()
+
+    LaunchedEffect(state.loggedOut) {
+        if (state.loggedOut) {
+            viewModel.onLogoutConsumed()
+            onLoggedOut()
+        }
+    }
+
+    val search = SettingsSearch(query)
+    val versionLabel = clientVersionLabel(BuildConfig.VERSION_NAME, BuildConfig.BUILD_NUMBER)
+    val serverLabel = state.serverName.ifBlank { serverHost(state.serverUrl) ?: stringResource(CommonR.string.settings_overview_notConnected) }
+    val showDiagnostics = shouldShowDiagnosticsEntry(diagnosticsState) &&
+        search.matches(*searchTerms(CommonR.string.settings_search_terms_diagnostics, "diagnostics", "support", "reports", "debug", "crash"))
+
+    val matchesInterface = search.matches(*searchTerms(CommonR.string.settings_search_terms_interface, "interface", "appearance", "cards", "posters", "home", "sections", "title art", "logos", "language"))
+    val matchesNotifications = state.notificationsAvailable && search.matches(*searchTerms(CommonR.string.settings_search_terms_notifications, "notifications", "alerts", "favorites", "watchlist", "continue watching", "next up"))
+    val matchesProfileSelection = search.matches(*searchTerms(CommonR.string.settings_search_terms_profileSelection, "profile selection", "profiles", "who's watching", "launch", "pin"))
+    val matchesPlayback = search.matches(*searchTerms(CommonR.string.settings_search_terms_playback, "playback", "quality", "resolution", "bitrate", "cellular", "mobile data", "audio", "dolby vision", "picture-in-picture", "episodes", "next up", "skip", "intros", "credits", "rewind", "still watching", "skip interval", "audiobooks", "spoilers", "unwatched", "blur", "descriptions"))
+    val matchesSubtitles = search.matches(*searchTerms(CommonR.string.settings_search_terms_subtitles, "subtitles", "captions", "language", "behavior", "appearance", "forced", "metadata"))
+    val matchesDownloads = search.matches(*searchTerms(CommonR.string.settings_search_terms_downloads, "downloads", "offline", "quality", "wi-fi", "cleanup", "storage"))
+    val matchesWatchlist = search.matches(*searchTerms(CommonR.string.settings_search_terms_watchlist, "library", "watchlist"))
+    val matchesFavorites = search.matches(*searchTerms(CommonR.string.settings_search_terms_favorites, "library", "favorites"))
+    val matchesHistory = search.matches(*searchTerms(CommonR.string.settings_search_terms_history, "library", "history", "watch history"))
+    val matchesCollections = search.matches(*searchTerms(CommonR.string.settings_search_terms_collections, "library", "collections"))
+    val matchesServer = search.matches(*searchTerms(CommonR.string.settings_search_terms_server, "server", "connection", "accounts"), serverLabel)
+    val matchesPairDevice = search.matches(*searchTerms(CommonR.string.settings_search_terms_pairDevice, "connection", "pair", "device", "tv", "link", "sign in"))
+    // External sign-in (OIDC/LDAP): shown only on servers that have it.
+    val matchesSignIn = signInState.visible &&
+        search.matches(*searchTerms(CommonR.string.settings_search_terms_signIn, "sign-in", "sign in", "account", "provider", "connect", "disconnect", "sso"))
+    val matchesExperimental = search.matches(*searchTerms(CommonR.string.settings_search_terms_experimental, "experimental", "beta", "testing", "audiobooks", "navigation", "watch party", "party"))
+    val matchesAbout = search.matches(*searchTerms(CommonR.string.settings_search_terms_about, "about", "version", "privacy", "policy", "information"), versionLabel)
+    val matchesSignOut = search.matches(*searchTerms(CommonR.string.settings_search_terms_signOut, "sign out", "account"))
+
+    val hasResults = matchesInterface || matchesNotifications || matchesProfileSelection || matchesPlayback || matchesSubtitles ||
+        matchesDownloads || matchesWatchlist || matchesFavorites || matchesHistory || matchesCollections ||
+        showDiagnostics || matchesServer || matchesPairDevice || matchesExperimental ||
+        matchesAbout || matchesSignOut || matchesSignIn
+
+    Scaffold(
+        topBar = {
+            SiloTopBar(
+                title = if (titleScrolledAway) stringResource(CommonR.string.settings_title) else "",
+                onBackClick = onBackClick,
+                containerColor = SiloSettingsBackground,
+                centerTitle = true,
+            )
+        },
+        containerColor = SiloSettingsBackground,
+    ) { padding ->
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+            contentPadding = PaddingValues(
+                start = SettingsDimens.pageGutter,
+                end = SettingsDimens.pageGutter,
+                bottom = SettingsDimens.pageBottomSpacer,
+            ),
+            verticalArrangement = Arrangement.spacedBy(SettingsDimens.sectionGap),
+        ) {
+            item(key = "title") {
+                Column {
+                    Text(
+                        text = stringResource(CommonR.string.settings_title),
+                        style = SettingsTextStyles.largeTitle,
+                        color = SiloOnSurface,
+                    )
+                    Spacer(modifier = Modifier.height(SettingsDimens.headerBottomGap))
+                    SettingsAccountCard(
+                        profile = state.activeProfile,
+                        user = state.user,
+                        serverHost = serverHost(state.serverUrl),
+                        onClick = onSwitchProfile,
+                    )
+                }
+            }
+
+            item(key = "search") {
+                SettingsSearchField(query = query, onQueryChange = { query = it })
+            }
+
+            if (!hasResults) {
+                item(key = "no-results") {
+                    Text(
+                        text = stringResourceWithNames(CommonR.string.settings_search_noResults, query.trim()),
+                        style = SettingsTextStyles.rowLabel,
+                        color = SiloSecondaryText,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 36.dp),
+                    )
+                }
+            }
+
+            if (matchesInterface || matchesNotifications || matchesProfileSelection) {
+                item(key = "preferences") {
+                    SettingsSection(title = stringResource(CommonR.string.settings_overview_preferences)) {
+                        if (matchesInterface) {
+                            SettingsNavigationRow(
+                                label = stringResource(CommonR.string.settings_interface_title),
+                                icon = Icons.Filled.Dashboard,
+                                value = state.cardPresentation.takeIf {
+                                    it.support != CardPresentationSupport.Unsupported
+                                }?.presentation?.posterSize?.displayName?.text(),
+                                onClick = onOpenInterface,
+                            )
+                        }
+                        if (matchesNotifications) {
+                            SettingsNavigationRow(
+                                label = stringResource(CommonR.string.settings_notifications_title),
+                                icon = Icons.Filled.Notifications,
+                                value = stringResource(if (state.notificationsEnabled) CommonR.string.settings_on else CommonR.string.settings_off),
+                                onClick = onOpenNotifications,
+                            )
+                        }
+                        if (matchesProfileSelection) {
+                            SettingsNavigationRow(
+                                label = stringResource(CommonR.string.settings_control_profileSelection),
+                                icon = Icons.Filled.SwitchAccount,
+                                value = stringResource(profileLaunchTitle(profileLaunchState.behavior)),
+                                onClick = onOpenProfileSelection,
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (matchesPlayback || matchesSubtitles || matchesDownloads) {
+                item(key = "playback") {
+                    SettingsSection(title = stringResource(CommonR.string.settings_playback)) {
+                        if (matchesPlayback) {
+                            SettingsNavigationRow(
+                                label = stringResource(CommonR.string.settings_playback),
+                                icon = Icons.Filled.PlayArrow,
+                                value = QualityChoices.summary(state.qualityResolution, state.maxBitrateKbps).text(),
+                                onClick = onOpenPlayback,
+                            )
+                        }
+                        if (matchesSubtitles) {
+                            SettingsNavigationRow(
+                                label = stringResource(CommonR.string.settings_subtitles),
+                                icon = Icons.Filled.Subtitles,
+                                value = LanguageOptions.label(state.subtitleLanguage, SettingKeys.PLAYBACK_SUBTITLE_LANGUAGE).text(),
+                                onClick = onOpenSubtitles,
+                            )
+                        }
+                        if (matchesDownloads) {
+                            SettingsNavigationRow(
+                                label = stringResource(CommonR.string.settings_downloads_title),
+                                icon = Icons.Filled.ArrowCircleDown,
+                                onClick = onOpenDownloads,
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (matchesWatchlist || matchesFavorites || matchesHistory || matchesCollections) {
+                item(key = "library") {
+                    SettingsSection(title = stringResource(CommonR.string.settings_overview_library)) {
+                        if (matchesWatchlist) {
+                            SettingsNavigationRow(
+                                label = stringResource(CommonR.string.menu_watchlist),
+                                icon = Icons.Filled.Bookmark,
+                                onClick = onNavigateToWatchlist,
+                            )
+                        }
+                        if (matchesFavorites) {
+                            SettingsNavigationRow(
+                                label = stringResource(CommonR.string.menu_favorites),
+                                icon = Icons.Filled.Favorite,
+                                onClick = onNavigateToFavorites,
+                            )
+                        }
+                        if (matchesHistory) {
+                            SettingsNavigationRow(
+                                label = stringResource(CommonR.string.settings_overview_watchHistory),
+                                icon = Icons.Filled.History,
+                                onClick = onNavigateToHistory,
+                            )
+                        }
+                        if (matchesCollections) {
+                            SettingsNavigationRow(
+                                label = stringResource(CommonR.string.library_collections),
+                                icon = Icons.Filled.CollectionsBookmark,
+                                onClick = onNavigateToCollections,
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (showDiagnostics) {
+                item(key = "support") {
+                    SettingsSection(title = stringResource(CommonR.string.settings_overview_support)) {
+                        SettingsNavigationRow(
+                            label = stringResource(CommonR.string.settings_diagnostics),
+                            icon = Icons.Filled.MonitorHeart,
+                            value = diagnosticsAvailabilityLabel(diagnosticsState.availability),
+                            onClick = onNavigateToDiagnostics,
+                        )
+                    }
+                }
+            }
+
+            if (matchesServer || matchesPairDevice) {
+                item(key = "connection") {
+                    SettingsSection(title = stringResource(CommonR.string.settings_overview_connection)) {
+                        if (matchesServer) {
+                            // Settings › Accounts: every saved server and account (spec §4.5).
+                            SettingsNavigationRow(
+                                label = stringResource(CommonR.string.accounts_title),
+                                icon = Icons.Filled.Dns,
+                                value = serverLabel,
+                                onClick = onNavigateToServers,
+                            )
+                        }
+                        if (matchesPairDevice) {
+                            SettingsNavigationRow(
+                                label = stringResource(CommonR.string.signInTv_settingsLabel),
+                                icon = Icons.Filled.ConnectedTv,
+                                onClick = onPairDevice,
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (matchesSignIn) {
+                item(key = "sign-in") {
+                    SignInSection(viewModel = signInViewModel)
+                }
+            }
+
+            if (matchesExperimental) {
+                item(key = "experimental") {
+                    SettingsSection(title = stringResource(CommonR.string.settings_experimental_title)) {
+                        SettingsSwitchRow(
+                            label = stringResource(CommonR.string.settings_experimental_showAudiobooks),
+                            icon = Icons.AutoMirrored.Filled.MenuBook,
+                            checked = state.showAudiobooks,
+                            onCheckedChange = viewModel::setShowAudiobooks,
+                        )
+                        // Device-local; never synced with the server's settings.
+                        SettingsSwitchRow(
+                            label = stringResource(CommonR.string.settings_experimental_watchParty),
+                            description = stringResource(CommonR.string.settings_experimental_watchPartyFooter),
+                            icon = Icons.Filled.Groups,
+                            checked = watchPartyEnabled,
+                            onCheckedChange = watchPartyExperiment::setEnabled,
+                        )
+                    }
+                }
+            }
+
+            if (matchesAbout) {
+                item(key = "about") {
+                    SettingsSection(title = stringResource(CommonR.string.settings_about_title)) {
+                        // Includes the build number so a support report and the
+                        // server's admin Activity page name the exact same build,
+                        // in the "1.0.0 (5)" form Play, TestFlight and the server's
+                        // diagnostics page all use.
+                        SettingsNavigationRow(
+                            label = stringResource(CommonR.string.settings_about_version),
+                            icon = Icons.Filled.Info,
+                            value = versionLabel,
+                        )
+                        SettingsNavigationRow(
+                            label = stringResource(CommonR.string.settings_about_privacyPolicy),
+                            icon = Icons.Filled.PanTool,
+                            onClick = { uriHandler.openUri(SILO_PRIVACY_POLICY_URL) },
+                        )
+                    }
+                }
+            }
+
+            if (matchesSignOut) {
+                item(key = "sign-out") {
+                    SettingsSectionCard {
+                        SettingsButtonRow(label = stringResource(CommonR.string.settings_signOut), onClick = { confirmSignOut = true })
+                    }
+                }
+            }
+        }
+    }
+
+    // Same dialog the profile menu raises, so the answer to "are you sure?"
+    // does not depend on which of the two routes was taken.
+    SignOutConfirmDialog(
+        visible = confirmSignOut,
+        onConfirm = {
+            confirmSignOut = false
+            viewModel.logout()
+        },
+        onDismiss = { confirmSignOut = false },
+    )
+}
+
+/**
+ * The overview search (Apple `IOSSettingsOverview.matches`): a row shows when
+ * any of its keywords contains the trimmed query, case-insensitively. An
+ * empty query shows everything.
+ */
+private class SettingsSearch(query: String) {
+    private val needle = query.trim()
+
+    fun matches(vararg terms: String): Boolean =
+        needle.isEmpty() || terms.any { it.contains(needle, ignoreCase = true) }
+}
+
+/** The host of [serverUrl], or null when there is no server. */
+private fun serverHost(serverUrl: String): String? {
+    if (serverUrl.isBlank()) return null
+    return serverUrl
+        .substringAfter("://", serverUrl)
+        .substringBefore('/')
+        .ifBlank { serverUrl }
+}
+
+/**
+ * A row's search keywords: the [english] ones, which always match (they are
+ * matching data and stay English in every language), plus the catalog
+ * message's comma-separated words for the app language.
+ */
+@Composable
+private fun searchTerms(@StringRes id: Int, vararg english: String): Array<String> =
+    (english.asList() + stringResource(id).split(',').map { it.trim() }.filter { it.isNotEmpty() })
+        .distinct()
+        .toTypedArray()
+
+/** The Diagnostics row's value, in the Apple apps' wording; none when diagnostics can't apply. */
+@Composable
+private fun diagnosticsAvailabilityLabel(availability: DiagnosticsAvailabilityUi): String? =
+    availability.takeIf { it != DiagnosticsAvailabilityUi.INELIGIBLE }
+        ?.let { stringResource(diagnosticsAvailabilityTitle(it)) }

@@ -1,0 +1,1508 @@
+package org.siloserver.silo.common.settings
+
+import android.content.Context
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
+import androidx.datastore.preferences.preferencesDataStoreFile
+import org.siloserver.silo.common.store.AccountScopedKeys
+import org.siloserver.silo.domain.player.BufferingQualityMode
+import org.siloserver.silo.domain.player.IntroSkipMode
+import org.siloserver.silo.model.download.DownloadQuality
+import org.siloserver.silo.model.settings.CellularQuality
+import org.siloserver.silo.model.settings.EffectiveSettingValue
+import org.siloserver.silo.model.settings.LanguageOptions
+import org.siloserver.silo.model.settings.PlaybackSettingsKeys
+import org.siloserver.silo.model.settings.PlaybackSpeedRange
+import org.siloserver.silo.model.settings.QualityPresets
+import org.siloserver.silo.model.settings.SettingKeys
+import org.siloserver.silo.model.settings.SettingScope
+import org.siloserver.silo.model.settings.SubtitleAppearance
+import org.siloserver.silo.model.settings.SubtitleAppearanceProjection
+import org.siloserver.silo.network.ApiResult
+import org.siloserver.silo.repository.SettingsRepository
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.intOrNull
+
+@OptIn(ExperimentalCoroutinesApi::class)
+class AndroidPlayerSettingsStore(
+    private val context: Context,
+    private val legacyCache: AndroidServerSettingsCache,
+    private val getActiveProfileId: suspend () -> String?,
+    private val getServerUrl: suspend () -> String?,
+    private val serverSettingsFlusher: ServerSettingsFlusher,
+    private val profileChangeSignal: Flow<Unit> = flowOf(Unit),
+    private val settingsRepository: SettingsRepository? = null,
+    private val getDeviceId: suspend () -> String? = { null },
+    private val serverChangeSignal: Flow<Unit> = flowOf(Unit),
+    private val getAuthScope: suspend () -> org.siloserver.silo.network.AuthScopeSnapshot? = { null },
+    /** Null in tests that never reach a server; text opacity then counts as supported. */
+    private val contractRevision: SettingsContractRevision? = null,
+    /** The active saved account; each account's profiles keep their own files. */
+    private val getActiveAccountId: suspend () -> String? = { null },
+    private val dataStoreFactory: (accountId: String?, profileId: String) -> DataStore<Preferences> = { accountId, profileId ->
+        PreferenceDataStoreFactory.create(
+            produceFile = { context.preferencesDataStoreFile(fileNameFor(accountId, profileId)) },
+        )
+    },
+) : PlayerSettingsStore {
+
+    private val storeCache = mutableMapOf<String, DataStore<Preferences>>()
+    private val migrationDone = mutableSetOf<String>()
+
+    /**
+     * Tuple identifying which device-scope settings file applies right now.
+     * Mirrors iOS `currentScopeIdentifier` (server | profile | device). The
+     * account picks the file ([fileNameFor]), so [keyPrefix] needs no account
+     * and values adopted from the pre-account file keep their names.
+     * When `serverUrl` or `deviceId` is blank, we fall back to legacy
+     * per-profile-only keys (no prefix), preserving compatibility with
+     * existing installs.
+     */
+    private data class Scope(
+        val profileId: String,
+        val serverUrl: String,
+        val deviceId: String,
+        val authority: org.siloserver.silo.network.AuthScopeSnapshot?,
+        val accountId: String? = null,
+    ) {
+        val keyPrefix: String =
+            if (serverUrl.isBlank() || deviceId.isBlank()) {
+                ""
+            } else {
+                "scope_" + sha256Hex("$serverUrl|$profileId|$deviceId").take(24) + "."
+            }
+        val migrationSentinel: String =
+            if (keyPrefix.isEmpty()) MIGRATION_SENTINEL_LEGACY else "migration_v2_$keyPrefix"
+
+        /**
+         * Separate from [migrationSentinel] deliberately: that one is already
+         * marked on every install that has run a scoped build, so a rename
+         * pass gated on it would never run for the devices holding the
+         * orphaned pre-rename values.
+         */
+        val renameSentinel: String = "migration_rename_v1_$keyPrefix"
+
+        /** Which file [migrationDone] tokens belong to. */
+        val storeName: String get() = fileNameFor(accountId, profileId)
+    }
+
+    // Re-derive scope on every (profile or server) change.
+    private val scopeChangeSignal: Flow<Unit> =
+        combine(profileChangeSignal, serverChangeSignal) { _, _ -> Unit }
+
+    private val currentScopeFlow: Flow<Scope?> = flow {
+        emit(currentScope())
+        scopeChangeSignal.collect { emit(currentScope()) }
+    }.distinctUntilChanged()
+
+    private suspend fun currentScope(): Scope? = AccountScopedKeys.readStable(getActiveAccountId) { accountId ->
+        val authority = getAuthScope()
+        val profileId = getActiveProfileId() ?: return@readStable null
+        Scope(
+            profileId = profileId,
+            serverUrl = getServerUrl().orEmpty(),
+            deviceId = getDeviceId().orEmpty(),
+            authority = authority,
+            accountId = accountId,
+        )
+    }
+
+    private fun storeFor(scope: Scope): DataStore<Preferences> =
+        synchronized(storeCache) {
+            storeCache.getOrPut(scope.storeName) { dataStoreFactory(scope.accountId, scope.profileId) }
+        }
+
+    private suspend fun ensureMigrated(scope: Scope, store: DataStore<Preferences>, isCurrent: suspend () -> Boolean = { true }) {
+        migrateLegacyCache(scope, store, isCurrent)
+        if (isCurrent()) migrateRenamedKeys(scope, store, isCurrent)
+    }
+
+    private suspend fun migrateLegacyCache(scope: Scope, store: DataStore<Preferences>, isCurrent: suspend () -> Boolean) {
+        val token = scope.storeName + "/" + scope.migrationSentinel
+        if (synchronized(migrationDone) { token in migrationDone }) return
+        val sentinelKey = booleanPreferencesKey(scope.migrationSentinel)
+        val current = store.data.first()
+        if (!isCurrent()) return
+        if (current[sentinelKey] == true) {
+            if (isCurrent()) synchronized(migrationDone) { migrationDone.add(token) }
+            return
+        }
+        store.edit { prefs ->
+            if (!isCurrent()) return@edit
+            for (key in PlaybackSettingsKeys.DeviceSettings) {
+                val legacy = legacyCache.getString(scope.serverUrl, key, MISSING_SENTINEL)
+                if (legacy == MISSING_SENTINEL) continue
+                writeRawString(prefs, scope, key, legacy)
+            }
+            prefs[sentinelKey] = true
+        }
+        if (isCurrent()) synchronized(migrationDone) { migrationDone.add(token) }
+    }
+
+    /**
+     * Copies the two slots the settings cutover renamed
+     * ([PlaybackSettingsKeys.RenamedLocalKeys]) into their current names.
+     *
+     * Carries its own sentinel rather than riding [migrateLegacyCache]'s: that
+     * one is already marked on every device that has run this app since the
+     * scoped-store change, so a pass gated on it would never execute for the
+     * installs that actually hold the orphaned values. Both reads are
+     * local-first — subtitle appearance drives downloaded playback with no
+     * server in the loop — so skipping the copy silently reverts a preference
+     * the user set until a canonical refresh happens to land.
+     */
+    private suspend fun migrateRenamedKeys(scope: Scope, store: DataStore<Preferences>, isCurrent: suspend () -> Boolean) {
+        val token = scope.storeName + "/" + scope.renameSentinel
+        if (synchronized(migrationDone) { token in migrationDone }) return
+        val sentinelKey = booleanPreferencesKey(scope.renameSentinel)
+        val current = store.data.first()
+        if (!isCurrent()) return
+        if (current[sentinelKey] != true) {
+            store.edit { prefs ->
+                if (!isCurrent()) return@edit
+                for ((oldKey, newKey) in PlaybackSettingsKeys.RenamedLocalKeys) {
+                    copyRenamedSlot(prefs, scope, oldKey = oldKey, newKey = newKey)
+                }
+                prefs[sentinelKey] = true
+            }
+        }
+        if (isCurrent()) synchronized(migrationDone) { migrationDone.add(token) }
+    }
+
+    /**
+     * Copies one renamed slot, typed by the *new* key's contract type.
+     *
+     * The old slot may sit under this scope's prefix (written after the scoped
+     * store landed) or unprefixed (written before it), so both are checked —
+     * the same order [scopedRead] uses. A value already present under the new
+     * name always wins: it is either a fresh edit or a canonical refresh, and
+     * either outranks whatever the pre-rename build left behind.
+     */
+    private fun copyRenamedSlot(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+        scope: Scope,
+        oldKey: String,
+        newKey: String,
+    ) {
+        val target = scope.keyPrefix + newKey
+        when {
+            isIntKey(newKey) -> {
+                if (prefs[intPreferencesKey(target)] != null) return
+                val legacy = prefs[intPreferencesKey(scope.keyPrefix + oldKey)]
+                    ?: prefs[intPreferencesKey(oldKey)]
+                    ?: return
+                prefs[intPreferencesKey(target)] = legacy
+            }
+            isBooleanKey(newKey) -> {
+                if (prefs[booleanPreferencesKey(target)] != null) return
+                val legacy = prefs[booleanPreferencesKey(scope.keyPrefix + oldKey)]
+                    ?: prefs[booleanPreferencesKey(oldKey)]
+                    ?: return
+                prefs[booleanPreferencesKey(target)] = legacy
+            }
+            else -> {
+                if (prefs[stringPreferencesKey(target)] != null) return
+                val legacy = prefs[stringPreferencesKey(scope.keyPrefix + oldKey)]
+                    ?: prefs[stringPreferencesKey(oldKey)]
+                    ?: return
+                prefs[stringPreferencesKey(target)] = legacy
+            }
+        }
+    }
+
+    private fun <T> profileScopedFlow(default: T, read: (Preferences, Scope) -> T): Flow<T> =
+        currentScopeFlow.flatMapLatest { scope ->
+            if (scope == null) {
+                flowOf(default)
+            } else {
+                val store = storeFor(scope)
+                flow {
+                    ensureMigrated(scope, store)
+                    emitAll(store.data.map { read(it, scope) })
+                }
+            }
+        }
+
+    /**
+     * The stored enum, falling back to the deprecated boolean when there is no
+     * enum to read.
+     *
+     * That fallback IS the "server contract revision < 7" case the spec asks
+     * for, without a second copy of the revision to keep in step:
+     * [applyEffectiveLocally] only writes keys the effective-values response
+     * actually answered, and a server older than revision 7 does not know
+     * `playback.intro_skip_mode` — so the slot stays empty and the boolean the
+     * same response *did* answer decides. A revision-7 server answers both and
+     * the enum wins, which is what the write mirror keeps consistent.
+     *
+     * [autoSkipIntroFlow] is not overridden: the interface projects it from
+     * here so the two can never disagree locally.
+     */
+    override val introSkipModeFlow: Flow<IntroSkipMode> =
+        profileScopedFlow(IntroSkipMode.Default) { p, s ->
+            IntroSkipMode.fromWire(p.stringFor(s, PlaybackSettingsKeys.IntroSkipMode, ""))
+                ?: IntroSkipMode.fromLegacyBoolean(
+                    p.boolFor(s, PlaybackSettingsKeys.AutoSkipIntro, false),
+                )
+        }
+
+    /**
+     * Whether the active server's manifest defines
+     * `playback.buffering_quality_mode`: null until its manifest is read.
+     */
+    private val bufferingQualityModeDefined: Flow<Boolean?> =
+        if (contractRevision == null) {
+            flowOf(true)
+        } else {
+            combine(currentScopeFlow, contractRevision.known) { scope, _ ->
+                scope?.let { contractRevision.stores(it.serverUrl, PlaybackSettingsKeys.BufferingQualityMode) }
+            }.distinctUntilChanged()
+        }
+
+    // No legacy boolean behind this one: an absent or unknown value is the
+    // contract default. Until the server's manifest is read, the last mode
+    // seen here applies; a server without the setting plays the default, and
+    // nothing on this device stands in for it.
+    override val bufferingQualityModeFlow: Flow<BufferingQualityMode> =
+        combine(
+            profileScopedFlow(BufferingQualityMode.Default) { p, s ->
+                BufferingQualityMode.fromWire(p.stringFor(s, PlaybackSettingsKeys.BufferingQualityMode, ""))
+                    ?: BufferingQualityMode.Default
+            },
+            bufferingQualityModeDefined,
+        ) { mode, defined -> if (defined == false) BufferingQualityMode.Default else mode }
+            .distinctUntilChanged()
+
+    override val bufferingQualityModeSupportedFlow: Flow<Boolean> =
+        bufferingQualityModeDefined.map { it == true }.distinctUntilChanged()
+
+    // ---- Booleans ------------------------------------------------------
+    override val autoSkipCreditsFlow: Flow<Boolean> =
+        profileScopedFlow(false) { p, s -> p.boolFor(s, PlaybackSettingsKeys.AutoSkipCredits, false) }
+
+    override val autoPlayNextFlow: Flow<Boolean> =
+        profileScopedFlow(true) { p, s -> p.boolFor(s, PlaybackSettingsKeys.AutoPlayNext, true) }
+
+    override val themeMusicEnabledFlow: Flow<Boolean> =
+        profileScopedFlow(false) { p, s -> p.boolFor(s, PlaybackSettingsKeys.ThemeMusicEnabled, false) }
+
+    override val themeMusicLoopFlow: Flow<Boolean> =
+        profileScopedFlow(false) { p, s -> p.boolFor(s, PlaybackSettingsKeys.ThemeMusicLoop, false) }
+
+    override val hdrEnabledFlow: Flow<Boolean> =
+        profileScopedFlow(true) { p, s -> p.boolFor(s, PlaybackSettingsKeys.HdrEnabled, true) }
+
+    // Off until the server says otherwise: the contract default is false, so
+    // defaulting on here sent Profile 7 sources down the HDR10 path before the
+    // first refresh (or offline) when the server would have played them as
+    // Dolby Vision.
+    override val dvProfile7HDR10FallbackFlow: Flow<Boolean> =
+        profileScopedFlow(false) { p, s -> p.boolFor(s, PlaybackSettingsKeys.DvProfile7HDR10Fallback, false) }
+
+    override val dolbyVisionEnabledFlow: Flow<Boolean> =
+        profileScopedFlow(true) { p, s -> p.boolFor(s, PlaybackSettingsKeys.DolbyVisionEnabled, true) }
+
+    // Default OFF — Apple TV's "Match Content" defaults off because the HDMI
+    // mode switch black-screens for 1-2s on entry/exit (Apple parity,
+    // QA 2026-07-08).
+    override val matchContentFrameRateFlow: Flow<Boolean> =
+        profileScopedFlow(false) { p, s -> p.boolFor(s, PlaybackSettingsKeys.MatchContentFrameRate, false) }
+
+    override val pictureInPictureEnabledFlow: Flow<Boolean> =
+        profileScopedFlow(true) { p, s -> p.boolFor(s, PlaybackSettingsKeys.PictureInPictureEnabled, true) }
+
+    override val forceHdrPassthroughFlow: Flow<Boolean> =
+        profileScopedFlow(false) { p, s -> p.boolFor(s, PlaybackSettingsKeys.ForceHdrPassthrough, false) }
+
+    override val letterboxExpansionFlow: Flow<String> =
+        profileScopedFlow(LetterboxExpansion.Default) { p, s ->
+            p.stringFor(s, PlaybackSettingsKeys.LetterboxExpansion, LetterboxExpansion.Default)
+                .takeIf { it in LetterboxExpansion.Valid }
+                ?: LetterboxExpansion.Default
+        }
+
+    override val trueBlackBarsFlow: Flow<Boolean> =
+        profileScopedFlow(false) { p, s -> p.boolFor(s, PlaybackSettingsKeys.TrueBlackBars, false) }
+
+    override val downloadsWifiOnlyFlow: Flow<Boolean> =
+        profileScopedFlow(true) { p, s -> p.boolFor(s, PlaybackSettingsKeys.DownloadsWifiOnly, true) }
+
+    override val keepWatchedDownloadsFlow: Flow<Boolean> =
+        profileScopedFlow(false) { p, s -> p.boolFor(s, PlaybackSettingsKeys.KeepWatchedDownloads, false) }
+
+    override val defaultDownloadQualityFlow: Flow<String> =
+        profileScopedFlow(DownloadQuality.Original.wire) { p, s ->
+            DownloadQuality.fromWire(
+                p.stringFor(s, PlaybackSettingsKeys.DefaultDownloadQuality, DownloadQuality.Original.wire)
+            ).wire
+        }
+
+    override val subtitleUsesDeviceOverrideFlow: Flow<Boolean> =
+        profileScopedFlow(false) { p, s ->
+            p.boolFor(s, PlaybackSettingsKeys.SubtitleUsesDeviceOverride, false)
+        }
+
+    // ---- Doubles -------------------------------------------------------
+    override val playbackSpeedFlow: Flow<Double> =
+        profileScopedFlow(1.0) { p, s ->
+            // Normalized on read too, so a value an older build stored outside
+            // the contract range (up to 4.0) is not played back as is.
+            p.stringFor(s, PlaybackSettingsKeys.PlaybackSpeed, "1.0").toDoubleOrNull()
+                ?.let(PlaybackSpeedRange::normalize) ?: 1.0
+        }
+
+    // ---- Ints ----------------------------------------------------------
+    override val audioSyncMsFlow: Flow<Int> =
+        profileScopedFlow(0) { p, s -> p.intFor(s, PlaybackSettingsKeys.AudioSyncMs, 0) }
+
+    override val subtitleSyncMsFlow: Flow<Int> =
+        profileScopedFlow(0) { p, s -> p.intFor(s, PlaybackSettingsKeys.SubtitleSyncMs, 0) }
+
+    override val nextUpPromptSecondsFlow: Flow<Int> =
+        profileScopedFlow(30) { p, s -> p.intFor(s, PlaybackSettingsKeys.NextUpPromptSeconds, 30) }
+
+    override val sleepTimerDefaultMinutesFlow: Flow<Int> =
+        profileScopedFlow(30) { p, s -> p.intFor(s, PlaybackSettingsKeys.SleepTimerDefaultMinutes, 30) }
+
+    override val resumeRewindSecondsFlow: Flow<Int> =
+        profileScopedFlow(DEFAULT_RESUME_REWIND_SECONDS) { p, s ->
+            p.intFor(s, PlaybackSettingsKeys.ResumeRewindSeconds, DEFAULT_RESUME_REWIND_SECONDS)
+        }
+
+    override val passOutThresholdFlow: Flow<Int> =
+        profileScopedFlow(DEFAULT_PASSOUT_THRESHOLD) { p, s ->
+            p.intFor(s, PlaybackSettingsKeys.PassOutThreshold, DEFAULT_PASSOUT_THRESHOLD)
+        }
+
+    // Uncapped is spelled 0 locally (Preferences cannot hold a null) and
+    // translated to JSON null on the wire — 0 is outside the contract's
+    // 100..200000 range, so it can never collide with a real cap.
+    override val maxBitrateKbpsFlow: Flow<Int?> =
+        profileScopedFlow(null) { p, s ->
+            p.intFor(s, PlaybackSettingsKeys.MaxBitrateKbps, 0).takeIf { it > 0 }
+        }
+
+    // Unlike the main cap, the cellular one defaults to a value (2000), so an
+    // absent slot reads as that and only an explicit 0 is uncapped.
+    override val cellularMaxBitrateKbpsFlow: Flow<Int?> =
+        profileScopedFlow(CellularQuality.DEFAULT_MAX_BITRATE_KBPS) { p, s ->
+            p.intFor(s, PlaybackSettingsKeys.CellularMaxBitrateKbps, CellularQuality.DEFAULT_MAX_BITRATE_KBPS)
+                .takeIf { it > 0 }
+        }
+
+    // ---- Strings -------------------------------------------------------
+    // Legacy compound spellings ("1080p-high") are normalized on read: the
+    // bitrate they encoded lives on its own axis now, and handing a compound
+    // value to the player or back to the server would be refused.
+    override val preferredQualityFlow: Flow<String> =
+        profileScopedFlow(QualityPresets.RESOLUTION_AUTO) { p, s ->
+            QualityPresets.normalizeResolution(
+                p.stringFor(s, PlaybackSettingsKeys.PreferredQuality, QualityPresets.RESOLUTION_AUTO),
+            )
+        }
+
+    override val cellularPreferredQualityFlow: Flow<String> =
+        profileScopedFlow(CellularQuality.DEFAULT_RESOLUTION) { p, s ->
+            QualityPresets.normalizeResolution(
+                p.stringFor(s, PlaybackSettingsKeys.CellularPreferredQuality, CellularQuality.DEFAULT_RESOLUTION),
+            )
+        }
+
+    // Older builds stored the display name ("English") here rather than a BCP 47
+    // tag. Those values are rejected by the server and never matched a track, so
+    // they are translated on read instead of being handed to ExoPlayer or
+    // re-sent. Anything already a tag passes through untouched.
+    override val audioLanguageFlow: Flow<String> =
+        profileScopedFlow("") { p, s ->
+            LanguageOptions.migrateLegacyValue(
+                p.stringFor(s, PlaybackSettingsKeys.AudioLanguage, ""),
+            )
+        }
+
+    override val videoGravityFlow: Flow<String> =
+        profileScopedFlow("fit") { p, s -> p.stringFor(s, PlaybackSettingsKeys.VideoGravity, "fit") }
+
+    override val orientationModeFlow: Flow<String> =
+        profileScopedFlow("auto") { p, s -> p.stringFor(s, PlaybackSettingsKeys.OrientationMode, "auto") }
+
+    // The composite is the stored truth, but the granular subtitle.* slots are
+    // a live overlay: the player's per-field controls write them directly, and
+    // a value there that the composite has not caught up with is the newer
+    // edit. Projecting on read (and again on flush) is what keeps a per-field
+    // change from being invisible to the server.
+    override val subtitleAppearanceFlow: Flow<SubtitleAppearance> =
+        profileScopedFlow(SubtitleAppearance.DEFAULT) { p, s -> p.projectedAppearance(s) }
+
+    override val savedCustomSubtitleAppearanceFlow: Flow<SubtitleAppearance> =
+        profileScopedFlow(SubtitleAppearance.DEFAULT) { p, s ->
+            val saved = p[stringPreferencesKey(s.keyPrefix + SAVED_CUSTOM_SUBTITLE_APPEARANCE)]
+            if (saved != null) SubtitleAppearance.decode(saved) else p.projectedAppearance(s)
+        }
+
+    override val subtitleMatchesDeviceFlow: Flow<Boolean> =
+        profileScopedFlow(false) { p, s -> p.boolFor(s, PlaybackSettingsKeys.SubtitleMatchesDevice, false) }
+
+    override val deviceOverrideKeysFlow: Flow<Set<String>> =
+        profileScopedFlow(emptySet()) { p, s -> p[deviceOverridesKey(s)].orEmpty() }
+
+    override val showAudiobooksFlow: Flow<Boolean> =
+        profileScopedFlow(false) { p, s -> p.boolFor(s, PlaybackSettingsKeys.NavShowAudiobooks, false) }
+
+    // tvOS "Match Device Settings" parity: when on, playback styling follows
+    // the OS captioning preferences (CaptioningManager); the stored custom
+    // appearance stays untouched underneath.
+    override val effectiveSubtitleAppearanceFlow: Flow<SubtitleAppearance> =
+        kotlinx.coroutines.flow.combine(
+            subtitleAppearanceFlow,
+            subtitleMatchesDeviceFlow,
+        ) { appearance, matchDevice ->
+            if (matchDevice) deviceCaptioningAppearance(context, appearance) else appearance
+        }
+
+    override val subtitleTextOpacitySupportedFlow: Flow<Boolean> =
+        if (contractRevision == null) {
+            flowOf(true)
+        } else {
+            combine(currentScopeFlow, contractRevision.known) { scope, known ->
+                val revision = known?.takeIf { scope != null && it.serverUrl == scope.serverUrl }
+                    ?.manifestRevision
+                revision == null || SubtitleAppearance.supportsTextOpacity(revision)
+            }.distinctUntilChanged()
+        }
+
+    // Unknown revision counts as profile, as text opacity does: the flusher
+    // holds the write until the revision is known.
+    override val subtitleSyncSavedToProfileFlow: Flow<Boolean> =
+        if (contractRevision == null) {
+            subtitleUsesDeviceOverrideFlow.map { !it }
+        } else {
+            combine(subtitleUsesDeviceOverrideFlow, currentScopeFlow, contractRevision.known) { deviceOnly, scope, _ ->
+                !deviceOnly &&
+                    scope?.let { contractRevision.storesPerProfile(it.serverUrl, PlaybackSettingsKeys.SubtitleSyncMs) } != false
+            }.distinctUntilChanged()
+        }
+
+    override suspend fun setSubtitleMatchesDevice(enabled: Boolean) =
+        writeBoolLocal(PlaybackSettingsKeys.SubtitleMatchesDevice, enabled)
+
+    override suspend fun setShowAudiobooks(enabled: Boolean) =
+        writeBoolLocal(PlaybackSettingsKeys.NavShowAudiobooks, enabled)
+
+    // ---- Setters (write to scoped key + enqueue server flush) ---------
+    /**
+     * Writes only the enum, never the boolean beside it.
+     *
+     * The server mirrors the pair at write time, and its boolean -> enum
+     * direction is lossy (`false` means `ask`). Enqueueing both would let the
+     * boolean's mirror land second and rewrite a `never` the viewer just chose
+     * back to `ask`. On a server older than revision 7 this write is rejected
+     * per key — the flusher drops that one op rather than poisoning the rest —
+     * and the local value still stands.
+     */
+    override suspend fun setIntroSkipMode(value: IntroSkipMode) =
+        writeString(PlaybackSettingsKeys.IntroSkipMode, value.wireValue)
+
+    /**
+     * Settings offers this only while the server's manifest defines the key
+     * ([bufferingQualityModeSupportedFlow]). Like [setCellularQuality] it is
+     * marked unconfirmed, so a write the flusher held while the manifest was
+     * unknown is sent again by the first refresh rather than replaced with
+     * the server's default.
+     */
+    override suspend fun setBufferingQualityMode(value: BufferingQualityMode) {
+        val key = PlaybackSettingsKeys.BufferingQualityMode
+        withScope { scope, store ->
+            store.edit {
+                it[stringPreferencesKey(scope.keyPrefix + key)] = value.wireValue
+                markDeviceOverride(it, scope, key)
+                it[unconfirmedKeysKey(scope)] = it[unconfirmedKeysKey(scope)].orEmpty() + key
+            }
+            serverSettingsFlusher.enqueue(scope.profileId, key, value.wireValue, scope.serverUrl, scope.authority)
+        }
+    }
+
+    override suspend fun setAutoSkipCredits(value: Boolean) =
+        writeBool(PlaybackSettingsKeys.AutoSkipCredits, value)
+
+    override suspend fun setAutoPlayNext(value: Boolean) =
+        writeBool(PlaybackSettingsKeys.AutoPlayNext, value)
+
+    override suspend fun setThemeMusicEnabled(value: Boolean) =
+        writeBool(PlaybackSettingsKeys.ThemeMusicEnabled, value)
+
+    override suspend fun setThemeMusicLoop(value: Boolean) =
+        writeBool(PlaybackSettingsKeys.ThemeMusicLoop, value)
+
+    override suspend fun setHdrEnabled(value: Boolean) =
+        writeBool(PlaybackSettingsKeys.HdrEnabled, value)
+
+    override suspend fun setDvProfile7HDR10Fallback(value: Boolean) =
+        writeBool(PlaybackSettingsKeys.DvProfile7HDR10Fallback, value)
+
+    override suspend fun setDolbyVisionEnabled(value: Boolean) =
+        writeBool(PlaybackSettingsKeys.DolbyVisionEnabled, value)
+
+    override suspend fun setMatchContentFrameRate(value: Boolean) =
+        writeBool(PlaybackSettingsKeys.MatchContentFrameRate, value)
+
+    override suspend fun setPictureInPictureEnabled(value: Boolean) =
+        writeBoolLocal(PlaybackSettingsKeys.PictureInPictureEnabled, value)
+
+    override suspend fun setForceHdrPassthrough(value: Boolean) =
+        writeBoolLocal(PlaybackSettingsKeys.ForceHdrPassthrough, value)
+
+    override suspend fun setLetterboxExpansion(value: String) {
+        val safe = if (value in LetterboxExpansion.Valid) value else LetterboxExpansion.Default
+        writeStringLocal(PlaybackSettingsKeys.LetterboxExpansion, safe)
+    }
+
+    override suspend fun setTrueBlackBars(value: Boolean) =
+        writeBoolLocal(PlaybackSettingsKeys.TrueBlackBars, value)
+
+    override suspend fun setDownloadsWifiOnly(value: Boolean) =
+        writeBoolLocal(PlaybackSettingsKeys.DownloadsWifiOnly, value)
+
+    override suspend fun setKeepWatchedDownloads(value: Boolean) =
+        writeBoolLocal(PlaybackSettingsKeys.KeepWatchedDownloads, value)
+
+    override suspend fun setDefaultDownloadQuality(value: String) =
+        writeStringLocal(PlaybackSettingsKeys.DefaultDownloadQuality, DownloadQuality.fromWire(value).wire)
+
+    override suspend fun setPlaybackSpeed(value: Double) {
+        // The server refuses a speed outside the contract range or off its
+        // step, and the flusher then drops the write for good.
+        val clamped = PlaybackSpeedRange.normalize(value)
+        withScope { scope, store ->
+            store.edit {
+                it[stringPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.PlaybackSpeed)] = clamped.toString()
+                markDeviceOverride(it, scope, PlaybackSettingsKeys.PlaybackSpeed)
+            }
+            serverSettingsFlusher.enqueue(
+                scope.profileId,
+                PlaybackSettingsKeys.PlaybackSpeed,
+                clamped.toString(),
+                scope.serverUrl,
+                scope.authority,
+            )
+        }
+    }
+
+    override suspend fun setAudioSyncMs(value: Int) =
+        writeInt(PlaybackSettingsKeys.AudioSyncMs, value.coerceIn(-5000, 5000))
+
+    /**
+     * Subtitle timing follows the subtitle appearance's scope: the profile's
+     * value unless this device keeps its own subtitles ("Only on This
+     * Device"). A server below [PlaybackSettingsKeys.SubtitleSyncProfileMinRevision]
+     * only stores it per device ([SettingsContractRevision.storesPerProfile]),
+     * so there it stays a device value — decided here when the revision is
+     * already known and by the flusher otherwise.
+     */
+    override suspend fun setSubtitleSyncMs(value: Int) {
+        val clamped = value.coerceIn(-10000, 10000)
+        withScope { scope, store ->
+            val profileUnsupported = keptPerDeviceOnly(scope, PlaybackSettingsKeys.SubtitleSyncMs)
+            store.edit { prefs ->
+                prefs[intPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.SubtitleSyncMs)] = clamped
+                enqueueSubtitleScoped(
+                    prefs, scope, PlaybackSettingsKeys.SubtitleSyncMs, clamped.toString(),
+                    deviceOnly = profileUnsupported,
+                )
+            }
+        }
+    }
+
+    /**
+     * Whether [scope]'s server is already known to store [key] per device
+     * only, without probing. Unknown counts as not: the flusher holds the
+     * write until the revision is known.
+     */
+    private fun keptPerDeviceOnly(scope: Scope, key: String): Boolean =
+        contractRevision?.storesPerProfile(scope.serverUrl, key) == false
+
+    /**
+     * Queues a subtitle setting at the scope the "Only on This Device" toggle
+     * names: this device's own row while it is on (or when [deviceOnly] says
+     * the server cannot store it per profile), otherwise the profile's.
+     *
+     * A profile save also clears a device row this device still holds for
+     * [key], so the value just saved is the one that shows here rather than a
+     * stale device value that outranks it.
+     *
+     * Called inside the edit transaction that wrote the value, so writes
+     * enqueue in commit order.
+     */
+    private fun enqueueSubtitleScoped(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+        scope: Scope,
+        key: String,
+        value: String,
+        deviceOnly: Boolean = false,
+    ) {
+        val usesDevice = deviceOnly || prefs.boolFor(scope, PlaybackSettingsKeys.SubtitleUsesDeviceOverride, false)
+        if (usesDevice) {
+            markDeviceOverride(prefs, scope, key)
+            serverSettingsFlusher.enqueue(scope.profileId, key, value, scope.serverUrl, scope.authority, SettingWriteScope.Device)
+        } else {
+            val staleDeviceRow = key in prefs[deviceOverridesKey(scope)].orEmpty()
+            clearDeviceOverride(prefs, scope, key)
+            serverSettingsFlusher.enqueue(
+                scope.profileId, key, value, scope.serverUrl, scope.authority,
+                SettingWriteScope.Profile(clearDevice = staleDeviceRow),
+            )
+        }
+    }
+
+    override suspend fun setNextUpPromptSeconds(value: Int) =
+        writeInt(PlaybackSettingsKeys.NextUpPromptSeconds, value.coerceIn(0, 120))
+
+    override suspend fun setResumeRewindSeconds(value: Int) =
+        writeIntLocal(PlaybackSettingsKeys.ResumeRewindSeconds, value.coerceIn(0, 30))
+
+    override suspend fun setPassOutThreshold(value: Int) =
+        writeIntLocal(PlaybackSettingsKeys.PassOutThreshold, value.coerceIn(0, 10))
+
+    override suspend fun setSleepTimerDefaultMinutes(value: Int) =
+        writeInt(PlaybackSettingsKeys.SleepTimerDefaultMinutes, value.coerceIn(0, 240))
+
+    override suspend fun setPreferredQuality(value: String) =
+        writeString(PlaybackSettingsKeys.PreferredQuality, QualityPresets.normalizeResolution(value))
+
+    override suspend fun setMaxBitrateKbps(value: Int?) =
+        writeInt(PlaybackSettingsKeys.MaxBitrateKbps, localBitrateKbps(value))
+
+    /**
+     * Both cellular axes in one transaction and two enqueues. Against a server
+     * older than [CellularQuality.MIN_CONTRACT_REVISION] the flusher drops the
+     * writes and the local pair still applies; the pair stays unconfirmed, so
+     * the first refresh from that server once it stores the keys sends it
+     * again instead of replacing it with the server's default.
+     */
+    override suspend fun setCellularQuality(resolution: String, bitrateKbps: Int?) {
+        val normalized = QualityPresets.normalizeResolution(resolution)
+        val capped = localBitrateKbps(bitrateKbps)
+        withScope { scope, store ->
+            store.edit {
+                it[stringPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.CellularPreferredQuality)] = normalized
+                it[intPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.CellularMaxBitrateKbps)] = capped
+                markDeviceOverride(
+                    it,
+                    scope,
+                    PlaybackSettingsKeys.CellularPreferredQuality,
+                    PlaybackSettingsKeys.CellularMaxBitrateKbps,
+                )
+                it[unconfirmedKeysKey(scope)] = it[unconfirmedKeysKey(scope)].orEmpty() + CellularQuality.KEYS
+            }
+            serverSettingsFlusher.enqueue(
+                scope.profileId,
+                PlaybackSettingsKeys.CellularPreferredQuality,
+                normalized,
+                scope.serverUrl,
+                scope.authority,
+            )
+            serverSettingsFlusher.enqueue(
+                scope.profileId,
+                PlaybackSettingsKeys.CellularMaxBitrateKbps,
+                capped.toString(),
+                scope.serverUrl,
+                scope.authority,
+            )
+        }
+    }
+
+    /**
+     * A bitrate cap in its local spelling: within the contract's bounds, or 0
+     * for uncapped, which the flusher turns into the JSON null the contract
+     * means by "no cap".
+     */
+    private fun localBitrateKbps(value: Int?): Int =
+        value?.takeIf { it > 0 }?.coerceIn(MIN_BITRATE_KBPS, MAX_BITRATE_KBPS) ?: 0
+
+    /**
+     * `""` (no preference) clears this device's value instead of storing an
+     * explicit null over the profile's language. The legacy endpoint spelled
+     * "no preference" as `""` and its migration turned that into no stored
+     * row; sending JSON null at device scope would instead pin "no
+     * preference" here and hide the profile's choice.
+     */
+    override suspend fun setAudioLanguage(value: String) {
+        if (value.isEmpty()) {
+            resetDeviceSetting(PlaybackSettingsKeys.AudioLanguage)
+        } else {
+            writeString(PlaybackSettingsKeys.AudioLanguage, value)
+        }
+    }
+
+    override suspend fun setVideoGravity(value: String) {
+        val safe = if (value in VALID_VIDEO_GRAVITY) value else "fit"
+        writeString(PlaybackSettingsKeys.VideoGravity, safe)
+    }
+
+    override suspend fun setOrientationMode(value: String) =
+        writeString(PlaybackSettingsKeys.OrientationMode, value)
+
+    override suspend fun setSubtitleAppearance(value: SubtitleAppearance) {
+        updateSubtitleAppearance { value }
+    }
+
+    // Reads the current appearance from `prefs` inside the same `edit`
+    // transaction that writes the transformed result. DataStore serializes
+    // `edit` calls against each other (each transform lambda runs to
+    // completion holding the store's internal lock before the next one
+    // starts), so this is the actual fix for two callers racing on a
+    // separately-read "current" value — not just a smaller window.
+    //
+    // The enqueue happens inside the transaction for the same reason: the
+    // flusher keeps the last value enqueued per key, so enqueueing after
+    // `edit` returns would let two concurrent edits enqueue in the opposite
+    // order to the one they committed in, and the server would keep the
+    // older composite.
+    //
+    // The edit starts from the appearance on screen and saves to the profile
+    // unless "Only on This Device" is on ([enqueueSubtitleScoped]).
+    override suspend fun updateSubtitleAppearance(transform: (SubtitleAppearance) -> SubtitleAppearance) {
+        withScope { scope, store ->
+            store.edit { prefs ->
+                val current = prefs.projectedAppearance(scope)
+                val sanitized = transform(current).sanitized()
+                val json = sanitized.toJsonString()
+                prefs[stringPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.SubtitleAppearance)] = json
+                prefs[stringPreferencesKey(scope.keyPrefix + SAVED_CUSTOM_SUBTITLE_APPEARANCE)] = json
+                // The granular slots are rewritten from the composite rather
+                // than left behind: they are read back as an overlay, so a
+                // stale field would resurrect the value the user just replaced.
+                writeGranularAppearance(prefs, scope, sanitized)
+                // An edit no longer turns on the device override: appearance
+                // is a profile preference, and only the explicit toggle keeps
+                // a device's own.
+                enqueueSubtitleScoped(prefs, scope, PlaybackSettingsKeys.SubtitleAppearance, json)
+            }
+        }
+    }
+
+    /**
+     * Flushes the granular `subtitle.*` slots into the composite and enqueues
+     * it, so a per-field edit made anywhere (the player HUD, a TV picker)
+     * reaches the server as `playback.subtitle_appearance`.
+     *
+     * Callable on its own because the granular fields have no key of their own
+     * on the wire: without this projection a per-field write is device-local
+     * forever, which is the drift this exists to close.
+     */
+    override suspend fun flushProjectedSubtitleAppearance() {
+        withScope { scope, store ->
+            // Projected and enqueued inside the transaction, like
+            // [updateSubtitleAppearance], so a concurrent edit cannot commit
+            // between the read and the write or enqueue out of commit order.
+            store.edit { prefs ->
+                val json = prefs.projectedAppearance(scope).toJsonString()
+                if (prefs.stringFor(scope, PlaybackSettingsKeys.SubtitleAppearance, "") == json) return@edit
+                prefs[stringPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.SubtitleAppearance)] = json
+                prefs[stringPreferencesKey(scope.keyPrefix + SAVED_CUSTOM_SUBTITLE_APPEARANCE)] = json
+                enqueueSubtitleScoped(prefs, scope, PlaybackSettingsKeys.SubtitleAppearance, json)
+            }
+        }
+    }
+
+    private fun writeGranularAppearance(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+        scope: Scope,
+        appearance: SubtitleAppearance,
+    ) {
+        for ((key, raw) in SubtitleAppearanceProjection.flatten(appearance)) {
+            writeRawString(prefs, scope, key, raw)
+        }
+    }
+
+    // ---- Server-sync surface ------------------------------------------
+
+    override suspend fun refreshFromServer() {
+        refreshFromServerConfirmed()
+    }
+
+    /**
+     * [refreshFromServer], answering whether the server's effective values
+     * were read and applied.
+     *
+     * With [pinned], the refresh is for that captured scope only: the request
+     * carries its authority, the answer is written to its store, and a scope
+     * that stops being the active one (a profile switch, a sign-out, a server
+     * change) makes it apply nothing and answer false. Without it the refresh
+     * follows whichever scope is active when it runs.
+     */
+    private suspend fun refreshFromServerConfirmed(pinned: Scope? = null): Boolean {
+        val repo = settingsRepository ?: return false
+        // Push before pull. Local writes sit in the flusher's debounce for
+        // ~750ms; a refresh inside that window read the server's OLD value and
+        // wrote it back over the change the user had just made. The player
+        // refreshes at every load, so toggling Dolby Vision in the HUD and
+        // restarting the session in place reverted the toggle every time.
+        // Draining first makes the pull observe the write. Offline, both
+        // fail and the local value stands.
+        //
+        // Re-read the server's settings revision first, so the push below
+        // gates revision-dependent fields on a current answer and a server
+        // upgraded while the app ran is noticed.
+        contractRevision?.let { revision ->
+            (pinned?.serverUrl ?: getServerUrl())?.takeIf { it.isNotBlank() }?.let { url -> runCatching { revision.refresh(url) } }
+        }
+        runCatching { serverSettingsFlusher.flushNow() }
+        if (pinned != null) {
+            return applyServerEffective(repo, pinned, storeFor(pinned), pinned.authority) { isStillCurrent(pinned) }
+        }
+        var applied = false
+        withScope { scope, store -> applied = applyServerEffective(repo, scope, store, authority = null) { true } }
+        return applied
+    }
+
+    private suspend fun applyServerEffective(
+        repo: SettingsRepository,
+        scope: Scope,
+        store: DataStore<Preferences>,
+        authority: org.siloserver.silo.network.AuthScopeSnapshot?,
+        isCurrent: suspend () -> Boolean,
+    ): Boolean {
+        if (!isCurrent()) return false
+        // Batched canonical resolution: one request answers every
+        // device-relevant key, each with the scope it resolved from.
+        val result = repo.getEffectiveValues(remoteKeysStoredBy(scope.serverUrl), authority = authority)
+        if (result !is ApiResult.Success || !isCurrent()) return false
+        // Draining is not the same as landing: a write that failed
+        // transiently stays queued for retry and flushNow still returns
+        // normally, so this response was answered from the value the write
+        // has not reached yet. Applying it for those keys is the same
+        // clobber the push-first order exists to prevent — it put the
+        // server's old Dolby Vision value back and restarted the session on
+        // it. Every other key still hydrates from the canonical answer.
+        return applyEffectiveLocally(
+            scope = scope,
+            store = store,
+            effective = result.data,
+            unlandedKeys = serverSettingsFlusher.pendingKeys(scope.profileId),
+            isCurrent = isCurrent,
+        )
+    }
+
+    /**
+     * Whether [captured] is still the active scope: same profile, server and
+     * device, and the same signed-in identity (the check
+     * [importLegacyDeviceSettings] applies to its captured authority).
+     */
+    private suspend fun isStillCurrent(captured: Scope): Boolean {
+        val now = currentScope() ?: return false
+        if (now.profileId != captured.profileId || now.serverUrl != captured.serverUrl ||
+            now.deviceId != captured.deviceId || now.accountId != captured.accountId
+        ) {
+            return false
+        }
+        val owner = captured.authority ?: return now.authority == null
+        val current = now.authority
+        return owner.isSameIdentityAs(current) &&
+            owner.profileId == current?.profileId &&
+            owner.profileToken == current?.profileToken
+    }
+
+    /**
+     * [RemoteDeviceSettings] less the keys the server at [serverUrl] is not
+     * known to store. A server answers a batched read that names a key its
+     * contract lacks with 404 for the whole batch, so a key some servers lack
+     * ([SettingsContractRevision.stores]) is asked for only once the server is
+     * known to have it. Until then its local value stands.
+     */
+    private suspend fun remoteKeysStoredBy(serverUrl: String): List<String> {
+        val tracker = contractRevision ?: return RemoteDeviceSettings
+        runCatching { tracker.revisionFor(serverUrl) }
+        return RemoteDeviceSettings.filter { key -> tracker.stores(serverUrl, key) == true }
+    }
+
+    /**
+     * Keys the server at [serverUrl] is not known to store: what was last
+     * read for it lacks the key, or nothing has been read. "Use profile
+     * setting" for one of them clears the local value, so the contract
+     * default applies, as the setting would on a server that had no rows for
+     * it. Kept, the value would outlive the reset: an older server drops the
+     * delete, and the refresh never asks for the key. A server that does
+     * store it sends the profile's value once the delete lands.
+     *
+     * Read without probing: a reset that waited on the network could land
+     * after a choice the user made meanwhile and undo it.
+     */
+    private fun keysUnstoredBy(serverUrl: String): Set<String> {
+        val tracker = contractRevision ?: return emptySet()
+        return RemoteDeviceSettings.filterTo(mutableSetOf()) { key -> tracker.stores(serverUrl, key) != true }
+    }
+
+    private fun removeLocalValue(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+        scope: Scope,
+        key: String,
+    ) {
+        val scopedName = scope.keyPrefix + key
+        when {
+            isBooleanKey(key) -> prefs.remove(booleanPreferencesKey(scopedName))
+            isIntKey(key) -> prefs.remove(intPreferencesKey(scopedName))
+            else -> prefs.remove(stringPreferencesKey(scopedName))
+        }
+    }
+
+    /**
+     * "Only on This Device". On pins the appearance on screen to this device
+     * (Apple parity), and later subtitle edits — appearance and timing — stay
+     * here. Off deletes this device's rows so the profile's values apply again.
+     */
+    override suspend fun setSubtitleDeviceOverrideEnabled(enabled: Boolean) {
+        withScope { scope, store ->
+            val snapshot = store.data.first()
+            val current = snapshot.boolFor(scope, PlaybackSettingsKeys.SubtitleUsesDeviceOverride, false)
+            if (current == enabled) return@withScope
+
+            if (enabled) {
+                val sanitized = snapshot.projectedAppearance(scope).sanitized()
+                val json = sanitized.toJsonString()
+                store.edit {
+                    it[booleanPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.SubtitleUsesDeviceOverride)] = true
+                    it[stringPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.SubtitleAppearance)] = json
+                    it[stringPreferencesKey(scope.keyPrefix + SAVED_CUSTOM_SUBTITLE_APPEARANCE)] = json
+                    // The granular slots overlay the composite on read, so
+                    // restoring the saved appearance has to restore them too —
+                    // otherwise the fields left by whatever resolved while the
+                    // override was off win right back over it.
+                    writeGranularAppearance(it, scope, sanitized)
+                    markDeviceOverride(it, scope, PlaybackSettingsKeys.SubtitleAppearance)
+                    // In the transaction, so it enqueues in commit order.
+                    serverSettingsFlusher.enqueue(scope.profileId, PlaybackSettingsKeys.SubtitleAppearance, json, scope.serverUrl, scope.authority)
+                }
+                serverSettingsFlusher.flushNow()
+            } else {
+                store.edit {
+                    val savedCustomKey = stringPreferencesKey(scope.keyPrefix + SAVED_CUSTOM_SUBTITLE_APPEARANCE)
+                    if (snapshot[savedCustomKey] == null) {
+                        snapshot.stringFor(scope, PlaybackSettingsKeys.SubtitleAppearance, "")
+                            .takeIf { value -> value.isNotBlank() }
+                            ?.let { value -> it[savedCustomKey] = value }
+                    }
+                    it[booleanPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.SubtitleUsesDeviceOverride)] = false
+                    clearDeviceOverride(it, scope, PlaybackSettingsKeys.SubtitleAppearance)
+                    // Timing goes back to the profile's too — but only where
+                    // the server can hold it per profile; below that revision
+                    // this device's row is the only timing there is. An
+                    // unknown revision queues a clear the flusher holds until
+                    // the revision is known, so going offline cannot lose it.
+                    // Read and queued in this transaction, so a timing edit
+                    // made after the toggle-off is never cleared by it.
+                    val timingOnDevice = PlaybackSettingsKeys.SubtitleSyncMs in it[deviceOverridesKey(scope)].orEmpty()
+                    val timingDeviceOnly = keptPerDeviceOnly(scope, PlaybackSettingsKeys.SubtitleSyncMs)
+                    if (timingOnDevice && !timingDeviceOnly) {
+                        clearDeviceOverride(it, scope, PlaybackSettingsKeys.SubtitleSyncMs)
+                        serverSettingsFlusher.enqueueDelete(
+                            scope.profileId, PlaybackSettingsKeys.SubtitleSyncMs, scope.serverUrl, scope.authority,
+                            onlyWhereStoredPerProfile = true,
+                        )
+                    }
+                }
+                serverSettingsFlusher.enqueueDelete(scope.profileId, PlaybackSettingsKeys.SubtitleAppearance, scope.serverUrl, scope.authority)
+                serverSettingsFlusher.flushNow()
+                refreshFromServer()
+            }
+        }
+    }
+
+    /**
+     * Goes back to the profile's value for [key] on this device: deletes the
+     * device-scoped row through the same scoped queue every write uses, so a
+     * profile switch or an offline spell treats the clear exactly like a set.
+     *
+     * Keys one control writes together ([PlaybackSettingsKeys.deviceOverrideGroup])
+     * are cleared together. The override marker is dropped right away, so the
+     * picker shows the choice at once; the value itself follows from the
+     * refresh once the delete has landed. Until then the device keeps playing
+     * with the value it had, because the refresh leaves a key with an unsent
+     * write alone.
+     */
+    override suspend fun resetDeviceSetting(key: String) {
+        val keys = PlaybackSettingsKeys.deviceOverrideGroup(key).filter { it in RemoteDeviceSettings }
+        if (keys.isEmpty()) return
+        withScope { scope, store ->
+            val unstored = keysUnstoredBy(scope.serverUrl)
+            store.edit {
+                clearDeviceOverride(it, scope, *keys.toTypedArray())
+                it[unconfirmedKeysKey(scope)] = it[unconfirmedKeysKey(scope)].orEmpty() - keys.toSet()
+                for (cleared in keys) {
+                    if (cleared in unstored) removeLocalValue(it, scope, cleared)
+                    serverSettingsFlusher.enqueueDelete(scope.profileId, cleared, scope.serverUrl, scope.authority)
+                }
+            }
+            serverSettingsFlusher.flushNow()
+            refreshFromServer()
+        }
+    }
+
+    override suspend fun resetAllDeviceSettings(): Boolean {
+        var landed = false
+        withScope { scope, store ->
+            // Only the server-stored keys have rows to delete; the granular
+            // subtitle.* fields live inside playback.subtitle_appearance.
+            for (key in RemoteDeviceSettings) {
+                serverSettingsFlusher.enqueueDelete(scope.profileId, key, scope.serverUrl, scope.authority)
+            }
+            val unstored = keysUnstoredBy(scope.serverUrl)
+            store.edit {
+                it.remove(deviceOverridesKey(scope))
+                it.remove(unconfirmedKeysKey(scope))
+                for (key in unstored) removeLocalValue(it, scope, key)
+                it[booleanPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.SubtitleUsesDeviceOverride)] = false
+                // The local-only playback keys have no server row to delete, so
+                // the refresh below can never restore their defaults. Removing
+                // the slot IS the reset: every reader falls back to the default
+                // it declares. Without this, the action would leave exactly the
+                // settings the user most associates with this device untouched.
+                it.remove(booleanPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.PictureInPictureEnabled))
+                it.remove(booleanPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.ForceHdrPassthrough))
+                it.remove(stringPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.LetterboxExpansion))
+                it.remove(booleanPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.TrueBlackBars))
+                it.remove(intPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.ResumeRewindSeconds))
+                it.remove(intPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.PassOutThreshold))
+            }
+            serverSettingsFlusher.flushNow()
+            val unsent = serverSettingsFlusher.pendingKeys(scope.profileId).any { it in RemoteDeviceSettings }
+            // An empty queue is not proof: the flusher also drops deletes it
+            // cannot retry (a 401/403, a replaced owner). Only the server's
+            // own answer, with nothing left resolving from this device,
+            // confirms the profile's settings apply. The refresh is pinned to
+            // the scope this reset started in: if the user switches profile or
+            // signs out meanwhile, another profile's answer must neither land
+            // in this store nor confirm this reset.
+            val confirmed = refreshFromServerConfirmed(pinned = scope)
+            val remaining = store.data.first()[deviceOverridesKey(scope)].orEmpty()
+            landed = !unsent && confirmed && remaining.none { it in RemoteDeviceSettings } && isStillCurrent(scope)
+        }
+        return landed
+    }
+
+    override suspend fun flushPendingDeviceSettings() {
+        serverSettingsFlusher.flushNow()
+    }
+
+    private suspend fun applyEffectiveLocally(
+        scope: Scope,
+        store: DataStore<Preferences>,
+        effective: Map<String, EffectiveSettingValue>,
+        // Keys whose local edit is still queued for the server: the response
+        // cannot describe them yet, so the local value stays authoritative
+        // until the queued write lands.
+        unlandedKeys: Set<String> = emptySet(),
+        isCurrent: suspend () -> Boolean = { true },
+    ): Boolean {
+        var applied = false
+        store.edit { prefs ->
+            if (!isCurrent()) return@edit
+            applied = true
+            val overrides = prefs[deviceOverridesKey(scope)].orEmpty().toMutableSet()
+            val unconfirmed = prefs[unconfirmedKeysKey(scope)].orEmpty().toMutableSet()
+            for (key in RemoteDeviceSettings) {
+                if (key in unlandedKeys) continue
+                // The canonical endpoint answers every known key, including
+                // ones with nothing stored anywhere — those come back with
+                // source "default" and the contract default as the value, so
+                // writing each entry hydrates defaults from the contract
+                // rather than from anything hardcoded here. A key absent
+                // from the response is one this server's contract does not
+                // know (older revision); the local value is kept rather than
+                // guessed at.
+                val entry = effective[key] ?: continue
+                if (key in unconfirmed) {
+                    if (entry.scope == SettingScope.PROFILE_DEVICE.wire) {
+                        unconfirmed -= key
+                    } else {
+                        // Set while this server could not store it: send it
+                        // now that it can, rather than lose it to the default.
+                        prefs.localWireValue(scope, key)?.let { value ->
+                            serverSettingsFlusher.enqueue(scope.profileId, key, value, scope.serverUrl, scope.authority)
+                        }
+                        continue
+                    }
+                }
+                writeJsonValue(prefs, scope, key, entry.value)
+                // Where the value resolved from is the truth about whether
+                // this device holds its own, including one set elsewhere (the
+                // web admin, a previous install) or cleared out-of-band.
+                if (entry.scope == SettingScope.PROFILE_DEVICE.wire) overrides += key else overrides -= key
+            }
+            prefs[deviceOverridesKey(scope)] = overrides
+            prefs[unconfirmedKeysKey(scope)] = unconfirmed
+            // An appearance whose write has not landed leaves the flag and the
+            // granular overlay alone too: they describe where the composite
+            // resolved from, and the response predates the queued edit.
+            if (PlaybackSettingsKeys.SubtitleAppearance in unlandedKeys) return@edit
+            // The override flag mirrors where the subtitle appearance
+            // actually resolved from. Clearing it when the value no longer
+            // comes from this device keeps a previous session's flag from
+            // surviving a server-side reset.
+            val subtitleEntry = effective[PlaybackSettingsKeys.SubtitleAppearance]
+            val hasDeviceOverride = subtitleEntry?.scope == SettingScope.PROFILE_DEVICE.wire
+            prefs[booleanPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.SubtitleUsesDeviceOverride)] =
+                hasDeviceOverride
+            if (subtitleEntry != null) {
+                // The granular slots are an overlay on the composite, so a
+                // resolved appearance has to be flattened back into them. Left
+                // alone, the previous device's field values would win over the
+                // value the server just said applies.
+                writeGranularAppearance(
+                    prefs,
+                    scope,
+                    SubtitleAppearance.decode(subtitleEntry.value.toString()),
+                )
+                if (hasDeviceOverride) {
+                    prefs[stringPreferencesKey(scope.keyPrefix + SAVED_CUSTOM_SUBTITLE_APPEARANCE)] =
+                        subtitleEntry.value.toString()
+                }
+            }
+        }
+        return applied
+    }
+
+    /**
+     * Writes one typed JSON value from the canonical effective response into
+     * the local slot each flow reads: booleans and ints natively, doubles as
+     * their string spelling, objects as their JSON document, JSON null as the
+     * empty string (the local spelling of "no preference"), and everything
+     * else as the primitive's content.
+     */
+    private fun writeJsonValue(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+        scope: Scope,
+        key: String,
+        value: JsonElement,
+    ) {
+        val scopedName = scope.keyPrefix + key
+        when {
+            isBooleanKey(key) -> (value as? JsonPrimitive)?.booleanOrNull?.let {
+                prefs[booleanPreferencesKey(scopedName)] = it
+            }
+            isIntKey(key) -> {
+                // A nullable int (max_bitrate_kbps) resolving to null means
+                // "no cap", which the store spells as 0. Skipping the write
+                // instead would leave a previous cap in place and quietly keep
+                // throttling playback the server just said to stop throttling.
+                val resolved = (value as? JsonPrimitive)?.intOrNull
+                    ?: if (value is JsonNull && key in NULLABLE_INT_SETTINGS) 0 else null
+                resolved?.let { prefs[intPreferencesKey(scopedName)] = it }
+            }
+            isDoubleKey(key) -> (value as? JsonPrimitive)?.doubleOrNull?.let {
+                prefs[stringPreferencesKey(scopedName)] = it.toString()
+            }
+            value is JsonNull -> prefs[stringPreferencesKey(scopedName)] = ""
+            value is JsonObject -> prefs[stringPreferencesKey(scopedName)] = value.toString()
+            value is JsonPrimitive -> prefs[stringPreferencesKey(scopedName)] = value.content
+            else -> prefs[stringPreferencesKey(scopedName)] = value.toString()
+        }
+    }
+
+    private fun writeRawString(prefs: androidx.datastore.preferences.core.MutablePreferences, scope: Scope, key: String, raw: String) {
+        val scopedName = scope.keyPrefix + key
+        when {
+            isBooleanKey(key) -> raw.toBooleanStrictOrNull()?.let {
+                prefs[booleanPreferencesKey(scopedName)] = it
+            }
+            isIntKey(key) -> raw.toIntOrNull()?.let {
+                prefs[intPreferencesKey(scopedName)] = it
+            }
+            isDoubleKey(key) -> raw.toDoubleOrNull()?.let {
+                prefs[stringPreferencesKey(scopedName)] = it.toString()
+            }
+            else -> prefs[stringPreferencesKey(scopedName)] = raw
+        }
+    }
+
+    private suspend fun writeBool(key: String, value: Boolean) {
+        withScope { scope, store ->
+            store.edit {
+                it[booleanPreferencesKey(scope.keyPrefix + key)] = value
+                markDeviceOverride(it, scope, key)
+            }
+            serverSettingsFlusher.enqueue(scope.profileId, key, value.toString(), scope.serverUrl, scope.authority)
+        }
+    }
+
+    private suspend fun writeInt(key: String, value: Int) {
+        withScope { scope, store ->
+            store.edit {
+                it[intPreferencesKey(scope.keyPrefix + key)] = value
+                markDeviceOverride(it, scope, key)
+            }
+            serverSettingsFlusher.enqueue(scope.profileId, key, value.toString(), scope.serverUrl, scope.authority)
+        }
+    }
+
+    /**
+     * Persist an Int that the server does not know about: write the scoped
+     * DataStore slot only, with NO server flush. Used for keys absent from
+     * [PlaybackSettingsKeys.DeviceSettings] so an unknown-key flush can't be
+     * rejected or poison a batch.
+     */
+    private suspend fun writeIntLocal(key: String, value: Int) {
+        withScope { scope, store ->
+            store.edit { it[intPreferencesKey(scope.keyPrefix + key)] = value }
+        }
+    }
+
+    private suspend fun writeBoolLocal(key: String, value: Boolean) {
+        withScope { scope, store ->
+            store.edit { it[booleanPreferencesKey(scope.keyPrefix + key)] = value }
+        }
+    }
+
+    private suspend fun writeStringLocal(key: String, value: String) {
+        withScope { scope, store ->
+            store.edit { it[stringPreferencesKey(scope.keyPrefix + key)] = value }
+        }
+    }
+
+    private suspend fun writeString(key: String, value: String) {
+        withScope { scope, store ->
+            store.edit {
+                it[stringPreferencesKey(scope.keyPrefix + key)] = value
+                markDeviceOverride(it, scope, key)
+            }
+            serverSettingsFlusher.enqueue(scope.profileId, key, value, scope.serverUrl, scope.authority)
+        }
+    }
+
+    override suspend fun importLegacyDeviceSettings(
+        authority: org.siloserver.silo.network.AuthScopeSnapshot,
+        values: Map<String, String>,
+    ): Boolean {
+        val repository = settingsRepository ?: return false
+        suspend fun current(): Boolean {
+            val now = getAuthScope()
+            return authority.isSameIdentityAs(now) && authority.profileId == now?.profileId && authority.profileToken == now?.profileToken
+        }
+        if (!current()) return false
+        val profileId = authority.profileId ?: return false
+        val deviceId = getDeviceId()?.takeIf { it.isNotBlank() } ?: return false
+        val scope = Scope(profileId, authority.serverUrl, deviceId, authority, authority.accountId)
+        val store = storeFor(scope)
+        if (!current()) return false
+        ensureMigrated(scope, store, ::current)
+        for ((key, raw) in values) {
+            if (!current()) return false
+            val encoded = encodeSettingWireValue(key, raw) ?: return false
+            if (repository.setMigrationDeviceValue(key, encoded, authority) !is ApiResult.Success) return false
+            if (!current()) return false
+            store.edit { prefs ->
+                if (!current()) return@edit
+                writeRawString(prefs, scope, key, raw)
+                // The server now holds it at device scope, so it shows as this
+                // device's own even before a refresh confirms it.
+                markDeviceOverride(prefs, scope, key)
+                if (key == PlaybackSettingsKeys.SubtitleAppearance) {
+                    val appearance = SubtitleAppearance.decode(raw).sanitized()
+                    prefs[stringPreferencesKey(scope.keyPrefix + SAVED_CUSTOM_SUBTITLE_APPEARANCE)] = raw
+                    writeGranularAppearance(prefs, scope, appearance)
+                    prefs[booleanPreferencesKey(scope.keyPrefix + PlaybackSettingsKeys.SubtitleUsesDeviceOverride)] = true
+                }
+            }
+        }
+        return current()
+    }
+
+    private fun deviceOverridesKey(scope: Scope): Preferences.Key<Set<String>> =
+        stringSetPreferencesKey(scope.keyPrefix + DEVICE_OVERRIDE_KEYS)
+
+    private fun unconfirmedKeysKey(scope: Scope): Preferences.Key<Set<String>> =
+        stringSetPreferencesKey(scope.keyPrefix + UNCONFIRMED_GATED_KEYS)
+
+    /** [key]'s value in this scope, spelled as the flusher takes it, or null when unset. */
+    private fun Preferences.localWireValue(scope: Scope, key: String): String? {
+        val scopedName = scope.keyPrefix + key
+        return when {
+            isBooleanKey(key) -> this[booleanPreferencesKey(scopedName)]?.toString()
+            isIntKey(key) -> this[intPreferencesKey(scopedName)]?.toString()
+            else -> this[stringPreferencesKey(scopedName)]
+        }
+    }
+
+    /** Records that this device now holds its own value for [keys]. */
+    private fun markDeviceOverride(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+        scope: Scope,
+        vararg keys: String,
+    ) {
+        val remote = keys.filter { it in RemoteDeviceSettings }
+        if (remote.isEmpty()) return
+        prefs[deviceOverridesKey(scope)] = prefs[deviceOverridesKey(scope)].orEmpty() + remote
+    }
+
+    private fun clearDeviceOverride(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+        scope: Scope,
+        vararg keys: String,
+    ) {
+        prefs[deviceOverridesKey(scope)] = prefs[deviceOverridesKey(scope)].orEmpty() - keys.toSet()
+    }
+
+    private suspend inline fun withScope(
+        block: (scope: Scope, store: DataStore<Preferences>) -> Unit,
+    ) {
+        val scope = currentScope() ?: return
+        val store = storeFor(scope)
+        ensureMigrated(scope, store)
+        block(scope, store)
+    }
+
+    // Read a value at `scope.keyPrefix + baseKey`, falling back to the
+    // unscoped legacy key when the scoped slot is absent. `Preferences`
+    // can't store nulls, so a null lookup means "not set" — no
+    // `contains` probe needed.
+    private inline fun <T> Preferences.scopedRead(
+        scope: Scope,
+        baseKey: String,
+        default: T,
+        keyOf: (String) -> Preferences.Key<T>,
+    ): T {
+        this[keyOf(scope.keyPrefix + baseKey)]?.let { return it }
+        if (scope.keyPrefix.isNotEmpty()) {
+            this[keyOf(baseKey)]?.let { return it }
+        }
+        return default
+    }
+
+    private fun Preferences.boolFor(scope: Scope, baseKey: String, default: Boolean): Boolean =
+        scopedRead(scope, baseKey, default, ::booleanPreferencesKey)
+
+    private fun Preferences.intFor(scope: Scope, baseKey: String, default: Int): Int =
+        scopedRead(scope, baseKey, default, ::intPreferencesKey)
+
+    private fun Preferences.stringFor(scope: Scope, baseKey: String, default: String): String =
+        scopedRead(scope, baseKey, default, ::stringPreferencesKey)
+
+    /**
+     * The composite appearance with the granular, client-local `subtitle.*`
+     * slots merged over it.
+     *
+     * The contract has no definitions for the granular fields, so they never
+     * leave the device on their own — but a per-field edit still has to reach
+     * the server, and this is where the two representations are reconciled.
+     * Merging is sparse (an absent or unparseable field leaves the composite's
+     * value alone), matching the schema's own rule for a stored appearance.
+     */
+    private fun Preferences.projectedAppearance(scope: Scope): SubtitleAppearance {
+        val base = SubtitleAppearance.decode(
+            stringFor(scope, PlaybackSettingsKeys.SubtitleAppearance, ""),
+        )
+        val granular = SubtitleAppearanceProjection.GRANULAR_KEYS.associateWith { key ->
+            when {
+                isBooleanKey(key) ->
+                    this[booleanPreferencesKey(scope.keyPrefix + key)]?.toString()
+                        ?: this[booleanPreferencesKey(key)]?.toString()
+                isIntKey(key) ->
+                    this[intPreferencesKey(scope.keyPrefix + key)]?.toString()
+                        ?: this[intPreferencesKey(key)]?.toString()
+                else -> stringFor(scope, key, "").takeIf { it.isNotBlank() }
+            }
+        }
+        return SubtitleAppearanceProjection.project(granular, base)
+    }
+
+    private companion object {
+        const val SAVED_CUSTOM_SUBTITLE_APPEARANCE = "subtitle_appearance.saved_custom"
+        /**
+         * Local-only: the server-stored keys this device holds its own value
+         * for. Set by every write from here and corrected by every refresh,
+         * which says where each value resolved from.
+         */
+        const val DEVICE_OVERRIDE_KEYS = "device_override_keys"
+        /**
+         * Local-only: keys some servers lack ([SettingsContractRevision.stores])
+         * this device set but no refresh has yet shown stored for it. The
+         * flusher drops them for an older server; this is what sends them once
+         * the server can store them.
+         */
+        const val UNCONFIRMED_GATED_KEYS = "unconfirmed_gated_keys"
+        const val MIGRATION_SENTINEL_LEGACY = "migration_v1"
+        const val MISSING_SENTINEL = "__missing__"
+        // F1/F2 local-only defaults (mirror DefaultResumeRewindSeconds=7.0 and
+        // the previous hardcoded AutoPlayGuard threshold of 3).
+        const val DEFAULT_RESUME_REWIND_SECONDS = 7
+        const val DEFAULT_PASSOUT_THRESHOLD = 3
+        // The contract's playback.max_bitrate_kbps bounds; a value outside
+        // them is rejected as invalid_value and the flush would be dropped.
+        const val MIN_BITRATE_KBPS = 100
+        const val MAX_BITRATE_KBPS = 200_000
+        val VALID_VIDEO_GRAVITY = setOf("fit", "fill", "stretch")
+
+        // Type classification comes from the generated contract rather than a
+        // hand-kept list. This used to be a second table that had to agree with
+        // PlaybackSettingsKeys.DeviceSettings by discipline alone; a key added
+        // to one and missed in the other would flush as the wrong type and be
+        // silently dropped on read.
+        //
+        // The extras below are the granular subtitle appearance fields Android
+        // flattens locally. The contract carries them as one composite object
+        // (playback.subtitle_appearance), so they have no generated entry and
+        // are listed here as the local-only values they are.
+        /**
+         * The device-relevant keys the canonical batched endpoint can
+         * answer: the store's device set minus the granular subtitle.*
+         * fields Android flattens locally (the contract carries those as
+         * the one composite playback.subtitle_appearance object, so the
+         * resolver has no definitions for them).
+         */
+        val RemoteDeviceSettings: List<String> = SettingKeys.REMOTE.toSet().let { remote ->
+            PlaybackSettingsKeys.DeviceSettings.filter { it in remote }
+        }
+
+        val BOOLEAN_KEYS: Set<String> = SettingKeys.BOOLEAN_KEYS +
+            setOf(PlaybackSettingsKeys.SubtitleTextOutline)
+
+        val INT_KEYS: Set<String> = SettingKeys.INT_KEYS +
+            setOf(PlaybackSettingsKeys.SubtitleBackgroundOpacity)
+
+        val DOUBLE_KEYS: Set<String> = SettingKeys.DOUBLE_KEYS
+
+        /** Int keys whose contract null means "no cap", stored locally as 0. */
+        val NULLABLE_INT_SETTINGS: Set<String> = setOf(
+            SettingKeys.PLAYBACK_MAX_BITRATE_KBPS,
+            SettingKeys.PLAYBACK_CELLULAR_MAX_BITRATE_KBPS,
+        )
+
+        fun isBooleanKey(key: String): Boolean = key in BOOLEAN_KEYS
+        fun isIntKey(key: String): Boolean = key in INT_KEYS
+        fun isDoubleKey(key: String): Boolean = key in DOUBLE_KEYS
+
+        /** Per (account, profile); `AccountLocalData` adopts and purges these files. */
+        const val FILE_BASE = "silo_player_settings"
+
+        fun fileNameFor(accountId: String?, profileId: String): String =
+            AccountScopedKeys.profileFileName(FILE_BASE, accountId, profileHash(profileId))
+
+        fun profileHash(profileId: String): String =
+            sha256Hex(profileId).take(16)
+
+        fun sha256Hex(s: String): String =
+            java.security.MessageDigest.getInstance("SHA-256")
+                .digest(s.toByteArray(Charsets.UTF_8))
+                .joinToString(separator = "") { "%02x".format(it) }
+    }
+}
