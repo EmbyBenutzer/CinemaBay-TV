@@ -1064,6 +1064,15 @@ private fun TvGeneralSettingsPane(
         contentPadding = PaddingValues(bottom = Spacing.xxxl),
     ) {
         item {
+            SettingsGroup(title = "CinemaBay") {
+                SettingsValueRow(
+                    label = "App-Updates und Versionsverlauf",
+                    value = BuildConfig.VERSION_NAME,
+                    onClick = { org.siloserver.silo.tv.update.CinemaBayUpdateActivity.open(startupContext) },
+                )
+            }
+        }
+        item {
             // tvOS General → PROFILE AT LAUNCH. Device-wide and never synced,
             // so it reads the same whichever profile is active.
             SettingsGroup(title = stringResource(CommonR.string.settings_section_profileLaunch)) {

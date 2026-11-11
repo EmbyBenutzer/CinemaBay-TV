@@ -42,7 +42,7 @@ Bearbeitet am 10. November 2026.
 
   Android-Launcher koennen eine eigene Hintergrundflaeche oder Maske darstellen.
 
-- Lokale Version 0.1.2-cinemabay, TV-versionCode 27.
+- Lokale Version 0.1.3-cinemabay, TV-versionCode 29.
 
 - Hilfstexte der Einstellungen sind groesser und kontrastreicher;
 
@@ -188,3 +188,8 @@ Serien-Cover zeigen unten links die Anzahl verfügbarer Folgen sowie die im aktu
 ## CinemaBay 0.1.2: Episoden mit Serien-Cover
 
 Auch Episoden-Kacheln zeigen jetzt die Gesamtzahl und den gesehenen Stand ihrer über series_id zugeordneten Serie. Eine Episode ohne Serienzuordnung bekommt keine erfundene Gesamtzahl. Filmkacheln bleiben ohne Serienanzeige.
+
+
+## CinemaBay 0.1.3: App-Updates
+
+Automatischer Update-Hinweis auf der Startseite und Update-Seite unter Einstellungen → Allgemein. Stabile GitHub-Releases aus EmbyBenutzer/CinemaBay-TV liefern neue APKs und Versionshinweise. Historische Änderungen bleiben auch ohne Verbindung sichtbar. Download startet nur nach Auswahl, mit Größen-, SHA-256-, Paket-, Mindest-Android-, Versionscode- und Signaturprüfung. FileProvider gibt ausschließlich lesenden Zugriff auf den privaten Update-Ordner. REQUEST_INSTALL_PACKAGES ist deklariert; ab Android 8 erfolgt die Freigabe über die Android-Systemseite. Installation ausschließlich über den bestätigten Systemdialog, ohne stille Installation. Keine Speicher-/Vollzugriffsberechtigung und keine Silo-Serveränderung.

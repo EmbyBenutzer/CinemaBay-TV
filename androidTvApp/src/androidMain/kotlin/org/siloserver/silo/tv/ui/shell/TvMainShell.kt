@@ -1728,6 +1728,12 @@ fun TvMainShell(
             )
         }
 
+        if (selectedRoot == TvRootDestination.Home) {
+            org.siloserver.silo.tv.update.CinemaBayUpdateNotice(
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 92.dp, end = 44.dp),
+            )
+        }
+
         // Persistent cascade overlays (tvOS `persistentPanels`): one Box per
         // visible library-type tab, ALWAYS in the tree. Inactive panels are
         // alpha-0 and focus-blocked; the active one fades in and accepts focus.

@@ -27,7 +27,7 @@ val siloVersionName = providers
     .orElse(providers.environmentVariable("SILO_VERSION_NAME"))
     // Release builds get the store version from scripts/release-version.py
     // (release.yml). Local builds are 0.0.0 so they never pass for a release.
-    .orElse("0.1.2-cinemabay")
+    .orElse("0.1.3-cinemabay")
 
 // The build number: one counter for the repository, never reset (see
 // scripts/release-version.py). It is folded into the versionCode by CI, but the
@@ -79,7 +79,7 @@ val siloVersionCode = providers
     }
     // Release builds get the base code from scripts/release-version.py
     // (release.yml); phone = base*2, TV = base*2+1. Local builds use base 1.
-    .orElse(13)
+    .orElse(14)
 
 // See androidApp/build.gradle.kts: APK ABI splits break the App Bundle build,
 // so disable them whenever a bundle task is invoked.
