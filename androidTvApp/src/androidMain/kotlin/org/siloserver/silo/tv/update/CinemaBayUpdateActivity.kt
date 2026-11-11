@@ -109,6 +109,7 @@ class CinemaBayUpdateActivity : ComponentActivity() {
 }
 
 internal val cinemaBayBundledHistory=listOf(
+    CinemaBayRelease("0.1.4","Eigener Kalender für redaktionell belegte deutsche Synchro-Premieren einzelner Folgen. Filter für alle bestätigten Termine, Streaming und TV. Quellenbelege direkt am Termin; separat aktualisierbarer Feed. Keine ungeprüften Originaltermine, OmU oder Wiederholungen. Der Startbestand ist eine gepflegte Auswahl, kein vollständiger Serienkalender."),
     CinemaBayRelease("0.1.3","App-Updates direkt in CinemaBay: Hinweis auf der Startseite, Update-Prüfung, Download und Installation über die Einstellungen. Versionsverlauf mit alten und neuen Änderungen. Geprüfte Downloads aus dem CinemaBay-GitHub-Repository; Installationsfreigabe über Android."),
     CinemaBayRelease("0.1.2","Folgenzahlen und persönlicher Wiedergabestand erscheinen auch auf Episoden-Kacheln mit Serien-Cover. Dafür wird die übergeordnete Serie verwendet."),
     CinemaBayRelease("0.1.1","Serien-Cover zeigen verfügbare und vollständig gesehene Folgen im aktuellen Profil, einschließlich Specials. Verzögerte Abfragen mit höchstens zwei gleichzeitigen Anfragen."),

@@ -123,30 +123,16 @@ import org.siloserver.silo.tv.ui.theme.Spacing
 import org.siloserver.silo.tv.ui.theme.TvSmoothBringIntoViewSpec
 import org.siloserver.silo.tv.ui.theme.cardScaled
 import org.siloserver.silo.tv.ui.theme.siloCardDefaults
-import org.siloserver.silo.viewmodel.CalendarViewModel
+import org.siloserver.silo.tv.calendar.CinemaBayGermanCalendarViewModel
+import org.siloserver.silo.tv.calendar.CinemaBayGermanCalendarProof
+import org.siloserver.silo.tv.R
 import org.siloserver.silo.common.i18n.isRightToLeftText
 
 /**
- * TV calendar / upcoming screen. Reuses the shared [CalendarViewModel] that
- * drives the phone Calendar screen (week-bucketed releases from
- * `GET /api/v1/calendar`). Rebuilt to match the silo-apple tvOS Calendar:
- *
- *  - A single segmented Following / Trending / All capsule (one container, the
- *    selected segment filled), matching tvOS without an Android-only rail.
- *  - A focusable week strip: prev/next chevrons around seven day cells (weekday
- *    + day number + an event-dot when the day has releases), a selected-day
- *    highlight independent of "today", a "Today" jump, and a trailing
- *    "June 2026" month-year label. Selecting a day scrolls the day list to that
- *    shelf and hands focus to its first card.
- *  - A vertical stack of per-day shelves: each day is a heading ("Today" /
- *    "Monday, June 9") over a HORIZONTAL row (LazyRow) of portrait poster
- *    cards. Event-less days render a "Nothing scheduled" stub so the week keeps
- *    its shape and every day is a scroll target.
- *  - Whole-screen empty state with focusable links to the other two views and
- *    a view-specific title.
- *
- * Mirrors [org.siloserver.silo.tv.ui.screens.recommendations.TvRecommendationsScreen]
- * for the koinViewModel + initial-focus-once pattern.
+ * CinemaBay TV calendar backed only by editorially confirmed German dub premieres.
+ * Reuses the existing week controls, shelves and focus handling. The phone calendar
+ * keeps its original server-backed ViewModel. Public feed records open a source
+ * proof dialog and are never routed as invented Silo library identities.
  */
 internal data class TvCalendarDetailTarget(
     val contentId: String,
@@ -170,7 +156,7 @@ internal fun tvCalendarDetailTarget(item: CalendarItem): TvCalendarDetailTarget 
 
 @OptIn(ExperimentalTvMaterial3Api::class, kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 @Composable
-fun TvCalendarScreen(
+internal fun TvCalendarScreen(
     onOpenItemDetailSelection: (
         contentId: String,
         seasonNumber: Int?,
@@ -180,9 +166,15 @@ fun TvCalendarScreen(
     onMoveUpToMenu: () -> Unit = {},
     focusRequest: Int = 0,
     onContentUpFallbackChanged: ((((Boolean) -> Boolean)?) -> Unit)? = null,
-    viewModel: CalendarViewModel = koinViewModel(),
+    viewModel: CinemaBayGermanCalendarViewModel = koinViewModel(),
 ) {
     val state by viewModel.uiState.collectAsState()
+    val sourceStatus by viewModel.sourceStatus.collectAsState()
+    var selectedProof by remember { mutableStateOf<String?>(null) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    selectedProof?.let { id -> viewModel.entry(id)?.let { release ->
+        CinemaBayGermanCalendarProof(release) { selectedProof = null }
+    } }
 
     // First focusable element is the segmented filter capsule so the D-pad
     // lands there when the Calendar tab swaps in; gate the jump so a silent
@@ -231,7 +223,7 @@ fun TvCalendarScreen(
     var returnPending by rememberSaveable { mutableStateOf(false) }
     // Bumped when the destination resumes, whether or not it was recreated.
     var resumeGeneration by remember { mutableIntStateOf(0) }
-    CalendarResumeSignal { resumeGeneration++ }
+    CalendarResumeSignal { resumeGeneration++; viewModel.load() }
     // What the restoration is waiting to see take focus, and what last did.
     // Confirmation is by identity: having called requestFocus() is not evidence
     // that anything received it.
@@ -432,6 +424,7 @@ fun TvCalendarScreen(
 
             val controls: @Composable ((CalendarControlFocusZone) -> Unit) -> Unit = { onControlFocused ->
                 CalendarControls(
+                    sourceStatus = sourceStatus,
                     selectedFilter = state.filter,
                     weekDates = state.weekDates,
                     today = state.today,
@@ -526,9 +519,14 @@ fun TvCalendarScreen(
                     }
                 },
                 onItemClicked = { date, item, index ->
-                    recordReturnTarget(date, item, index)
+                    if (!item.contentId.startsWith("cinemabay-de:")) recordReturnTarget(date, item, index)
                 },
-                onOpenItemDetailSelection = onOpenItemDetailSelection,
+                onOpenItemDetailSelection = { id, season, episode ->
+                    if (id.startsWith("cinemabay-de:")) {
+                        if (viewModel.entry(id) != null) selectedProof = id
+                        else android.widget.Toast.makeText(context, "Dieser Beleg ist nicht mehr gültig. Bitte aktualisieren.", android.widget.Toast.LENGTH_LONG).show()
+                    } else onOpenItemDetailSelection(id, season, episode)
+                },
             )
         }
     }
@@ -536,6 +534,7 @@ fun TvCalendarScreen(
 
 @Composable
 private fun CalendarControls(
+    sourceStatus: String,
     selectedFilter: String,
     weekDates: List<String>,
     today: String,
@@ -568,6 +567,8 @@ private fun CalendarControls(
             ),
         verticalArrangement = Arrangement.spacedBy(Spacing.md),
     ) {
+        Text(stringResource(R.string.cinemabay_calendar_title), color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+        Text(sourceStatus, color = Color.LightGray, fontSize = 12.sp)
         CalendarControlRow(
             selectedFilter = selectedFilter,
             onSelectFilter = onSelectFilter,
@@ -636,9 +637,9 @@ private fun FilterBar(
     onControlFocused: (CalendarControlFocusZone) -> Unit,
 ) {
     val presets = listOf(
-        CalendarFilter.Following to stringResource(CommonR.string.calendar_filter_following),
-        CalendarFilter.Trending to stringResource(CommonR.string.calendar_filter_trending),
-        CalendarFilter.All to stringResource(CommonR.string.calendar_filter_all),
+        CalendarFilter.Following to stringResource(R.string.cinemabay_calendar_all),
+        CalendarFilter.Trending to stringResource(R.string.cinemabay_calendar_streaming),
+        CalendarFilter.All to stringResource(R.string.cinemabay_calendar_tv),
     )
     Row(
         modifier = Modifier
@@ -1182,7 +1183,7 @@ private fun CalendarList(
                 Box(modifier = Modifier.fillParentMaxHeight()) {
                     CalendarMessage(
                         title = state.error?.text() ?: stringResource(CommonR.string.calendar_error_loadFailed),
-                        subtitle = stringResource(CommonR.string.calendar_error_tryAnotherWeek),
+                        subtitle = stringResource(R.string.cinemabay_calendar_error_body),
                         actions = listOf(CalendarAction(stringResource(CommonR.string.states_refresh), onRefresh)),
                         onActionFocused = clearControlFocusZone,
                     )
@@ -1690,22 +1691,22 @@ private fun cardSubtitle(item: CalendarItem): String? {
 private fun emptyStateLinks(filter: String): List<Pair<String, Int>> {
     val view = if (filter == CalendarFilter.Everything) CalendarFilter.All else filter
     return listOf(
-        CalendarFilter.Following to CommonR.string.calendar_filter_following,
-        CalendarFilter.Trending to CommonR.string.calendar_filter_trending,
-        CalendarFilter.All to CommonR.string.calendar_filter_all,
+        CalendarFilter.Following to R.string.cinemabay_calendar_all,
+        CalendarFilter.Trending to R.string.cinemabay_calendar_streaming,
+        CalendarFilter.All to R.string.cinemabay_calendar_tv,
     ).filter { (value, _) -> value != view }
 }
 
 private fun emptyTitle(filter: String): Int = when (filter) {
-    CalendarFilter.Following -> CommonR.string.calendar_empty_following
-    CalendarFilter.Trending -> CommonR.string.calendar_empty_trending
-    else -> CommonR.string.calendar_empty_everything
+    CalendarFilter.Following -> R.string.cinemabay_calendar_empty
+    CalendarFilter.Trending -> R.string.cinemabay_calendar_empty
+    else -> R.string.cinemabay_calendar_empty
 }
 
 private fun emptyCopy(filter: String): Int = when (filter) {
-    CalendarFilter.Following -> CommonR.string.calendar_empty_followingBody
-    CalendarFilter.Trending -> CommonR.string.calendar_empty_trendingReleasesBody
-    else -> CommonR.string.calendar_empty_everythingBody
+    CalendarFilter.Following -> R.string.cinemabay_calendar_empty_body
+    CalendarFilter.Trending -> R.string.cinemabay_calendar_empty_body
+    else -> R.string.cinemabay_calendar_empty_body
 }
 
 /** The filter/week control shell occupies list slot zero, ahead of every day. */

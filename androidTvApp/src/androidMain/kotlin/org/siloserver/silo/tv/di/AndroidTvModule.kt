@@ -576,15 +576,8 @@ val androidTvModule = module {
     }
     viewModel { RequestSearchViewModel(get()) }
     viewModel { params -> MyRequestsViewModel(get(), loadOnInit = params.getOrNull<Boolean>() ?: true, featureStore = get()) }
-    // Platform supplies "today" and the IANA timezone; the shared ViewModel's
-    // week math stays deterministic in commonTest (no Clock.System default).
-    viewModel {
-        CalendarViewModel(
-            repository = get(),
-            timezoneId = java.util.TimeZone.getDefault().id,
-            todayProvider = { java.time.LocalDate.now().toString() },
-        )
-    }
+    single { org.siloserver.silo.tv.calendar.CinemaBayGermanCalendarRepository(androidContext()) }
+    viewModel { org.siloserver.silo.tv.calendar.CinemaBayGermanCalendarViewModel(get()) }
     viewModel { org.siloserver.silo.tv.ui.screens.browse.TvBrowseViewModel(get()) }
     viewModel { params ->
         org.siloserver.silo.tv.ui.screens.people.TvPersonDetailViewModel(

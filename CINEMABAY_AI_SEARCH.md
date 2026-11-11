@@ -11,7 +11,7 @@ Dieses Verzeichnis mit `settings.gradle.kts` in Android Studio öffnen, die Grad
 .\gradlew.bat :androidTvApp:testDebugUnitTest --tests "*CinemaBaySearch*" --tests "*TvSearch*"
 ```
 
-APK-Version: `0.1.3-cinemabay`, Android-versionCode `29`, Paket-ID weiterhin `de.cinemabay.tv`. Die separat gelieferte optimierte Update-APK verwendet denselben Update-Schlüssel wie CinemaBay 0.0.9. Das Projekt enthält keine privaten Signierschlüssel. Ohne konfigurierte Release-Signierung verwendet die bestehende Gradle-Konfiguration den lokalen Debug-Schlüssel.
+APK-Version: `0.1.4-cinemabay`, Android-versionCode `31`, Paket-ID weiterhin `de.cinemabay.tv`. Die separat gelieferte optimierte Update-APK verwendet denselben Update-Schlüssel wie CinemaBay 0.0.9. Das Projekt enthält keine privaten Signierschlüssel. Ohne konfigurierte Release-Signierung verwendet die bestehende Gradle-Konfiguration den lokalen Debug-Schlüssel.
 
 ## Bedienung
 

@@ -10,6 +10,8 @@ Android TV ab Android 7.0. Paket-ID: `de.cinemabay.tv`.
 
 ## Funktionen
 
+- [Deutscher Synchro-Kalender](calendar/README.md): ausschließlich einzeln belegte neue Episoden. Redaktionelle Auswahl, keine vollständige Anbieterübersicht. Startbestand: 36 Folgen aus drei Serien in vergangenen Wochen. Ohne bestätigte Termine bleibt eine Woche leer.
+
 - App-Updates mit Startseiten-Hinweis, geprüftem Download, Android-Installation und Versionsverlauf unter Einstellungen → Allgemein.
 
 - CinemaBay-Design mit eigenem App-Icon, TV-Banner und optionalem Startintro.
@@ -22,9 +24,9 @@ Benötigt einen passenden Silo-Server und eine vorhandene Medienbibliothek. Dies
 
 ## Aktuelle Version
 
-`0.1.3-cinemabay`, Android-versionCode `29`.
+`0.1.4-cinemabay`, Android-versionCode `31`.
 
-Release-Build und 66 ausgewählte Tests bestanden. Die Cover-Anzeige wurde auf einer Xiaomi Android-TV-Box visuell geprüft. Keine vollständige Prüfung aller Funktionen oder aller Geräte. Die APK verwendet derzeit denselben Android-Debug-Signierschlüssel wie die bisherigen privaten CinemaBay-Versionen; private Signierschlüssel werden nicht mitgeliefert.
+Release-Build und 88 ausgewählte Tests bestanden. Kalenderwochen, Folgen und Quellenbeleg wurden auf einer Xiaomi Android-TV-Box visuell geprüft. Keine vollständige Prüfung aller Funktionen oder aller Geräte. Die APK verwendet derzeit denselben Android-Debug-Signierschlüssel wie die bisherigen privaten CinemaBay-Versionen; private Signierschlüssel werden nicht mitgeliefert.
 
 ## In Android Studio öffnen
 

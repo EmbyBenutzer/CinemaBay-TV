@@ -42,7 +42,7 @@ Bearbeitet am 10. November 2026.
 
   Android-Launcher koennen eine eigene Hintergrundflaeche oder Maske darstellen.
 
-- Lokale Version 0.1.3-cinemabay, TV-versionCode 29.
+- Lokale Version 0.1.4-cinemabay, TV-versionCode 31.
 
 - Hilfstexte der Einstellungen sind groesser und kontrastreicher;
 
@@ -193,3 +193,8 @@ Auch Episoden-Kacheln zeigen jetzt die Gesamtzahl und den gesehenen Stand ihrer 
 ## CinemaBay 0.1.3: App-Updates
 
 Automatischer Update-Hinweis auf der Startseite und Update-Seite unter Einstellungen → Allgemein. Stabile GitHub-Releases aus EmbyBenutzer/CinemaBay-TV liefern neue APKs und Versionshinweise. Historische Änderungen bleiben auch ohne Verbindung sichtbar. Download startet nur nach Auswahl, mit Größen-, SHA-256-, Paket-, Mindest-Android-, Versionscode- und Signaturprüfung. FileProvider gibt ausschließlich lesenden Zugriff auf den privaten Update-Ordner. REQUEST_INSTALL_PACKAGES ist deklariert; ab Android 8 erfolgt die Freigabe über die Android-Systemseite. Installation ausschließlich über den bestätigten Systemdialog, ohne stille Installation. Keine Speicher-/Vollzugriffsberechtigung und keine Silo-Serveränderung.
+
+
+## CinemaBay 0.1.4: Belegter deutscher Synchro-Kalender
+
+Der TV-Kalender nutzt einen eigenen, separat gepflegten Bestätigungsfeed. Nur einzelne Episoden mit ausdrücklich belegter deutscher Synchron-Premiere und Datum werden angezeigt; keine Filme, OmU, Wiederholungen oder allgemeinen Originaltermine. Termine öffnen einen Quellenbeleg statt einer erfundenen Silo-ID. Filter: Alle bestätigt / Streaming / TV. 36 konkrete Starttermine für drei Serien aus offiziellen ADN-Meldungen; keine Vollständigkeitszusage. Datenpflege und Quellen stehen in calendar/README.md. Phone und Silo-Server bleiben unverändert.

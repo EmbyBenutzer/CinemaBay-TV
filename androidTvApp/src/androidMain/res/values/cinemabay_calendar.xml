@@ -1,0 +1,9 @@
+<resources>
+    <string name="cinemabay_calendar_all">Alle bestätigt</string>
+    <string name="cinemabay_calendar_streaming">Streaming</string>
+    <string name="cinemabay_calendar_tv">TV</string>
+    <string name="cinemabay_calendar_title">Deutsche Synchro · bestätigte neue Folgen</string>
+    <string name="cinemabay_calendar_empty">Keine belegten deutschen Synchro-Premieren in dieser Woche</string>
+    <string name="cinemabay_calendar_empty_body">Nur redaktionell belegte Folgen mit bestätigtem deutschen Termin. Kein Ersatz durch Originaltermine, OmU oder Wiederholungen. Andere Wochen können bestätigte Einträge enthalten.</string>
+    <string name="cinemabay_calendar_error_body">Ohne gültigen Bestätigungsfeed werden keine Termine als bestätigt angezeigt.</string>
+</resources>
