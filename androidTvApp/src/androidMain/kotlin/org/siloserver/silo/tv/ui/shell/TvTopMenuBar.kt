@@ -620,7 +620,7 @@ fun TvTopMenuBar(
                     )
 
                     TvRootDestination.Calendar -> TvTopMenuTab(
-                        label = stringResource(CommonR.string.topBar_calendar),
+                        label = "Highlights",
                         isSelected = selectedRoot == TvRootDestination.Calendar,
                         isFocused = focusedButton == TvTopMenuFocus.Calendar,
                         canFocus = canFocusButton(TvTopMenuFocus.Calendar),

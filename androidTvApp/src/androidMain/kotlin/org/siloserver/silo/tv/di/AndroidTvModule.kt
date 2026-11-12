@@ -44,7 +44,6 @@ import org.siloserver.silo.tv.ui.screens.player.TvPlayerLaunchArgs
 import org.siloserver.silo.tv.ui.screens.auth.TvLoginViewModel
 import org.siloserver.silo.tv.ui.screens.auth.TvServerSetupViewModel
 import org.siloserver.silo.tv.ui.screens.collections.TvCollectionDetailViewModel
-import org.siloserver.silo.viewmodel.CalendarViewModel
 import org.siloserver.silo.viewmodel.CollectionsViewModel
 import org.siloserver.silo.tv.ui.screens.detail.TvItemDetailViewModel
 import org.siloserver.silo.viewmodel.HomeViewModel
@@ -576,8 +575,6 @@ val androidTvModule = module {
     }
     viewModel { RequestSearchViewModel(get()) }
     viewModel { params -> MyRequestsViewModel(get(), loadOnInit = params.getOrNull<Boolean>() ?: true, featureStore = get()) }
-    single { org.siloserver.silo.tv.calendar.CinemaBayGermanCalendarRepository(androidContext()) }
-    viewModel { org.siloserver.silo.tv.calendar.CinemaBayGermanCalendarViewModel(get()) }
     viewModel { org.siloserver.silo.tv.ui.screens.browse.TvBrowseViewModel(get()) }
     viewModel { params ->
         org.siloserver.silo.tv.ui.screens.people.TvPersonDetailViewModel(

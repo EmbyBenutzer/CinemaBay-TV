@@ -1,3 +1,15 @@
+## Lokale Version 0.1.10-cinemabay
+
+Highlights-Trailer bevorzugen veröffentlichte 1080p-Direktdateien. Fehlen diese oder scheitert die Wiedergabe, wird die vorhandene 720p-Datei verwendet. Die tatsächliche Auflösung hängt vom Anbieter ab. Kein öffentliches Release.
+
+## Aktueller Stand 0.1.9 – Scrollkorrektur für Highlights
+
+Die vollständige fokussierte Kachelzeile wird beim Hoch- und Herunternavigieren sichtbar gehalten. Beim Zurückgehen zur Monatsauswahl oder zu den Filtern wird wieder der tatsächliche Listenanfang angezeigt. Details stehen in [CINEMABAY-HIGHLIGHTS.md](CINEMABAY-HIGHLIGHTS.md).
+
+## Aktueller Stand 0.1.8 – Highlights statt Kalender
+
+Die TV-Kalenderfunktion wurde auf Wunsch entfernt. Der Menüpunkt „Highlights“ zeigt jetzt kommende Film- und Serienstarts nach Monat. Trailer starten erst nach einem Klick im nativen Vollbildplayer und kehren am Ende zur Übersicht zurück. Der bisherige Kalender-API-Zugang wird nicht mehr verwendet. Einzelheiten und Grenzen stehen in [CINEMABAY-HIGHLIGHTS.md](CINEMABAY-HIGHLIGHTS.md). Frühere Kalenderabschnitte unten dokumentieren nur die Entwicklungsgeschichte.
+
 # CinemaBay fuer Android TV
 
 
@@ -198,3 +210,29 @@ Automatischer Update-Hinweis auf der Startseite und Update-Seite unter Einstellu
 ## CinemaBay 0.1.4: Belegter deutscher Synchro-Kalender
 
 Der TV-Kalender nutzt einen eigenen, separat gepflegten Bestätigungsfeed. Nur einzelne Episoden mit ausdrücklich belegter deutscher Synchron-Premiere und Datum werden angezeigt; keine Filme, OmU, Wiederholungen oder allgemeinen Originaltermine. Termine öffnen einen Quellenbeleg statt einer erfundenen Silo-ID. Filter: Alle bestätigt / Streaming / TV. 36 konkrete Starttermine für drei Serien aus offiziellen ADN-Meldungen; keine Vollständigkeitszusage. Datenpflege und Quellen stehen in calendar/README.md. Phone und Silo-Server bleiben unverändert.
+
+
+### Lokale Vorschau 0.1.5 (noch nicht veröffentlicht)
+
+Der Kalender gleicht bestätigte deutsche Episodentermine mit den sichtbaren Serienbibliotheken des aktiven Profils ab. Fremde Serien und unsichere Zuordnungen bleiben ausgeblendet. Eigene Titel und Cover werden verwendet. Die Quellenanzeige wurde entfernt; ein Klick öffnet wieder die zugehörige Serie. Kein Silo-Server-Umbau.
+
+Die Terminabdeckung ist weiterhin auf den vorhandenen geprüften Datenbestand begrenzt. Der Bibliotheksabgleich ersetzt keinen vollständigen deutschen Synchro-Datenlieferanten. Neue Veröffentlichungen und Änderungen am öffentlichen Feed erfolgen erst nach Davids ausdrücklichem OK.
+
+
+### Verbindlicher Arbeitsumfang ab 12.11.2026
+
+Die Serien-Kategorie muss unverändert bleiben. Keine Änderungen an Serien-/Bibliotheksoberflächen, Sortierung, Filtern oder Wiedergabeständen im Rahmen des Kalenderumbaus. Gerätetests auf den Kalender beschränken; die Serien-Kategorie nicht mehr zur Bestandskontrolle bedienen. Ein lesender Bibliotheksabgleich für den Kalender verändert keine Serieninhalte.
+
+Die lokale Kalender-Vorschau 0.1.5 erfüllt die gewünschte vollständige Terminabdeckung nicht. Die 92 bestandenen Tests belegen keine inhaltliche Vollständigkeit der deutschen Veröffentlichungstermine. Leere Wochen dürfen bei unvollständiger Datenabdeckung nicht als Nachweis fehlender deutscher Neuerscheinungen gewertet werden. Vor einer weiteren APK sind tatsächliche neue deutsche Folgen aus der vorhandenen Bibliothek in der aktuellen Woche zu verifizieren und als Abnahmekriterien festzuhalten. Installation und Veröffentlichung einer weiteren Version erst nach Davids ausdrücklichem OK.
+
+
+### Lokale Vorschau 0.1.6: Deutschland-Releases
+
+Neue Nutzervorgabe: keine Bestätigung der deutschen Synchronfassung mehr erforderlich. Der Kalender zeigt stattdessen Deutschland-Releases vorhandener Serien mit dauerhaftem Hinweis im Kalenderkopf, dass eine deutsche Synchronfassung nicht garantiert ist. Der bisherige kleine Synchro-Bestand wird zur Laufzeit durch den direkt abgerufenen Deutschland-Kalender ersetzt. Details und bekannte Grenzen stehen in calendar/README.md. Noch nicht auf der Box installiert oder veröffentlicht; beide Schritte benötigen Davids OK. Serienansicht und Silo-Server bleiben unverändert.
+
+
+### Lokale Vorschau 0.1.7: Allgemeine Releases und Profilfavoriten
+
+Die drei bisherigen Kalenderfilter wurden durch „Allgemeine Releases“ und „Releases meiner Favoriten“ ersetzt. Serienfavoriten werden vollständig und frisch aus dem aktiven Profil gelesen, unabhängig von Merkliste oder Wiedergabestand. Bei unvollständiger Prüfung werden keine ungeprüften Favoriten gezeigt. Die kommende Wochenansicht lädt ihren eigenen Zeitraum über eine vorbereitete, optionale Deutschland-Vorschau-Anbindung. Der Anbieterzugang wurde inzwischen bereitgestellt und mit echten Deutschland-Antworten für den 16.–22.11.2026 geprüft. Die Vorschau berücksichtigt konkrete Episoden sowie ausdrücklich datierte Staffel- und Serienstarts, ohne Folgennummern zu erfinden. Ein Gerätetest dieser Fassung steht noch aus. Schlüssel können verschlüsselt in der Box gespeichert werden. Installation und Veröffentlichung weiterhin erst nach OK. Die Serien-Kategorie bleibt unverändert.
+
+Gerätestand nach dem letzten freigegebenen Test: 0.1.6 ist auf der Box installiert. Dort wurden 4.118 eigene Serien und acht zugeordnete Serien mit DE-Terminen angezeigt. Nur der Kalender wurde geprüft, keine Serie geöffnet oder Favoriten verändert. 0.1.7 bleibt bis zu einem weiteren OK lokal.

@@ -21,7 +21,7 @@ class TvLibraryReviewWiringSourceTest {
         )
         val calendarScreen = extractBetween(
             source = mainShell,
-            startAnchor = "TvCalendarScreen(",
+            startAnchor = "CinemaBayHighlightsScreen(",
             endAnchor = "shellComposable(TvMainRoute.Browse.route)",
         )
 

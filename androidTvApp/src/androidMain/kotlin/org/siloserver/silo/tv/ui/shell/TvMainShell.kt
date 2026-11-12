@@ -149,7 +149,7 @@ import org.siloserver.silo.tv.ui.navigation.TvRemovedMainRoutes
 import org.siloserver.silo.tv.ui.screens.library.TvLibraryDetailScreen
 import org.siloserver.silo.tv.ui.screens.library.TvLibraryTab
 import org.siloserver.silo.tv.ui.screens.browse.TvBrowseScreen
-import org.siloserver.silo.tv.ui.screens.calendar.TvCalendarScreen
+import org.siloserver.silo.tv.highlights.CinemaBayHighlightsScreen
 import org.siloserver.silo.tv.ui.screens.collections.TvCollectionsScreen
 import org.siloserver.silo.tv.ui.screens.home.TvHomeScreen
 import org.siloserver.silo.tv.ui.screens.libraries.TvLibrariesScreen
@@ -1590,8 +1590,7 @@ fun TvMainShell(
                     )
                 }
                 shellComposable(TvMainRoute.Calendar.route) {
-                    TvCalendarScreen(
-                        onOpenItemDetailSelection = onOpenItemDetailSelection,
+                    CinemaBayHighlightsScreen(
                         onInitialContentFocus = {
                             focusState.closeProfileMenuForContent()
                             calendarFocusHandoffPending = false
