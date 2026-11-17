@@ -87,6 +87,7 @@ fun TvCatalogGrid(
     verticalSpacing: Dp = 32.dp,
     firstItemFocusRequester: FocusRequester? = null,
     firstItemCardModifier: Modifier = Modifier,
+    firstRowCardModifier: Modifier = Modifier,
     /**
      * Return-restoration plumbing, for surfaces that restore focus to the card
      * a detail page was opened from.
@@ -324,6 +325,7 @@ fun TvCatalogGrid(
                     caption = boxSet?.cardCaption()?.text(),
                     sleeves = org.siloserver.silo.tv.ui.theme.BoxSetSleeves.takeIf { boxSet != null },
                     onClick = { onBrowseItemClick?.invoke(item) ?: onItemClick(item.contentId) },
+                    allowTrailerPreview = boxSet == null,
                     fillWidth = true,
                     artworkAspectRatio = artworkAspectRatioForItem(item),
                     focusRequester = if (isRestoreTarget) {
@@ -331,7 +333,9 @@ fun TvCatalogGrid(
                     } else {
                         firstItemFocusRequester.takeIf { index == 0 }
                     },
-                    cardModifier = if (index == 0) firstItemCardModifier else Modifier,
+                    cardModifier = (if (index == 0) firstItemCardModifier else Modifier).then(
+                        if (resolvedGridState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index + (if (header != null) 1 else 0) }?.row == (if (header != null) 1 else 0)) firstRowCardModifier else Modifier,
+                    ),
                     modifier = Modifier
                         .fillMaxWidth()
                         // hasFocus, not isFocused: this modifier lands on the

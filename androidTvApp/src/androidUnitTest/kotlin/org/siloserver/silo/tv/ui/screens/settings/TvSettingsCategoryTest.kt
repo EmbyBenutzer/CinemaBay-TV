@@ -11,6 +11,7 @@ class TvSettingsCategoryTest {
         assertEquals(
             listOf(
                 TvSettingsCategory.General,
+                TvSettingsCategory.Appearance,
                 TvSettingsCategory.Playback,
                 TvSettingsCategory.Subtitles,
                 TvSettingsCategory.Diagnostics,
@@ -25,6 +26,7 @@ class TvSettingsCategoryTest {
         assertEquals(
             listOf(
                 TvSettingsCategory.General,
+                TvSettingsCategory.Appearance,
                 TvSettingsCategory.Playback,
                 TvSettingsCategory.Subtitles,
                 TvSettingsCategory.Server,

@@ -307,6 +307,7 @@ val androidTvModule = module {
     // tvOS-parity Home row visibility/order, local to this TV and partitioned
     // by active server + profile.
     single { TvHomeSectionPreferences(androidContext(), get()) }
+    single { org.siloserver.silo.tv.data.preferences.CinemaBayLibraryHomeRepository(get(), get(), get()) }
 
     // One-shot legacy `tv_prefs` import (playback settings → server device
     // overrides; selected-library id → active profile's selection store).

@@ -1,0 +1,5 @@
+<resources>
+    <string name="cinemabay_customize_title">Aussehen anpassen</string>
+    <string name="cinemabay_customize_rail">Startseite und Bibliotheken</string>
+    <string name="cinemabay_customize_blurb">Wähle die Reihen deiner Startseite und bestimme ihre Reihenfolge.</string>
+</resources>

@@ -34,8 +34,23 @@ internal val LocalCinemaBayTrailerGeometry = staticCompositionLocalOf<(Any, Bool
 
 internal class CinemaBayCardTrailerState {
     var videoId by mutableStateOf<String?>(null)
+    var directUrl by mutableStateOf<String?>(null)
+    var fallbackUrl by mutableStateOf<String?>(null)
     var playing by mutableStateOf(false)
     var failed by mutableStateOf(false)
+    var original by mutableStateOf(false)
+    var source by mutableStateOf("")
+    var captionStatus by mutableStateOf("")
+    var retry by mutableIntStateOf(0)
+    val rejected = mutableSetOf<String>()
+    fun rejectCurrent() {
+        videoId?.let { rejected += it }
+        videoId = null
+        directUrl = null
+        fallbackUrl = null
+        playing = false
+        if (rejected.size >= 8) failed = true else retry++
+    }
 }
 
 @Composable
@@ -44,7 +59,10 @@ internal fun rememberCinemaBayCardTrailer(contentId: String?, active: Boolean): 
     val state = remember(contentId, active) { CinemaBayCardTrailerState() }
     if (!active || contentId.isNullOrBlank()) return state
     val repository: CatalogRepository = koinInject()
-    LaunchedEffect(contentId, state, repository) {
+    val sourceContext = LocalContext.current
+    val extraSource = remember(sourceContext) { CinemaBayKinoCheckSource(sourceContext) }
+    val filmstarts = remember(sourceContext) { CinemaBayFilmstartsSource(sourceContext) }
+    LaunchedEffect(contentId, state, repository, state.retry) {
         delay(1500)
         val detail = try {
             (repository.getItemDetailForPrefetch(contentId) as? ApiResult.Success)?.data
@@ -52,8 +70,20 @@ internal fun rememberCinemaBayCardTrailer(contentId: String?, active: Boolean): 
             throw cancel
         } catch (_: Exception) { null }
         coroutineContext.ensureActive()
-        state.videoId = cinemaBayGermanTrailer(detail?.videos)
-        android.util.Log.d("CinemaBayTrailer", if (state.videoId == null) "no-german-trailer" else "german-trailer-selected")
+        if (state.failed) return@LaunchedEffect
+        if (detail == null) { state.captionStatus = "Trailerdaten derzeit nicht verfügbar"; return@LaunchedEffect }
+        val selected = try { resolveCinemaBayCardTrailer(detail, state.rejected.toSet(), germanAlternative = { filmstarts.trailer(detail, state.rejected.toSet()) }, subtitledOriginal = { filmstarts.trailer(detail, state.rejected.toSet(), originalWithSubtitles = true) }) { language -> extraSource.trailers(detail, language) } }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { state.captionStatus = "Trailerprüfung derzeit nicht möglich"; state.failed = true; null }
+        coroutineContext.ensureActive()
+        if (selected == null && !state.failed) state.captionStatus = "Kein passender Trailer verfügbar"
+        state.original = selected?.original == true
+        state.source = selected?.source.orEmpty()
+        state.captionStatus = if (selected?.germanCaptionsEmbedded == true) "Originaltrailer · deutsche Untertitel" else if (state.original) "Originaltrailer · deutsche Untertitel, falls verfügbar" else state.captionStatus
+        state.directUrl = selected?.directUrl
+        state.fallbackUrl = selected?.fallbackUrl
+        state.videoId = selected?.videoId
+        android.util.Log.d("CinemaBayTrailer", when { selected == null -> "no-trailer-available"; selected.original -> "original-trailer-selected"; else -> "german-trailer-selected-${selected.source}" })
     }
     return state
 }
@@ -63,11 +93,14 @@ internal fun rememberCinemaBayCardTrailer(contentId: String?, active: Boolean): 
 internal fun CinemaBayCardTrailerPlayer(
     videoId: String,
     posterUrl: String?,
+    germanSubtitles: Boolean = false,
+    onCaptionStatus: (String) -> Unit = {},
     onPlaying: () -> Unit,
     onUnavailable: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val captionsCallback by rememberUpdatedState(onCaptionStatus)
     val playingCallback by rememberUpdatedState(onPlaying)
     val unavailableCallback by rememberUpdatedState(onUnavailable)
     var playing by remember(videoId) { mutableStateOf(false) }
@@ -102,6 +135,11 @@ internal fun CinemaBayCardTrailerPlayer(
                             playingCallback()
                             android.util.Log.d("CinemaBayTrailer", "playing")
                         }
+                        "CinemaBayCard:captions-de" -> captionsCallback("Originaltrailer · deutsche Untertitel")
+                        "CinemaBayCard:captions-missing" -> {
+                            captionsCallback("Originaltrailer · keine deutschen Untertitel verfügbar")
+                            if (germanSubtitles) unavailableCallback()
+                        }
                         "CinemaBayCard:unavailable" -> {
                             unavailableCallback()
                             android.util.Log.d("CinemaBayTrailer", "unavailable")
@@ -110,7 +148,7 @@ internal fun CinemaBayCardTrailerPlayer(
                     return true
                 }
             }
-            loadDataWithBaseURL("https://de.cinemabay.tv/", cinemaBayCardTrailerHtml(videoId), "text/html", "UTF-8", null)
+            loadDataWithBaseURL("https://de.cinemabay.tv/", cinemaBayCardTrailerHtml(videoId, germanSubtitles), "text/html", "UTF-8", null)
         }
     }
     val frame = remember(web) {
@@ -148,23 +186,31 @@ internal fun CinemaBayCardTrailerPlayer(
     AndroidView(factory = { frame }, modifier = modifier.focusProperties { canFocus = false })
 }
 
-private fun cinemaBayCardTrailerHtml(id: String): String {
+internal fun cinemaBayCardTrailerHtml(id: String, germanSubtitles: Boolean = false): String {
     require(id.matches(Regex("[A-Za-z0-9_-]{11}")))
     return """<!doctype html><html lang="de"><head>
         <meta name="viewport" content="width=640">
         <meta name="referrer" content="strict-origin-when-cross-origin">
         <style>html,body{width:100%;height:100%;margin:0;overflow:hidden;background:transparent}iframe{display:block;border:0;width:100%;height:100%}</style>
         </head><body><div id="player"></div><script>
-        var player,announced=false;
+        var player,announced=false,captionsReady=!$germanSubtitles;
         function captionsOff(){if(player&&player.getOptions&&player.getOptions('captions').indexOf('track')>=0)player.setOption('captions','track',{});}
+        function applyCaptions(){
+          if(!$germanSubtitles){captionsOff();return;}
+          try{if(player&&player.getOptions&&player.getOptions().indexOf('captions')>=0){
+            player.setOption('captions','track',{languageCode:'de'});
+            var track=player.getOption('captions','track');
+            if(track&&track.languageCode){if(track.languageCode.split('-')[0]==='de'){captionsReady=true;player.unMute();player.setVolume(70);console.log('CinemaBayCard:captions-de');}else{captionsOff();console.log('CinemaBayCard:captions-missing');}}
+          }}catch(ignore){}
+        }
         function sizePlayer(){if(player&&player.setSize)player.setSize(innerWidth,innerHeight);}
         window.addEventListener('resize',sizePlayer);
         function onYouTubeIframeAPIReady(){player=new YT.Player('player',{
           width:innerWidth,height:innerHeight,videoId:'$id',
-          playerVars:{playsinline:1,autoplay:1,controls:0,disablekb:1,cc_load_policy:0,cc_lang_pref:'de',hl:'de',origin:'https://de.cinemabay.tv'},
-          events:{onReady:function(e){sizePlayer();e.target.unMute();e.target.setVolume(70);e.target.playVideo();},
-          onApiChange:captionsOff,onStateChange:function(e){if(e.data===1)captionsOff();if(e.data===0)console.log('CinemaBayCard:unavailable');},
+          playerVars:{playsinline:1,autoplay:1,controls:0,disablekb:1,cc_load_policy:${if (germanSubtitles) 1 else 0},cc_lang_pref:'de',hl:'de',origin:'https://de.cinemabay.tv'},
+          events:{onReady:function(e){sizePlayer();if($germanSubtitles){e.target.mute();}else{e.target.unMute();e.target.setVolume(70);}e.target.playVideo();},
+          onApiChange:applyCaptions,onStateChange:function(e){if(e.data===1){applyCaptions();if($germanSubtitles)setTimeout(function(){try{var t=player.getOption('captions','track');if(!t||!t.languageCode){captionsOff();console.log('CinemaBayCard:captions-missing');}}catch(ignore){console.log('CinemaBayCard:captions-missing');}},8000);}if(e.data===0)console.log('CinemaBayCard:unavailable');},
           onError:function(){console.log('CinemaBayCard:unavailable');},onAutoplayBlocked:function(){console.log('CinemaBayCard:unavailable');}}});}
-        setInterval(function(){if(!announced&&player&&player.getPlayerState&&player.getPlayerState()===1&&player.getCurrentTime()>.25){announced=true;console.log('CinemaBayCard:playing');}},250);
+        setInterval(function(){if(!announced&&captionsReady&&player&&player.getPlayerState&&player.getPlayerState()===1&&player.getCurrentTime()>.25){announced=true;console.log('CinemaBayCard:playing');}},250);
         </script><script src="https://www.youtube.com/iframe_api"></script></body></html>""".trimIndent()
 }

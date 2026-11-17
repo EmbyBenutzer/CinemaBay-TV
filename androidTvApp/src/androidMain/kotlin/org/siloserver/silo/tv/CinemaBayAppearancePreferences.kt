@@ -62,3 +62,4 @@ fun rememberCinemaBayCardTrailers(): Boolean {
     }
     return enabled
 }
+

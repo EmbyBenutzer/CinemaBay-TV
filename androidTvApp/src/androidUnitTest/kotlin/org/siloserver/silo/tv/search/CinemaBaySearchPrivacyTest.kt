@@ -54,9 +54,23 @@ class CinemaBaySearchPrivacyTest {
                 else """{"content_id":"child","type":"movie","title":"ChildSafe","year":2020}"""
             respond("""{"items":[$item],"page":{"has_more":false},"total":1,"total_exact":true,"window_cursor":"w"}""", HttpStatusCode.OK,headersOf(HttpHeaders.ContentType,"application/json"))
         }) { install(ContentNegotiation) { json(SiloJson) } }
-        val repository=CinemaBaySearchRepository(ApplicationProvider.getApplicationContext(),CatalogRepository(CatalogApi(client)),tokenManager,identities,access)
+        init { CinemaBaySearchIndex(ApplicationProvider.getApplicationContext()).apply { clear(); close() } }
+        var repository=CinemaBaySearchRepository(ApplicationProvider.getApplicationContext(),CatalogRepository(CatalogApi(client)),tokenManager,identities,access)
         suspend fun ready()=withTimeout(15_000) { while(!repository.state.value.complete)delay(20) }
-        suspend fun close(){release.complete(Unit);repository.close();client.close()}
+        suspend fun close(){release.complete(Unit);repository.close(); CinemaBaySearchIndex(ApplicationProvider.getApplicationContext()).apply { clear(); close() };client.close()}
+    }
+    @Test fun restartRestoresCompletedCatalogWithoutBrowsingItAgain() = runBlocking {
+        val h = Harness()
+        try {
+            h.repository.start(); h.ready(); val count = h.repository.state.value.count
+            h.repository.close(); h.paths.clear()
+            h.repository = CinemaBaySearchRepository(ApplicationProvider.getApplicationContext(), CatalogRepository(CatalogApi(h.client)), h.tokenManager, h.identities, h.access)
+            h.repository.start(); h.ready()
+            assertEquals(count, h.repository.state.value.count)
+            assertFalse(h.repository.state.value.syncing)
+            assertTrue(h.repository.search("AdultSecret", CinemaBaySearchFilters(), null, 0).items.isNotEmpty())
+            assertTrue(h.paths.isEmpty(), "A fresh persisted snapshot must not trigger another full catalog browse")
+        } finally { h.close() }
     }
     @Test fun profileTransitionCannotReuseAdultTitles()= runBlocking {
         val h=Harness()

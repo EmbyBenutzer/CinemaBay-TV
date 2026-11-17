@@ -134,6 +134,9 @@ import org.siloserver.silo.model.settings.SubtitleFontSizePreset
 import org.siloserver.silo.model.settings.SubtitlePositionPreset
 import org.siloserver.silo.model.settings.pointSize
 import org.siloserver.silo.tv.BuildConfig
+import org.siloserver.silo.tv.setRatingSource
+import org.siloserver.silo.tv.resetRatingCorner
+import org.siloserver.silo.tv.setRatingCorner
 import org.siloserver.silo.tv.CinemaBayAppearancePreferences
 import org.siloserver.silo.tv.LocalCinemaBayCardTrailers
 import org.siloserver.silo.tv.LocalCinemaBayLightMode
@@ -385,6 +388,12 @@ internal enum class TvSettingsCategory(
         title = CommonR.string.settings_general,
         railDescription = CommonR.string.settings_rail_general,
         blurb = CommonR.string.settings_blurb_general,
+        icon = Icons.Outlined.Settings,
+    ),
+    Appearance(
+        title = R.string.cinemabay_customize_title,
+        railDescription = R.string.cinemabay_customize_rail,
+        blurb = R.string.cinemabay_customize_blurb,
         icon = Icons.Outlined.Settings,
     ),
     Playback(
@@ -906,6 +915,10 @@ private fun SettingsDetailPane(
                 onCardPresentationDeviceOnlyChanged = onCardPresentationDeviceOnlyChanged,
                 onUseProfileCardDefault = onUseProfileCardDefault,
             )
+            TvSettingsCategory.Appearance -> CinemaBayAppearanceSettingsPane(
+                homeSectionsViewModel = homeSectionsViewModel,
+                firstFocusRequester = detailFocusRequester,
+            )
             TvSettingsCategory.Playback -> TvPlaybackSettingsPane(
                 state = state,
                 firstFocusRequester = detailFocusRequester,
@@ -1043,7 +1056,6 @@ private fun TvGeneralSettingsPane(
 ) {
     var showPosterSizePicker by remember { mutableStateOf(false) }
     var showProfileLaunchPicker by remember { mutableStateOf(false) }
-    var showHomeSectionsEditor by remember { mutableStateOf(false) }
     val startupContext = LocalContext.current
     val appearancePreferences = remember(startupContext) { CinemaBayAppearancePreferences(startupContext) }
     val cardTrailers = LocalCinemaBayCardTrailers.current
@@ -1116,20 +1128,6 @@ private fun TvGeneralSettingsPane(
                     },
                 )
                 SettingsFooterText(text = stringResource(R.string.cinemabay_startup_hint))
-            }
-        }
-        item {
-            // Device-local, server/profile-specific visibility and order for
-            // the populated rows returned by Home, matching tvOS General.
-            SettingsGroup(title = stringResource(CommonR.string.settings_homeSections_title)) {
-                SettingsValueRow(
-                    label = stringResource(CommonR.string.settings_homeSections_title),
-                    value = "",
-                    onClick = { showHomeSectionsEditor = true },
-                )
-                SettingsFooterText(
-                    text = stringResource(CommonR.string.settings_homeSections_description),
-                )
             }
         }
         item {
@@ -1233,12 +1231,6 @@ private fun TvGeneralSettingsPane(
         )
     }
 
-    if (showHomeSectionsEditor) {
-        TvHomeSectionsEditor(
-            onDismiss = { showHomeSectionsEditor = false },
-            viewModel = homeSectionsViewModel,
-        )
-    }
 }
 
 /** The subtitle behavior's name, the same words as the phone's. */
@@ -3258,4 +3250,57 @@ private fun TvAppLanguageSettingsGroup(store: AppLanguageStore) {
             onDismiss = { showPicker = false },
         )
     }
+}
+
+
+@Composable
+private fun CinemaBayAppearanceSettingsPane(homeSectionsViewModel: HomeViewModel, firstFocusRequester: FocusRequester) {
+    val context = LocalContext.current
+    val ratingStore = remember(context) { CinemaBayAppearancePreferences(context) }
+    val ratingAppearance = org.siloserver.silo.tv.rememberCinemaBayRatings()
+    var ratingPicker by remember { mutableStateOf<String?>(null) }
+    var showEditor by remember { mutableStateOf(false) }
+    var libraryOnly by remember { mutableStateOf<Boolean?>(null) }
+    val home by homeSectionsViewModel.uiState.collectAsState()
+    val libraries = org.siloserver.silo.tv.data.preferences.rememberCinemaBayLibraryHome(home.sections)
+    LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = Spacing.xxxl),
+        verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item {
+            SettingsGroup(title = "Startseite und Bibliotheken") {
+                SettingsValueRow(label = "Bibliotheken auswählen", value = if (libraries.loading) "Wird geladen …" else "${libraries.rows.size} Bibliotheken",
+                    onClick = { libraryOnly = true; showEditor = true }, focusRequester = firstFocusRequester)
+                SettingsFooterText(text = "Für jede Bibliothek eine eigene Reihe mit den zuletzt hinzugefügten Inhalten. Einzeln ein- oder ausblenden. Deine Bibliotheken bleiben in den anderen Ansichten erreichbar.")
+                SettingsValueRow(label = "Trends und Anbieterreihen", value = "",
+                    onClick = { libraryOnly = false; showEditor = true })
+                SettingsFooterText(text = "Trendfilme, Trendserien und vorhandene Reihen wie Netflix einzeln auswählen. Hier werden nur Reihen angeboten, die dein Server bereits liefert.")
+                SettingsValueRow(label = "Reihenfolge der Startseite", value = "",
+                    onClick = { libraryOnly = null; showEditor = true })
+                SettingsFooterText(text = "Bibliotheken, Trends und andere Reihen gemeinsam nach oben oder unten verschieben. Die Auswahl gilt für dieses Profil auf diesem Fernseher und bleibt nach einem Neustart erhalten.")
+                libraries.error?.let { SettingsFooterText(text = it) }
+            }
+        }
+        item {
+            SettingsGroup(title = "Bewertungen auf Covern") {
+                SettingsValueRow(label = "Bewertung auswählen", value = ratingAppearance.source.label,
+                    onClick = { ratingPicker = "source" })
+                SettingsValueRow(label = "Position auf dem Cover", value = if (ratingAppearance.source == org.siloserver.silo.tv.CinemaBayRatingSource.Existing && !ratingAppearance.positionChosen) "Wie bisher" else ratingAppearance.corner.label,
+                    onClick = { ratingPicker = "corner" })
+                SettingsFooterText(text = "Nur vorhandene Bewertungen werden angezeigt. Fehlt die gewählte Quelle, bleibt das Cover ohne diese Bewertung. Oben rechts bleibt Platz für den Folgenzähler oder Gesehen-Haken. Die Auswahl gilt auf diesem Fernseher und bleibt nach einem Neustart erhalten.")
+            }
+        }
+    }
+    if (showEditor) TvHomeSectionsEditor(onDismiss = { showEditor = false }, libraryOnly = libraryOnly, viewModel = homeSectionsViewModel)
+    if (ratingPicker != null) TvSettingsPickerSheet(
+        title = if (ratingPicker == "source") "Bewertung auswählen" else "Position auf dem Cover",
+        options = if (ratingPicker == "source") org.siloserver.silo.tv.CinemaBayRatingSource.entries.map { PickerOption(it.name, it.label) }
+            else listOf(PickerOption("default", "Standardposition")) + org.siloserver.silo.tv.CinemaBayRatingCorner.entries.map { PickerOption(it.name, it.label) },
+        selectedId = if (ratingPicker == "source") ratingAppearance.source.name else if (ratingAppearance.positionChosen) ratingAppearance.corner.name else "default",
+        onSelect = { id ->
+            if (ratingPicker == "source") ratingStore.setRatingSource(org.siloserver.silo.tv.CinemaBayRatingSource.valueOf(id))
+            else if (id == "default") ratingStore.resetRatingCorner()
+            else ratingStore.setRatingCorner(org.siloserver.silo.tv.CinemaBayRatingCorner.valueOf(id))
+            ratingPicker = null
+        },
+        onDismiss = { ratingPicker = null },
+    )
 }

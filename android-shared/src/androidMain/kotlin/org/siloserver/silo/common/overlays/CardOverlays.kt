@@ -67,6 +67,7 @@ fun CardOverlays(
     scale: Float = 1f,
     forceOpaqueBackground: Boolean = false,
     bottomInset: Dp? = null,
+    topRightClearance: Dp = 0.dp,
 ) {
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         // The web Home carousel's 185-unit overlay layer is the cross-platform
@@ -93,6 +94,7 @@ fun CardOverlays(
                 scale = resolvedScale,
                 forceOpaqueBackground = forceOpaqueBackground,
                 bottomInset = bottomInset,
+                topRightClearance = topRightClearance,
             )
         }
     }
@@ -108,6 +110,7 @@ private fun androidx.compose.foundation.layout.BoxScope.CornerStack(
     scale: Float,
     forceOpaqueBackground: Boolean,
     bottomInset: Dp?,
+    topRightClearance: Dp,
 ) {
     // Resolved once per (item, prefs, preset): this runs for four corners of
     // every card on every card composition, and rails recompose a lot.
@@ -120,7 +123,8 @@ private fun androidx.compose.foundation.layout.BoxScope.CornerStack(
     Column(
         modifier = Modifier
             .align(anchor(position))
-            .padding(insets(position, variant, scale, bottomInset)),
+            .padding(insets(position, variant, scale, bottomInset))
+            .padding(top = if (position == OverlayPosition.TopRight) topRightClearance else 0.dp),
         horizontalAlignment = horizontalAlignment(position),
         verticalArrangement = Arrangement.spacedBy(preset.gap),
     ) {

@@ -1,5 +1,8 @@
 package org.siloserver.silo.tv.ui.components
 
+import org.siloserver.silo.tv.applyTo
+import org.siloserver.silo.tv.cinemaBayRatingIds
+
 import org.siloserver.silo.tv.LocalCinemaBayLightMode
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.animateFloatAsState
@@ -124,10 +127,14 @@ fun TvMediaCard(
     sleeves: BoxSetSleeveColors? = null,
     /** Outlines the artwork at rest, such as the movie being viewed in its box set row. */
     highlighted: Boolean = false,
-    allowTrailerPreview: Boolean = false,
+    allowTrailerPreview: Boolean = true,
     seriesContentId: String? = null,
 ) {
     val overlayState = LocalCardOverlayUiState.current
+    val ratingAppearance = org.siloserver.silo.tv.LocalCinemaBayRatings.current
+    val cardOverlayPrefs = remember(overlayState.prefs, ratingAppearance) { ratingAppearance.applyTo(overlayState.prefs) }
+    val hasTopRightRating = cardOverlayPrefs.items.any { (id, config) -> id in cinemaBayRatingIds && config.enabled && config.position == org.siloserver.silo.overlays.OverlayPosition.TopRight }
+
     val effectiveAspectRatio = artworkAspectRatio
         ?: tvArtworkAspectRatioForMediaType(mediaType)
         ?: (2f / 3f)
@@ -146,10 +153,11 @@ fun TvMediaCard(
     var menuExpanded by remember(contentKey) { mutableStateOf(false) }
 
     val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
-    val previewAllowed = allowTrailerPreview && !fillWidth && !hideArtwork && !menuExpanded && isFocused &&
+    val trailerContentId = cinemaBayTrailerContentId(mediaType, contentKey as? String, seriesContentId)
+    val previewAllowed = allowTrailerPreview && !hideArtwork && !menuExpanded && isFocused &&
         LocalCinemaBayCardTrailers.current && LocalCinemaBayPreviewAllowed.current &&
-        lifecycleState == Lifecycle.State.RESUMED && cinemaBayTrailerMediaType(mediaType)
-    val trailer = rememberCinemaBayCardTrailer(contentKey as? String, previewAllowed)
+        lifecycleState == Lifecycle.State.RESUMED && trailerContentId != null
+    val trailer = rememberCinemaBayCardTrailer(trailerContentId, previewAllowed)
     val previewVideo = trailer.videoId.takeIf { previewAllowed && !trailer.failed }
     val reportTrailerGeometry = LocalCinemaBayTrailerGeometry.current
     DisposableEffect(previewVideo, trailer, reportTrailerGeometry) {
@@ -237,7 +245,7 @@ fun TvMediaCard(
                 },
             ) {
                 Box(modifier = Modifier.fillMaxSize()) {
-                    if (previewVideo == null || !trailer.playing) SpoilerImage(
+                    if (previewVideo == null || !trailer.playing || fillWidth) SpoilerImage(
                         hidden = hideArtwork,
                         url = posterUrl,
                         decodeSizePx = if (LocalCinemaBayLightMode.current) 256 else null,
@@ -251,12 +259,13 @@ fun TvMediaCard(
                     if (previewVideo == null) {
                         // Card-overlay badge layer. Over the poster, under the
                         // watched badge + progress bar. Never intercepts focus.
-                        if (overlayState.enabled && overlay != null) {
+                        if ((overlayState.enabled || ratingAppearance.source !in setOf(org.siloserver.silo.tv.CinemaBayRatingSource.Existing, org.siloserver.silo.tv.CinemaBayRatingSource.Off)) && overlay != null) {
                             CardOverlays(
                                 data = overlay,
-                                prefs = overlayState.prefs,
+                                prefs = if (overlayState.enabled) cardOverlayPrefs else cardOverlayPrefs.copy(items = cardOverlayPrefs.items.mapValues { (id, config) -> config.copy(enabled = config.enabled && id in cinemaBayRatingIds) }),
                                 variant = CardOverlayVariant.Poster,
                                 forceOpaqueBackground = false,
+                                topRightClearance = if (hasTopRightRating && (seriesContentId != null || userState?.played == true)) watchedBadgeSize + watchedBadgePadding else 0.dp,
                                 modifier = Modifier.fillMaxSize(),
                             )
                         }
@@ -265,10 +274,11 @@ fun TvMediaCard(
                             CinemaBaySeriesEpisodeBadge(
                                 seriesId = seriesContentId,
                                 played = userState?.played,
-                                modifier = Modifier.align(Alignment.BottomStart).padding(start = 6.dp, bottom = 9.dp),
+                                modifier = Modifier.align(Alignment.TopEnd).padding(watchedBadgePadding),
+                                size = watchedBadgeSize,
                             )
                         }
-                        if (userState?.played == true) {
+                        if (seriesContentId == null && userState?.played == true) {
                             Box(
                                 modifier = Modifier
                                     .align(Alignment.TopEnd)
@@ -340,16 +350,29 @@ fun TvMediaCard(
             }
             // Keep the native video outside tv-material Card's offscreen effect layers.
             if (previewVideo != null) {
-                CinemaBayCardTrailerPlayer(
+                val trailerModifier = if (fillWidth) Modifier.fillMaxWidth().aspectRatio(16f / 9f).align(Alignment.Center).zIndex(2f) else Modifier.matchParentSize().zIndex(2f)
+                val directUrl = trailer.directUrl
+                if (directUrl != null) CinemaBayDirectCardTrailerPlayer(
+                    url = directUrl, fallbackUrl = trailer.fallbackUrl,
+                    onPlaying = { trailer.playing = true },
+                    onUnavailable = { trailer.rejectCurrent() },
+                    modifier = trailerModifier,
+                ) else CinemaBayCardTrailerPlayer(
                     videoId = previewVideo,
                     posterUrl = posterUrl,
+                    germanSubtitles = trailer.original,
+                    onCaptionStatus = { trailer.captionStatus = it },
                     onPlaying = { trailer.playing = true },
-                    onUnavailable = { trailer.failed = true; trailer.playing = false },
-                    modifier = Modifier.matchParentSize().zIndex(2f),
+                    onUnavailable = { trailer.rejectCurrent() },
+                    modifier = trailerModifier,
                 )
             }
         }
 
+        if (isFocused && (trailer.original || (previewAllowed && trailer.captionStatus.isNotBlank()))) {
+            Text(trailer.captionStatus, color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp))
+        }
         Spacer(modifier = Modifier.height(11.dp))
 
         Text(

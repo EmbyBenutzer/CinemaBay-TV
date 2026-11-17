@@ -1,3 +1,9 @@
+## Vorgemerkt für das nächste Update – 14.11.2026
+
+- [ ] HDR-Passthrough auf Android TV standardmäßig aktivieren, auch beim Update bestehender Installationen. Die Option bleibt in den Einstellungen abschaltbar; spätere bewusste Änderungen des Nutzers dürfen nicht bei jedem Start überschrieben werden. Migration einmalig vorsehen und testen.
+- Hintergrund: Die getestete Box meldete keine HDR-Unterstützung. 4K-HDR-Filme wurden vor dem Start mit „The source requires video adaptation, but transcoding is unavailable.“ abgelehnt. Nach Aktivierung von „HDR-Passthrough erzwingen“ startete Atomic Blonde; David bestätigte Bild und Ton. Die Verbindungsmessung wurde zuvor auf 106 Mbit/s aktualisiert; dies allein beseitigte den Fehler nicht.
+- Vor Veröffentlichung auf HDR- und SDR-Ausgaben prüfen. Der Schalter ändert den HDMI-Ausgabemodus nicht und garantiert keine native HDR-Ausgabe. Veröffentlichung weiterhin erst nach ausdrücklichem OK.
+
 ## Lokale Version 0.1.10-cinemabay
 
 Highlights-Trailer bevorzugen veröffentlichte 1080p-Direktdateien. Fehlen diese oder scheitert die Wiedergabe, wird die vorhandene 720p-Datei verwendet. Die tatsächliche Auflösung hängt vom Anbieter ab. Kein öffentliches Release.

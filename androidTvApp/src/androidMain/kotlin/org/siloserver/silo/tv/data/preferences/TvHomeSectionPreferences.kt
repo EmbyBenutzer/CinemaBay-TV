@@ -18,10 +18,14 @@ import org.siloserver.silo.common.store.AccountScopedKeys
 import org.siloserver.silo.model.section.ResolvedSection
 import org.siloserver.silo.network.TokenManager
 
+internal fun cinemaBayOptionalHomeRow(id: String): Boolean =
+    id.startsWith("cinemabay-library:") || id.startsWith("cinemabay-trend-series:")
+
 /** Device-local Home row order and visibility for one server/profile. */
 data class TvHomeSectionLayout(
     val orderedSectionIds: List<String> = emptyList(),
     val hiddenSectionIds: Set<String> = emptySet(),
+    val enabledOptionalSectionIds: Set<String> = emptySet(),
 )
 
 data class TvHomeSectionPreferenceState(
@@ -81,13 +85,16 @@ class TvHomeSectionPreferences(
         val authority = activeAuthority() ?: return
         mutex.withLock {
             val current = currentLayout(authority)
-            val wasVisible = sectionId !in current.hiddenSectionIds
+            val libraryRow = cinemaBayOptionalHomeRow(sectionId)
+            val wasVisible = if (libraryRow) sectionId in current.enabledOptionalSectionIds else sectionId !in current.hiddenSectionIds
             if (wasVisible == visible) return
 
             val hidden = current.hiddenSectionIds.toMutableSet().apply {
                 if (visible) remove(sectionId) else add(sectionId)
             }
-            val updated = current.copy(hiddenSectionIds = hidden)
+            val enabled = current.enabledOptionalSectionIds.toMutableSet().apply { if (libraryRow) { if (visible) add(sectionId) else remove(sectionId) } }
+            val order = if (libraryRow && visible && sectionId !in current.orderedSectionIds) current.orderedSectionIds + sectionId else current.orderedSectionIds
+            val updated = current.copy(hiddenSectionIds = hidden, enabledOptionalSectionIds = enabled, orderedSectionIds = order)
             persist(authority, updated)
             publish(authority.identity, updated)
         }
@@ -134,6 +141,7 @@ class TvHomeSectionPreferences(
         return TvHomeSectionLayout(
             orderedSectionIds = unique(decodeIds(preferences[orderKey(authority.serverId)])),
             hiddenSectionIds = preferences[hiddenKey(authority.serverId)].orEmpty(),
+            enabledOptionalSectionIds = preferences[libraryKey(authority.serverId)].orEmpty(),
         )
     }
 
@@ -141,6 +149,7 @@ class TvHomeSectionPreferences(
         storeFor(authority).edit { preferences ->
             preferences[orderKey(authority.serverId)] = encodeIds(layout.orderedSectionIds)
             preferences[hiddenKey(authority.serverId)] = layout.hiddenSectionIds
+            preferences[libraryKey(authority.serverId)] = layout.enabledOptionalSectionIds
         }
     }
 
@@ -159,6 +168,7 @@ class TvHomeSectionPreferences(
     }
 
     companion object {
+        private fun libraryKey(serverId: String) = stringSetPreferencesKey("cinemabay-libraries-${serverHash(serverId)}")
         private const val DEFAULT_SERVER_ID = "default"
 
         /** Apply saved order, then visibility, without introducing row gaps. */
@@ -166,10 +176,11 @@ class TvHomeSectionPreferences(
             sections: List<ResolvedSection>,
             layout: TvHomeSectionLayout,
             includingHidden: Boolean = false,
+            includingEmpty: Boolean = false,
         ): List<ResolvedSection> {
             val rank = layout.orderedSectionIds.withIndex().associate { it.value to it.index }
             val arranged = sections
-                .filter { it.items.isNotEmpty() }
+                .filter { includingEmpty || it.items.isNotEmpty() }
                 .withIndex()
                 .sortedWith { left, right ->
                     val leftRank = rank[left.value.id]
@@ -186,7 +197,7 @@ class TvHomeSectionPreferences(
             return if (includingHidden) {
                 arranged
             } else {
-                arranged.filterNot { it.id in layout.hiddenSectionIds }
+                arranged.filterNot { it.id in layout.hiddenSectionIds || (cinemaBayOptionalHomeRow(it.id) && it.id !in layout.enabledOptionalSectionIds) }
             }
         }
 

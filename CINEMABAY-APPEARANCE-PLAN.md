@@ -1,0 +1,15 @@
+# Aussehen anpassen – Bibliotheksreihen 0.1.13 (privat)
+
+Implementiert: eigener Einstellungsreiter mit Bibliotheken auswählen, Trends und Anbieterreihen, gemeinsamer Reihenfolge. Neun echte Silo-Bibliotheken werden für das aktuelle Profil erkannt: Filme, Serie, 4K Filme, Anime Film, Anime Serie, Zeichentrick, KurzFilm, True Crime und Dokumentation. Namen und IDs werden vom Server gelesen und nicht als feste Liste eingebaut.
+
+Jede aktivierte Bibliothek bekommt eine eigene Home-Reihe mit maximal 20 neuesten Film-/Serienkacheln. Neue Installationen behalten ihre bisherige Home-Auswahl; zusätzliche Bibliotheken sind ausgeschaltet. Sichtbarkeit und Reihenfolge werden lokal nach Server/Konto/Profil getrennt gespeichert. Auch deaktivierte und leere Bibliotheken bleiben in der Konfiguration auswählbar. Die normale Bibliotheks- und Serienansicht sowie der Server werden nicht verändert.
+
+Quelle sind die echten kürzlich hinzugefügten Bibliotheksreihen. Auf Davids Box liefert die Serienquelle Episoden mit übergeordneter Serien-ID. Der Client gruppiert diese zu einer Serienkachel, übernimmt die Reihenfolge der neuesten Episoden und ergänzt die Serienmetadaten. Ein zweiter Sortierweg für Quellen ohne Episodeneinträge verwendet aktuelle Katalog-/Episoden-Hinzufügezeiten nur bei vollständigen, gültigen Zeitangaben. Keine Sortierung nach Erscheinungsjahr und kein Erfinden fehlender Zeitangaben. Ein Live-Beispiel zeigte unter anderem Tulsa King (2022) und Chicago P.D. (2014) in der neuen Serienreihe.
+
+Die bisherige Trendfilm- und gemischte Trendreihe bleiben vorhanden und einzeln abschaltbar. Eine zusätzliche, anfangs ausgeschaltete Reihe Trendserien diese Woche wird aus den tatsächlich vorhandenen Serieneinträgen der gemischten Trendreihe erzeugt. Vorhandene Anbieterreihen wie Netflix Studio, Amazon Prime und Disney+ lassen sich auswählen und mit den Bibliotheken gemeinsam sortieren. Es wird keine aktuelle Streamingrechte-Zuordnung behauptet.
+
+Bedienung: Auge schaltet die Reihe ein/aus. Bearbeiten öffnet die beiden Pfeile zum Verschieben. Die Konfiguration wird sofort gespeichert. Beim Bearbeiten einer gefilterten Liste bleiben andere Reihen in ihrer relativen Reihenfolge erhalten. Neu aktivierte Bibliotheken werden in die explizite Reihenfolge aufgenommen; bestehende gespeicherte Positionen bleiben erhalten.
+
+Performance: nur aktivierte Bibliotheksinhalte werden geladen, höchstens zwei Bibliotheken gleichzeitig. Geteiltes, profilgeschütztes Repository für Home und Einstellungen, kurze Aktualisierungsgrenzen und vorhandene Offline-Caches. Alte Profile werden beim Identitätswechsel synchron ausgeblendet. Keine neuen externen Dienste, Videodateien oder Bibliotheksabhängigkeiten.
+
+Noch nicht umgesetzt: freie Farben, Hintergrundoptionen, neue virtuelle Kategorien für in Silo fehlende Emby-Bibliotheken (Comedy, Konzerte, Wrestling, 4K Serien), beliebige neue Anbieterfilter sowie Standard-zurücksetzen. Diese Punkte bleiben spätere Erweiterungen. Kein GitHub-Release ohne Davids ausdrückliches Okay.

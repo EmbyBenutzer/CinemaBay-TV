@@ -1,4 +1,4 @@
 <resources>
-    <string name="cinemabay_series_episode_total">%1$d Folgen</string>
-    <string name="cinemabay_series_episode_watched">%1$d gesehen</string>
+    <string name="cinemabay_series_unwatched">%1$d ungesehene reguläre Folgen</string>
+    <string name="cinemabay_series_all_watched">Alle regulären Folgen gesehen</string>
 </resources>

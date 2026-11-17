@@ -87,6 +87,7 @@ fun TvEpisodeCard(
      * a new item closes the menu, whose actions belong to the old one.
      */
     contentKey: Any? = null,
+    seriesContentId: String? = null,
     onLongClick: (() -> Unit)? = null,
 ) {
     val overlayState = LocalCardOverlayUiState.current
@@ -97,6 +98,7 @@ fun TvEpisodeCard(
     val cardFocus = siloCardDefaults(shape = cardShape)
 
     var menuExpanded by remember(contentKey) { mutableStateOf(false) }
+    val trailer = rememberCinemaBayWideTrailer(mediaType, contentKey as? String, seriesContentId, isFocused && !menuExpanded && !hideStill)
 
     Column(
         modifier = modifier.width(width),
@@ -110,6 +112,7 @@ fun TvEpisodeCard(
             isInWatchlist = userState?.inWatchlist == true,
         )
 
+        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
         Card(
             onClick = onClick,
             onLongClick = onLongClick ?: if (actions.isEmpty) null else { { menuExpanded = true } },
@@ -179,6 +182,9 @@ fun TvEpisodeCard(
                     }
                 }
             }
+        }
+
+        CinemaBayWideTrailerOverlay(trailer, stillUrl, Modifier.matchParentSize())
         }
 
         Column(

@@ -10,6 +10,11 @@ Android TV ab Android 7.0. Paket-ID: `de.cinemabay.tv`.
 
 ## Funktionen
 
+- Anpassbare Startseite mit Bibliotheken, Trends und frei wählbarer Reihenfolge.
+- Dauerhaft gespeicherte lokale Suche mit Tippfehlerkorrektur und intelligenten Filtern.
+- Kleine Anzeige ungesehener Serienfolgen und frei wählbare Cover-Bewertungen mit einstellbarer Position.
+- Verbesserte Navigation zwischen Highlights, Profilmenü und Einstellungen.
+
 - Film- und Serien-Highlights für den aktuellen und die nächsten drei Monate mit Genre-Filtern, Kurzbeschreibungen und deutschen Vollbild-Trailern. Ersetzt den bisherigen TV-Kalender. Keine vollständige Anbieterübersicht; Termine können sich ändern.
 - Trailer-Verfügbarkeit bereits auf der Kachel; automatische Auswahl veröffentlichter 1080p-Dateien mit 720p-Rückfall. Die zugängliche Quelle bestimmt die tatsächliche Auflösung.
 

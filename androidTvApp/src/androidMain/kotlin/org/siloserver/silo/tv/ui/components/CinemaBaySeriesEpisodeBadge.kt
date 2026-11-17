@@ -1,79 +1,74 @@
 package org.siloserver.silo.tv.ui.components
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.tv.material3.Icon
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collect
 import org.koin.compose.koinInject
-import org.siloserver.silo.model.catalog.SeasonsResponse
 import org.siloserver.silo.network.AccessChangeSignals
-import org.siloserver.silo.network.ApiResult
 import org.siloserver.silo.network.IdentityTransitionBarrier
 import org.siloserver.silo.repository.CatalogRepository
+import org.siloserver.silo.repository.HomeRealtimeCoordinator
 import org.siloserver.silo.tv.R
 
-private val episodeBadgeRequests = Semaphore(2)
-
-internal data class CinemaBayEpisodeCounts(val total: Int, val watched: Int?)
-
-/** Episode posters may use series artwork, but their contentId is not a series ID. */
 internal fun cinemaBaySeriesBadgeId(type: String, contentId: String, seriesId: String?): String? = when {
     type.equals("series", ignoreCase = true) -> contentId
     type.equals("episode", ignoreCase = true) -> seriesId
     else -> null
 }?.takeIf { it.isNotBlank() }
 
-internal fun SeasonsResponse.cinemaBayEpisodeCounts(): CinemaBayEpisodeCounts? {
-    val available = seasons.filter { it.episodeCount > 0 }.distinctBy { it.contentId }
-    val total = available.sumOf { it.episodeCount.toLong() }.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-    if (total == 0) return null
-    val watched = if (available.all { it.userData != null }) available.sumOf {
-        val state = requireNotNull(it.userData)
-        (if (state.played) it.episodeCount else state.watchedCount.coerceIn(0, it.episodeCount)).toLong()
-    }.coerceAtMost(total.toLong()).toInt() else null
-    return CinemaBayEpisodeCounts(total, watched)
-}
-
-/** Only composed series cards request data; the existing repository owns scoped caching. */
+/** Small Emby-style count: remaining regular episodes, or a check only for a known complete series. */
 @Composable
-internal fun CinemaBaySeriesEpisodeBadge(seriesId: String, played: Boolean?, modifier: Modifier = Modifier) {
+internal fun CinemaBaySeriesEpisodeBadge(seriesId: String, played: Boolean?, modifier: Modifier = Modifier, size: Dp = 26.dp) {
     val catalog: CatalogRepository = koinInject()
     val identities: IdentityTransitionBarrier = koinInject()
     val access: AccessChangeSignals = koinInject()
+    val realtime: HomeRealtimeCoordinator = koinInject()
     val generation by identities.generation.collectAsState()
     val revision by access.revision.collectAsState()
-    val lifecycle = LocalLifecycleOwner.current.lifecycle
-    val lifecycleState by lifecycle.currentStateFlow.collectAsState()
-    var counts by remember(seriesId, generation, revision, played) { mutableStateOf<CinemaBayEpisodeCounts?>(null) }
-    LaunchedEffect(seriesId, generation, revision, played, lifecycleState) {
+    val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
+    val key = remember(seriesId, generation, revision) { CinemaBayEpisodeBadgeKey(generation, revision, seriesId) }
+    var refresh by remember(key) { mutableIntStateOf(0) }
+    var counts by remember(key, played) { mutableStateOf(CinemaBayEpisodeBadgeStore.peek(key)) }
+    LaunchedEffect(key, lifecycleState) {
         if (!lifecycleState.isAtLeast(Lifecycle.State.STARTED)) return@LaunchedEffect
-        fun current() = generation == identities.generation.value && revision == access.revision.value
-        catalog.getCachedSeasons(seriesId)?.let { if (current()) counts = it.cinemaBayEpisodeCounts() }
-        delay(300) // Do not fetch every card passed while scrolling quickly.
-        episodeBadgeRequests.withPermit {
-            if (!current()) return@withPermit
-            val result = catalog.getSeasons(seriesId, fresh = true)
-            if (current() && result is ApiResult.Success) counts = result.data.cinemaBayEpisodeCounts()
-        }
+        launch { realtime.refreshSignals.collect { refresh++ } }
+        while (true) { delay(60_000); refresh++ }
     }
-    val value = counts ?: return
-    Column(modifier.background(Color.Black.copy(alpha = .82f), RoundedCornerShape(5.dp)).padding(horizontal = 6.dp, vertical = 4.dp)) {
-        Text(stringResource(R.string.cinemabay_series_episode_total, value.total), color = Color.White, fontSize = 12.sp, lineHeight = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-        value.watched?.let {
-            Text(stringResource(R.string.cinemabay_series_episode_watched, it), color = Color.White.copy(alpha = .85f), fontSize = 11.sp, lineHeight = 14.sp, maxLines = 1)
-        }
+    LaunchedEffect(key, played, lifecycleState, refresh) {
+        if (!lifecycleState.isAtLeast(Lifecycle.State.STARTED)) return@LaunchedEffect
+        delay(300)
+        fun current() = key.generation == identities.generation.value && key.accessRevision == access.revision.value
+        val value = CinemaBayEpisodeBadgeStore.read(catalog, key, ::current)
+        if (current()) counts = value
+    }
+    val remaining = counts?.remaining ?: return
+    val description = if (remaining == 0) stringResource(R.string.cinemabay_series_all_watched)
+        else stringResource(R.string.cinemabay_series_unwatched, remaining)
+    Box(modifier.height(size).widthIn(min = size)
+        .background(Color.White, CircleShape)
+        .clearAndSetSemantics { contentDescription = description }
+        .padding(horizontal = 5.dp), contentAlignment = Alignment.Center) {
+        if (remaining == 0) Icon(Icons.Default.Check, contentDescription = null, tint = Color.Black, modifier = Modifier.size(size * .55f))
+        else Text(remaining.toString(), color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
     }
 }

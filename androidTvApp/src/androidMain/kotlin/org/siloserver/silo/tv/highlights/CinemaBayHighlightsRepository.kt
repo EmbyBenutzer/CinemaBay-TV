@@ -170,16 +170,18 @@ internal fun selectHighlightVideo(title:String,candidates:List<HighlightVideoCan
         ?: accepted.firstOrNull{height(it)==null} else null
     return HighlightTrailer(best.url,title,fallback?.url, height(best))
 }
-internal fun parseHighlightTrailer(html:String,page:String):HighlightTrailer? {
+internal fun parseHighlightTrailer(html:String,page:String,allowGermanSubtitledOriginal:Boolean=false):HighlightTrailer? {
     val doc=Jsoup.parse(html,page)
     val title=doc.selectFirst(".media-info-title")?.text() ?: doc.selectFirst("h1")?.text().orEmpty()
     val movie=URI(page).host=="www.filmstarts.de"
     // Quality selection must never weaken the German-language requirement.
     val german=if(movie) Regex("""\bDF\b""").containsMatchIn(title) && !title.contains("OmU",true)
         else Regex("_de(?:[-.]|$)").containsMatchIn(URI(page).path)
-    if(!german)return null
+    val germanSubtitledOriginal = movie && Regex("""\bOmU\b""", RegexOption.IGNORE_CASE).containsMatchIn(title) &&
+        !Regex("""engl(?:ische|isch|\.)?\s*(?:UT|Untertitel)|English\s*(?:subtitles|subs)""", RegexOption.IGNORE_CASE).containsMatchIn(title)
+    if(!german && !(allowGermanSubtitledOriginal && germanSubtitledOriginal))return null
     val candidates=mutableListOf<HighlightVideoCandidate>()
-    val videoId=if(movie)Regex("""/trailer/(\d+)\.html""").find(URI(page).path)?.groupValues?.get(1)else null
+    val videoId=if(movie)Regex("""/(?:trailer/(\d+)\.html|videos/(\d+)/)""").find(URI(page).path)?.groupValues?.drop(1)?.firstOrNull { it.isNotBlank() }else null
     fun add(url:String,height:Int?=null) {
         if(!approvedHighlightVideo(url))return
         // Ignore related videos and advertising objects on the same page.

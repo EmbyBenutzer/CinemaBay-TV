@@ -30,8 +30,8 @@ data class CinemaBaySearchPage(
 )
 
 /**
- * One active, freshly authorized snapshot. Old on-disk rows are never served after a cold
- * start, account/profile/server transition, or access-policy change. No credential is stored.
+ * Persistent snapshot for the current server/account/profile. Identity and access changes
+ * purge it; normal process restarts preserve it. No credential is stored.
  */
 class CinemaBaySearchRepository(
     context: Context,
@@ -73,7 +73,7 @@ class CinemaBaySearchRepository(
     suspend fun close() {
         closed.set(true)
         scope.coroutineContext[Job]?.cancelAndJoin()
-        withContext(Dispatchers.IO) { mutex.withLock { index.clear(); index.close() } }
+        withContext(Dispatchers.IO) { mutex.withLock { index.close() } }
     }
 
     private suspend fun reset() {
@@ -89,18 +89,22 @@ class CinemaBaySearchRepository(
         if (auth.profileId.isNullOrBlank()) return null
         val revision = access.revision.value
         val key = MessageDigest.getInstance("SHA-256").digest(
-            listOf(auth.serverId, auth.serverUrl, auth.accountId, auth.profileId, auth.credentialEpoch.toString()).joinToString("\u0000").toByteArray(),
+            listOf(auth.serverId, auth.serverUrl, auth.accountId, auth.profileId, auth.credentialGenerationId.orEmpty(), auth.profileToken.orEmpty()).joinToString("\u0000").toByteArray(),
         ).joinToString("") { "%02x".format(it) }
         return mutex.withLock {
             if (auth.identityGeneration != identities.generation.value || revision != access.revision.value) return@withLock null
             val existing = owner
             if (existing != null && existing.key == key && existing.auth.isSameIdentityAs(auth) && existing.access == revision &&
-                (completedAt == 0L || android.os.SystemClock.elapsedRealtime() - completedAt < 300_000)) return@withLock existing
-            syncJob?.cancel(); index.clear(); remoteQueries.clear(); selectionCache.clear()
-            val captured = Owner(auth, revision, epoch.incrementAndGet(), key)
-            owner = captured; completedAt = 0
-            mutableState.value = CinemaBayIndexState(captured.epoch, syncing = true)
-            syncJob = scope.launch { synchronize(captured) }
+                (completedAt == 0L || System.currentTimeMillis() - completedAt in 0 until 21_600_000)) return@withLock existing
+            syncJob?.cancel(); remoteQueries.clear(); selectionCache.clear()
+            var saved = index.snapshot()
+            if (saved?.owner != key) { index.clear(); saved = null }
+            val reusable = saved?.complete == true
+            val fresh = reusable && System.currentTimeMillis() - saved!!.completedAt in 0 until 21_600_000
+            val captured = Owner(auth, revision, existing?.epoch?.takeIf { existing.key == key && existing.access == revision && existing.auth.isSameIdentityAs(auth) } ?: epoch.incrementAndGet(), key)
+            owner = captured; completedAt = if (fresh) saved!!.completedAt else 0
+            mutableState.value = CinemaBayIndexState(captured.epoch, count = index.count(), syncing = !fresh, complete = reusable)
+            if (!fresh) syncJob = scope.launch { synchronize(captured) }
             captured
         }
     }
@@ -122,6 +126,7 @@ class CinemaBaySearchRepository(
     private suspend fun synchronize(captured: Owner) {
         try {
             var capped = false
+            val seenIds = mutableSetOf<String>()
             for (type in listOf("movie", "series")) {
                 var cursor: CatalogContinuationV2? = null
                 var pages = 0
@@ -135,19 +140,24 @@ class CinemaBaySearchRepository(
                     }
                     ensureActiveOwner(captured)
                     store(captured, response.data.items)
+                    seenIds += response.data.items.filter { it.type in setOf("movie", "series") }.map { it.contentId }
                     val count = mutex.withLock { index.count() }
                     if (current(captured)) mutableState.update { if (it.epoch == captured.epoch) it.copy(count = count) else it }
                     cursor = response.data.continuation
                     pages++
-                    if (count >= 25_000 || pages >= 250) { capped = response.data.hasMore || type == "movie"; break }
+                    if (seenIds.size >= 25_000 || pages >= 250) { capped = response.data.hasMore || type == "movie"; break }
                     if (!response.data.hasMore || response.data.items.isEmpty()) break
                     delay(75) // Low priority; do not flood older boxes or the server.
                 } while (cursor != null)
                 if (capped) break
             }
             if (current(captured)) {
-                mutex.withLock { completedAt = android.os.SystemClock.elapsedRealtime() }
-                mutableState.update { if (it.epoch == captured.epoch) it.copy(syncing = false, complete = !capped, notice = if (capped) "Lokaler Katalog auf 25.000 Titel begrenzt; Onlinesuche ergänzt." else null) else it }
+                mutex.withLock {
+                    if (!currentFast(captured)) return
+                    completedAt = System.currentTimeMillis()
+                    index.finishSnapshot(captured.key, seenIds, completedAt, !capped)
+                }
+                mutableState.update { if (it.epoch == captured.epoch) it.copy(count = seenIds.size, syncing = false, complete = !capped, notice = if (capped) "Lokaler Katalog auf 25.000 Titel begrenzt; Onlinesuche ergänzt." else null) else it }
             }
         } catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) {

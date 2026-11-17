@@ -72,6 +72,7 @@ fun SiloTvTheme(
     content: @Composable () -> Unit,
 ) {
     val cardTrailers = rememberCinemaBayCardTrailers()
+    val ratings = org.siloserver.silo.tv.rememberCinemaBayRatings()
     val lightMode = rememberCinemaBayLightMode()
     val deviceDensity = LocalDensity.current
     // Skyline geometry tokens are already mapped from the 1920x1080 tvOS
@@ -89,6 +90,7 @@ fun SiloTvTheme(
     ) {
         CompositionLocalProvider(
             LocalDensity provides tvDensity,
+            org.siloserver.silo.tv.LocalCinemaBayRatings provides ratings,
             LocalCinemaBayLightMode provides lightMode,
             LocalCinemaBayCardTrailers provides cardTrailers,
             LocalDefaultArtworkMarkMaxSize provides TvDefaultArtworkMarkMaxSize,

@@ -575,7 +575,11 @@ fun TvMainShell(
         restoreContentAfterDetail = true
         detailReturnRoot = TvMainRoute.Home.route
         suppressFeedRefreshAfterDetail = true
-        onOpenSectionBrowse(section.id, context.sectionTitle(section), null, null)
+        val libraryId = section.titleArgs?.get("cinemabay_library_id")?.toIntOrNull()?.takeIf { section.id.startsWith("cinemabay-library:") && it > 0 }
+        val sourceId = if (libraryId != null) section.titleArgs?.get("cinemabay_source_id") else null
+        val homeSource = if (section.id.startsWith("cinemabay-trend-series:")) section.titleArgs?.get("cinemabay_home_source_id") else null
+        val mediaScope = if (homeSource != null) "series" else null
+        if (libraryId == null || sourceId != null) onOpenSectionBrowse(sourceId ?: homeSource ?: section.id, context.sectionTitle(section), libraryId, mediaScope)
     }
     val openLibrarySection: (org.siloserver.silo.model.section.ResolvedSection, Int, String?) -> Unit =
         { section, libraryId, mediaScope ->
@@ -1592,8 +1596,12 @@ fun TvMainShell(
                 shellComposable(TvMainRoute.Calendar.route) {
                     CinemaBayHighlightsScreen(
                         onInitialContentFocus = {
-                            focusState.closeProfileMenuForContent()
-                            calendarFocusHandoffPending = false
+                            // Initial focus recovery during entry into the profile dropdown
+                            // must not close the dropdown before its first row can take focus.
+                            if (!focusState.profileMenuEntered) {
+                                focusState.closeProfileMenuForContent()
+                                calendarFocusHandoffPending = false
+                            }
                         },
                         onMoveUpToMenu = {
                             focusState.requestMenuFocus(
@@ -2104,7 +2112,10 @@ private fun TvProfileDropdown(
     val firstFocus = remember { FocusRequester() }
     LaunchedEffect(entersMenu, focusEntryToken) {
         if (entersMenu && focusEntryToken > 0) {
-            runCatching { firstFocus.requestFocus() }
+            repeat(6) {
+                androidx.compose.runtime.withFrameNanos { }
+                if (runCatching { firstFocus.requestFocus() }.getOrDefault(false)) return@LaunchedEffect
+            }
         }
     }
 

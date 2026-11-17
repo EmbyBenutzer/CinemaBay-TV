@@ -479,6 +479,21 @@ fun TvTopMenuBar(
             .onPreviewKeyEvent { event ->
                 val focus = focusedButton
                 when {
+                    event.key == Key.DirectionLeft || event.key == Key.DirectionRight -> {
+                        if (event.type == KeyEventType.KeyDown) {
+                            val buttons = listOf(TvTopMenuFocus.Search) + destinations.map(::focusForRoot) + TvTopMenuFocus.Profile
+                            val current = buttons.indexOf(focus)
+                            val step = if (event.key == Key.DirectionRight) 1 else -1
+                            val target = buttons.getOrNull(current + step).takeIf { current >= 0 }
+                            if (target != null) {
+                                // End the handoff before blur temporarily clears focusedButton.
+                                // Otherwise its single-anchor restriction can remove the destination.
+                                dwellSuppressedButton = null
+                                runCatching { requesterForFocus(target).requestFocus() }
+                            }
+                        }
+                        true
+                    }
                     event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown -> {
                         // On a library-type tab, d-pad-down opens that tab's cascade
                         // panel (and focuses into it) instead of diving to content.

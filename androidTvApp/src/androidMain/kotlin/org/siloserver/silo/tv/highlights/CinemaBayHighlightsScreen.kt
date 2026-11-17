@@ -18,7 +18,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextDecoration
@@ -51,7 +50,6 @@ internal fun CinemaBayHighlightsScreen(
     onContentUpFallbackChanged:((((Boolean)->Boolean)?)->Unit)?=null,
 ) {
     val context=LocalContext.current
-    val focusManager=LocalFocusManager.current
     val repository=remember{CinemaBayHighlightsRepository(context)}
     val today=remember{YearMonth.now(ZoneId.of("Europe/Berlin"))}
     var monthOffset by rememberSaveable{mutableIntStateOf(0)}
@@ -84,6 +82,7 @@ internal fun CinemaBayHighlightsScreen(
     val grid=rememberLazyGridState()
     val monthFocus=remember{List(4){FocusRequester()}}
     var focusedCardIndex by remember{mutableStateOf<Int?>(null)}
+    var focusedHeader by remember{mutableIntStateOf(-1)}
     var routingCardFocus by remember{mutableStateOf(false)}
     var navigationJob by remember{mutableStateOf<Job?>(null)}
     var navigationGeneration by remember{mutableIntStateOf(0)}
@@ -123,7 +122,7 @@ internal fun CinemaBayHighlightsScreen(
             genreIndexLoading=false
         }
     }
-    LaunchedEffect(focusRequest){withFrameNanos{};runCatching{filterFocus.requestFocus()}}
+    LaunchedEffect(focusRequest){if(focusRequest>0){withFrameNanos{};runCatching{filterFocus.requestFocus()}}}
     LaunchedEffect(restoreId,selected){
         if(selected==null)restoreId?.let{id->withFrameNanos{};runCatching{buttonFocus[id]?.requestFocus()};restoreId=null}
     }
@@ -157,7 +156,11 @@ internal fun CinemaBayHighlightsScreen(
         if(index!=null && index in items.indices) {
             moveCardFocus(index,-1)
             true
-        } else focusManager.moveFocus(FocusDirection.Up)
+        } else when(focusedHeader) {
+            0 -> { onMoveUpToMenu(); true }
+            1 -> { filterFocus.requestFocus(); true }
+            else -> false
+        }
     })
     DisposableEffect(onContentUpFallbackChanged) {
         val handler:(Boolean)->Boolean={repeat->routeUp(repeat)}
@@ -171,19 +174,19 @@ internal fun CinemaBayHighlightsScreen(
         Row(horizontalArrangement=Arrangement.spacedBy(10.dp)) {
             listOf("Alle","Filme","Serien").forEachIndexed{index,label->
                 Button(onClick={kind=index},modifier=(if(index==0)Modifier.focusRequester(filterFocus) else Modifier)
-                    .onFocusChanged{if(it.isFocused){onInitialContentFocus();showListStart()}}
+                    .onFocusChanged{if(it.isFocused){focusedHeader=0;onInitialContentFocus();showListStart()}}
                     .onPreviewKeyEvent{if(it.type==KeyEventType.KeyDown && it.key==Key.DirectionUp){onMoveUpToMenu();true}else false},
                     colors=ButtonDefaults.colors(containerColor=if(kind==index)Color(0xFF743040)else Color(0xFF222B3D))) {Text(label)}
             }
-            Button(onClick={genreDialog=true},enabled=result!=null && !genreIndexLoading,modifier=Modifier.focusRequester(genreFocus).onFocusChanged{if(it.isFocused)showListStart()}) {
+            Button(onClick={genreDialog=true},enabled=result!=null && !genreIndexLoading,modifier=Modifier.focusRequester(genreFocus).onFocusChanged{if(it.isFocused){focusedHeader=0;onInitialContentFocus();showListStart()}}) {
                 Text(if(genreIndexLoading)"Genres werden geladen …"else "Genre: ${genre.ifBlank{"Alle"}}",fontSize=13.sp)
             }
             Spacer(Modifier.weight(1f))
-            Button(onClick={refresh++},modifier=Modifier.onFocusChanged{if(it.isFocused)showListStart()}){Text("Aktualisieren")}
+            Button(onClick={refresh++},modifier=Modifier.onFocusChanged{if(it.isFocused){focusedHeader=0;onInitialContentFocus();showListStart()}}){Text("Aktualisieren")}
         }
         Row(Modifier.padding(vertical=8.dp),horizontalArrangement=Arrangement.spacedBy(10.dp)) {
             (0..3).forEach{offset->
-                Button(onClick={monthOffset=offset},modifier=Modifier.focusRequester(monthFocus[offset]).onFocusChanged{if(it.isFocused)showListStart()},colors=ButtonDefaults.colors(containerColor=if(monthOffset==offset)Color(0xFF743040)else Color(0xFF222B3D))) {
+                Button(onClick={monthOffset=offset},modifier=Modifier.focusRequester(monthFocus[offset]).onFocusChanged{if(it.isFocused){focusedHeader=1;onInitialContentFocus();showListStart()}},colors=ButtonDefaults.colors(containerColor=if(monthOffset==offset)Color(0xFF743040)else Color(0xFF222B3D))) {
                     Text(today.plusMonths(offset.toLong()).format(DateTimeFormatter.ofPattern("MMMM uuuu",Locale.GERMAN)),fontSize=13.sp)
                 }
             }
@@ -250,7 +253,8 @@ internal fun CinemaBayHighlightsScreen(
                                 modifier=Modifier.fillMaxWidth().padding(top=12.dp).focusRequester(requester)
                                     .onFocusChanged { focus ->
                                         cardFocused=focus.isFocused
-                                        if(focus.isFocused)focusedCardIndex=index
+                                        if(focus.isFocused){focusedHeader=-1;focusedCardIndex=index}
+                                        else if(focusedCardIndex==index)focusedCardIndex=null
                                     }
                                     .onPreviewKeyEvent { event ->
                                         if(event.key==Key.DirectionDown) {

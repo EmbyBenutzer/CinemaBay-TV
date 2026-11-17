@@ -1,5 +1,7 @@
 package org.siloserver.silo.tv.ui.components
 
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
@@ -63,12 +65,16 @@ fun TvReferenceShelfCard(
      * a new item closes the menu, whose actions belong to the old one.
      */
     contentKey: Any? = null,
+    seriesContentId: String? = null,
     onLongClick: (() -> Unit)? = null,
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
     val shape = RoundedCornerShape(12.dp)
     val focus = siloCardDefaults(shape = shape, focusedScale = 1f)
 
     var menuExpanded by remember(contentKey) { mutableStateOf(false) }
+    val trailer = rememberCinemaBayWideTrailer(mediaType, contentKey as? String, seriesContentId, isFocused && !menuExpanded && !hideArtwork)
 
     Box(
         modifier = modifier
@@ -76,7 +82,7 @@ fun TvReferenceShelfCard(
             .aspectRatio(16f / 9f),
     ) {
         Card(
-            onClick = onClick,
+            interactionSource = interactionSource,            onClick = onClick,
             onLongClick = onLongClick ?: if (actions.isEmpty) null else { { menuExpanded = true } },
             shape = CardDefaults.shape(shape = shape),
             scale = focus.scale,
@@ -179,6 +185,8 @@ fun TvReferenceShelfCard(
 
             }
         }
+
+        CinemaBayWideTrailerOverlay(trailer, imageUrl, Modifier.matchParentSize())
 
         TvMediaCardContextMenu(
             expanded = menuExpanded,

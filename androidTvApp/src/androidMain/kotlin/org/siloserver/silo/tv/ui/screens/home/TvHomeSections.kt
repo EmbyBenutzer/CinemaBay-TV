@@ -8,7 +8,13 @@ import org.siloserver.silo.tv.ui.util.visibleOnTv
 
 internal fun List<ResolvedSection>.normalizeTvHomeSections(): List<ResolvedSection> =
     visibleOnTv().flatMap { section ->
-        if (section.isTvProgressRow()) section.splitAudioProgress() else listOf(section)
+        val originals = if (section.isTvProgressRow()) section.splitAudioProgress() else listOf(section)
+        val seriesTrends = section.items.filter { it.type.equals("series", true) }
+        if (section.sectionType == "trending_discover" && seriesTrends.isNotEmpty()) originals + section.copy(
+            id = "cinemabay-trend-series:${section.id}", title = "Trendserien diese Woche", titleKey = null,
+            titleArgs = mapOf("cinemabay_home_source_id" to section.id, "cinemabay_media_scope" to "series"),
+            items = seriesTrends, totalCount = seriesTrends.size,
+        ) else originals
     }
 
 internal fun ResolvedSection.isTvAudioProgressSection(): Boolean =

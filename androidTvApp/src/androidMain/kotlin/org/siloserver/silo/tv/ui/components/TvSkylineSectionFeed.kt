@@ -193,7 +193,8 @@ fun TvSkylineSectionFeed(
         sections.filter { it.items.isNotEmpty() }
             .let { nonEmpty -> if (exploresRows) nonEmpty.map { it.cappedForRow() } else nonEmpty }
     }
-    fun ResolvedSection.showsExploreAll() = exploresRows && offersExploreAll
+    fun ResolvedSection.showsExploreAll() = exploresRows && offersExploreAll &&
+        (!id.startsWith("cinemabay-library:") || titleArgs?.get("cinemabay_source_id") != null)
     val diagnosticsSurface = when {
         surfaceKey == "home" -> DiagnosticsListSurface.TV_HOME
         surfaceKey == "for_you" -> DiagnosticsListSurface.TV_FOR_YOU

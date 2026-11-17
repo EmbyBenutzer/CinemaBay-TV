@@ -448,6 +448,7 @@ fun TvMediaRow(
                         userState = item.userState,
                         actions = itemActions,
                         contentKey = item.contentId,
+                        seriesContentId = cinemaBaySeriesBadgeId(item.type, item.contentId, item.seriesId),
                         onLongClick = itemLongClick,
                     )
                     TvRowCardLayout.Default -> when (style) {
@@ -469,6 +470,7 @@ fun TvMediaRow(
                             overlay = rowItem.overlay,
                             actions = itemActions,
                             contentKey = item.contentId,
+                            seriesContentId = cinemaBaySeriesBadgeId(item.type, item.contentId, item.seriesId),
                             onLongClick = itemLongClick,
                         )
                         TvRowStyle.Poster -> TvMediaCard(

@@ -11,23 +11,61 @@ import org.siloserver.silo.network.SiloJson
 
 /** Android's built-in FTS4: no bundled database engine, model, posters, or native ABI libraries. */
 internal class CinemaBaySearchIndex(context: Context) : SQLiteOpenHelper(
-    context, File(context.cacheDir, "cinemabay-search-1.db").absolutePath, null, 1,
+    context, File(context.noBackupFilesDir, "cinemabay-search-2.db").absolutePath, null, 2,
 ) {
     private var vocabulary = CinemaBayVocabulary()
     init { setWriteAheadLoggingEnabled(true) }
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE documents(id TEXT UNIQUE NOT NULL, title TEXT NOT NULL, type TEXT NOT NULL, year INTEGER, runtime INTEGER, rating REAL, language TEXT, genres TEXT, watched INTEGER, favorite INTEGER, watchlist INTEGER, uhd INTEGER, hdr INTEGER, age INTEGER, payload TEXT NOT NULL)")
+        db.execSQL("CREATE TABLE snapshot(slot INTEGER PRIMARY KEY, owner TEXT NOT NULL, completed_at INTEGER NOT NULL, complete INTEGER NOT NULL)")
         db.execSQL("CREATE INDEX search_type_year ON documents(type,year)")
         db.execSQL("CREATE INDEX search_rating ON documents(rating)")
         db.execSQL("CREATE VIRTUAL TABLE terms USING fts4(title,body,tokenize=unicode61)")
     }
+    override fun onOpen(db: SQLiteDatabase) {
+        super.onOpen(db)
+        reloadVocabulary(db)
+    }
+    private fun reloadVocabulary(db: SQLiteDatabase) {
+        vocabulary = CinemaBayVocabulary()
+        db.rawQuery("SELECT title FROM documents", null).use { c ->
+            while (c.moveToNext()) {
+                val title = c.getString(0)
+                CinemaBaySearchText.tokens(title).forEach(vocabulary::add)
+                vocabulary.add(title.replace(" ", ""))
+            }
+        }
+    }
+    data class Snapshot(val owner: String, val completedAt: Long, val complete: Boolean)
+    fun snapshot(): Snapshot? = readableDatabase.rawQuery("SELECT owner,completed_at,complete FROM snapshot LIMIT 1", null).use {
+        if (it.moveToFirst()) Snapshot(it.getString(0), it.getLong(1), it.getInt(2) == 1) else null
+    }
+    fun setSnapshot(owner: String, completedAt: Long, complete: Boolean) {
+        writableDatabase.execSQL("INSERT OR REPLACE INTO snapshot(slot,owner,completed_at,complete) VALUES(1,?,?,?)", arrayOf(owner, completedAt, if (complete) 1 else 0))
+    }
+    fun finishSnapshot(owner: String, ids: Set<String>, completedAt: Long, complete: Boolean) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.execSQL("CREATE TEMP TABLE IF NOT EXISTS current_ids(id TEXT PRIMARY KEY)")
+            db.execSQL("DELETE FROM current_ids")
+            db.compileStatement("INSERT OR IGNORE INTO current_ids VALUES(?)").use { stmt ->
+                ids.forEach { stmt.bindString(1, it); stmt.executeInsert() }
+            }
+            db.execSQL("DELETE FROM terms WHERE docid IN (SELECT rowid FROM documents WHERE id NOT IN (SELECT id FROM current_ids))")
+            db.execSQL("DELETE FROM documents WHERE id NOT IN (SELECT id FROM current_ids)")
+            setSnapshot(owner, completedAt, complete)
+            db.setTransactionSuccessful()
+        } finally { db.endTransaction() }
+        reloadVocabulary(db)
+    }
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("DROP TABLE IF EXISTS terms"); db.execSQL("DROP TABLE IF EXISTS documents"); onCreate(db)
+        db.execSQL("DROP TABLE IF EXISTS snapshot"); db.execSQL("DROP TABLE IF EXISTS terms"); db.execSQL("DROP TABLE IF EXISTS documents"); onCreate(db)
     }
     fun clear() {
         val db = writableDatabase
         db.beginTransaction()
-        try { db.delete("terms", null, null); db.delete("documents", null, null); db.setTransactionSuccessful() }
+        try { db.delete("terms", null, null); db.delete("documents", null, null); db.delete("snapshot", null, null); db.setTransactionSuccessful() }
         finally { db.endTransaction() }
         vocabulary = CinemaBayVocabulary()
     }

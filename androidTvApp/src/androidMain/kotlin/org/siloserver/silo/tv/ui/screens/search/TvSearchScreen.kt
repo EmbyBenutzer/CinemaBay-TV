@@ -241,6 +241,7 @@ fun TvSearchScreen(
     val setFocusedRegion: (TvSearchFocusRegion, Boolean) -> Unit = { region, focused ->
         if (focused) {
             focusedRegion = region
+            if (region == TvSearchFocusRegion.Field || region == TvSearchFocusRegion.Chips) scrollHeaderIntoView++
         } else if (focusedRegion == region) {
             focusedRegion = null
         }
@@ -693,7 +694,7 @@ fun TvSearchScreen(
             // one, else back on the filter chip rail. Without this Compose's
             // spatial focus search can prefer the wider search field above and
             // skip over the smaller chip row.
-            firstItemCardModifier = Modifier.focusProperties {
+            firstRowCardModifier = Modifier.focusProperties {
                 up = if (state.people.isNotEmpty()) firstPersonFocusRequester else firstFilterChipFocusRequester
             },
             header = {
@@ -723,10 +724,12 @@ fun TvSearchScreen(
                     firstContentFocusRequester = firstContentFocusRequester,
                     onSearchFieldFocusChanged = { focused ->
                         setFocusedRegion(TvSearchFocusRegion.Field, focused)
+                        if (focused) scrollHeaderIntoView++
                         onSearchFieldFocusChanged(focused)
                     },
                     onChipsFocusChanged = { focused ->
                         setFocusedRegion(TvSearchFocusRegion.Chips, focused)
+                        if (focused) scrollHeaderIntoView++
                     },
                     onQueryChanged = viewModel::onQueryChanged,
                     onClearQuery = {

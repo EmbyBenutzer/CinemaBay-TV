@@ -87,7 +87,8 @@ fun TvHomeScreen(
     val state by viewModel.uiState.collectAsState()
     val homeSectionPreferences: TvHomeSectionPreferences = koinInject()
     val homeSectionPreferenceState by homeSectionPreferences.state.collectAsState()
-    val normalizedSections = remember(state.sections) { state.sections.normalizeTvHomeSections() }
+    val libraryHome = org.siloserver.silo.tv.data.preferences.rememberCinemaBayLibraryHome(state.sections)
+    val normalizedSections = remember(state.sections, libraryHome.rows) { state.sections.normalizeTvHomeSections() + libraryHome.rows }
     val visibleSections = remember(normalizedSections, homeSectionPreferenceState.layout) {
         TvHomeSectionPreferences.arrange(
             sections = normalizedSections,
@@ -132,7 +133,7 @@ fun TvHomeScreen(
             onRetry = viewModel::loadSections,
             modifier = Modifier.background(MaterialTheme.colorScheme.background),
         )
-        shouldShowHomeEmptyState(state.isLoading, state.error, visibleSections.size) ->
+        shouldShowHomeEmptyState(state.isLoading, state.error, visibleSections.size).let { it && !libraryHome.loading } ->
             TvHomeEmptyState(
                 onRefresh = viewModel::loadSections,
                 onOpenSettings = onOpenSettings,
@@ -144,7 +145,7 @@ fun TvHomeScreen(
         else -> key(homeSectionPreferenceState.layoutRevision) {
             TvHomeContent(
                 sections = visibleSections,
-                sectionsFullyResolved = state.sectionsFullyResolved,
+                sectionsFullyResolved = state.sectionsFullyResolved && !libraryHome.loading,
                 onItemClick = onItemClick,
                 onItemDetailSelection = onItemDetailSelection,
                 onPlayItem = onPlayItem,
@@ -261,6 +262,29 @@ private fun TvHomeContent(
 ) {
     val resumeText = stringResource(CommonR.string.cardMenu_resume)
     val playText = stringResource(CommonR.string.cardMenu_play)
+    val homeCardActions: (ResolvedSection, SectionItem) -> TvMediaCardActions = { section, item ->
+            val isContinueWatching = section.isTvContinueWatchingRow()
+            val dismissal = if (section.isTvProgressRow()) HomeDismissal.of(item) else null
+            TvMediaCardActions(
+                onPlay = if (isContinueWatching) {
+                    {
+                        onPlayItem(
+                            item.contentId,
+                            item.type,
+                            item.positionSeconds,
+                        )
+                    }
+                } else {
+                    null
+                },
+                playLabel = if (item.positionSeconds != null) resumeText else playText,
+                onSetWatched = { watched -> onSetWatched(item.contentId, watched) },
+                onToggleFavorite = { fav -> onToggleFavorite(item.contentId, fav) },
+                onToggleWatchlist = { wl -> onToggleWatchlist(item.contentId, wl) },
+                onRemoveFromHome = dismissal?.let { { onRemoveFromHome(item) } },
+                removeFromHomeLabel = dismissal?.menuLabel.orEmpty(),
+            )
+        }
     TvSkylineSectionFeed(
         onMarqueeTranslated = onMarqueeTranslated,
         surfaceKey = "home",
@@ -311,29 +335,7 @@ private fun TvHomeContent(
                 null
             }
         },
-        cardActions = { section, item ->
-            val isContinueWatching = section.isTvContinueWatchingRow()
-            val dismissal = if (section.isTvProgressRow()) HomeDismissal.of(item) else null
-            TvMediaCardActions(
-                onPlay = if (isContinueWatching) {
-                    {
-                        onPlayItem(
-                            item.contentId,
-                            item.type,
-                            item.positionSeconds,
-                        )
-                    }
-                } else {
-                    null
-                },
-                playLabel = if (item.positionSeconds != null) resumeText else playText,
-                onSetWatched = { watched -> onSetWatched(item.contentId, watched) },
-                onToggleFavorite = { fav -> onToggleFavorite(item.contentId, fav) },
-                onToggleWatchlist = { wl -> onToggleWatchlist(item.contentId, wl) },
-                onRemoveFromHome = dismissal?.let { { onRemoveFromHome(item) } },
-                removeFromHomeLabel = dismissal?.menuLabel.orEmpty(),
-            )
-        },
+        cardActions = homeCardActions,
     )
 }
 

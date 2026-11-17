@@ -17,6 +17,22 @@ class CinemaBaySearchIndexTest {
         try { index.clear();block(index) } finally { index.clear();index.close() }
     }
     private fun film(id:String,title:String,year:Int=2020)=BrowseItem(id,"movie",title,year=year,genres=listOf("Thriller"),ratingImdb=8.0,runtime=100,originalLanguage="en",contentRating="FSK 12")
+    @Test fun snapshotAndFuzzyVocabularySurviveDatabaseReopen() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        CinemaBaySearchIndex(context).apply {
+            clear(); upsert(listOf(film("m", "Matrix")))
+            setSnapshot("profile-key", 1234L, true); close()
+        }
+        val reopened = CinemaBaySearchIndex(context)
+        try {
+            assertEquals(CinemaBaySearchIndex.Snapshot("profile-key", 1234L, true), reopened.snapshot())
+            assertEquals(listOf("m"), reopened.search(CinemaBaySearchIntent("Matirx"), null).items.map { it.contentId })
+            reopened.upsert(listOf(film("new", "New Movie")))
+            reopened.finishSnapshot("profile-key", setOf("new"), 2345L, true)
+            assertEquals(1, reopened.count())
+            assertTrue(reopened.search(CinemaBaySearchIntent("Matrix"), null).items.isEmpty())
+        } finally { reopened.clear(); reopened.close() }
+    }
     @Test fun actualSQLiteFtsHandlesMultiWordTyposAndLivePrefixes()=withIndex { index ->
         index.upsert(listOf(film("hp","Harry Potter"),film("m","Matrix"),film("x","Another Movie")))
         val diagnostic=index.readableDatabase.rawQuery("SELECT docid,title FROM terms",null).use { c -> buildList { while(c.moveToNext())add("${c.getLong(0)}:${c.getString(1)}") } }

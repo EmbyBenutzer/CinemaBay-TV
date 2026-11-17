@@ -78,20 +78,26 @@ import org.siloserver.silo.viewmodel.HomeViewModel
 @Composable
 internal fun TvHomeSectionsEditor(
     onDismiss: () -> Unit,
+    libraryOnly: Boolean? = null,
     viewModel: HomeViewModel = koinViewModel(),
     preferences: TvHomeSectionPreferences = koinInject(),
 ) {
     val homeState by viewModel.uiState.collectAsState()
     val preferenceState by preferences.state.collectAsState()
-    val sections = remember(homeState.sections) {
-        homeState.sections.normalizeTvHomeSections()
+    val libraries = org.siloserver.silo.tv.data.preferences.rememberCinemaBayLibraryHome(homeState.sections)
+    val sections = remember(homeState.sections, libraries.rows) {
+        homeState.sections.normalizeTvHomeSections() + libraries.rows
     }
-    val arrangedSections = remember(sections, preferenceState.layout) {
+    val allArrangedSections = remember(sections, preferenceState.layout) {
         TvHomeSectionPreferences.arrange(
             sections = sections,
             layout = preferenceState.layout,
             includingHidden = true,
+            includingEmpty = true,
         )
+    }
+    val arrangedSections = remember(allArrangedSections, libraryOnly) {
+        allArrangedSections.filter { libraryOnly == null || it.id.startsWith("cinemabay-library:") == libraryOnly }
     }
     val rowFocusRequesters = remember(sections.map { it.id }) {
         sections.associate { section ->
@@ -123,7 +129,12 @@ internal fun TvHomeSectionsEditor(
         ids[target] = section.id
 
         scope.launch {
-            preferences.setOrder(ids)
+            val fullIds = allArrangedSections.map { it.id }.toMutableList()
+            val from = fullIds.indexOf(section.id)
+            val to = fullIds.indexOf(ids[index])
+            if (from < 0 || to < 0) return@launch
+            fullIds[from] = fullIds[to]; fullIds[to] = section.id
+            preferences.setOrder(fullIds)
             val requesters = rowFocusRequesters[section.id] ?: return@launch
             val (requester, direction) = when (target) {
                 0 -> requesters.moveDown to 1
@@ -185,7 +196,7 @@ internal fun TvHomeSectionsEditor(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Text(
-                    text = stringResource(CommonR.string.settings_homeSections_title),
+                    text = when (libraryOnly) { true -> "Bibliotheken auf der Startseite"; false -> "Trends und Anbieterreihen"; null -> "Reihenfolge der Startseite" },
                     style = MaterialTheme.typography.displaySmall.copy(
                         fontSize = 22.sp,
                         lineHeight = 26.sp,
@@ -269,7 +280,7 @@ internal fun TvHomeSectionsEditor(
                             verticalArrangement = Arrangement.spacedBy(5.dp),
                         ) {
                             items(arrangedSections, key = { it.id }) { section ->
-                                val visible = section.id !in preferenceState.layout.hiddenSectionIds
+                                val visible = if (org.siloserver.silo.tv.data.preferences.cinemaBayOptionalHomeRow(section.id)) section.id in preferenceState.layout.enabledOptionalSectionIds else section.id !in preferenceState.layout.hiddenSectionIds
                                 val index = arrangedSections.indexOfFirst { it.id == section.id }
                                 HomeSectionEditorRow(
                                     section = section,
@@ -388,7 +399,7 @@ private fun HomeSectionEditorRow(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    text = pluralStringResource(CommonR.plurals.rowPage_item, section.items.size, section.items.size),
+                    text = if (section.id.startsWith("cinemabay-library:")) "Bibliothek · neueste Inhalte" else pluralStringResource(CommonR.plurals.rowPage_item, section.items.size, section.items.size),
                     style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 18.sp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

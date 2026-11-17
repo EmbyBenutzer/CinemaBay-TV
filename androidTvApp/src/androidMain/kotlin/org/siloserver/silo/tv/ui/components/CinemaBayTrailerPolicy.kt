@@ -14,3 +14,11 @@ internal fun cinemaBayGermanTrailer(videos: List<ItemVideo>?): String? = videos.
     }
     .sortedByDescending { it.isOfficial }
     .firstOrNull()?.siteKey
+
+/** Episode shelves preview the parent series, not an unrelated episode metadata record. */
+internal fun cinemaBayTrailerContentId(type: String?, contentId: String?, seriesId: String?): String? =
+    when (type?.lowercase()) {
+        "movie", "series" -> contentId?.takeIf { it.isNotBlank() }
+        "episode" -> seriesId?.takeIf { it.isNotBlank() }
+        else -> null
+    }
